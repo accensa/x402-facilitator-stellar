@@ -11,7 +11,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "smoke": "node scripts/smoke.mjs"
+    "test": "node --test test/",
+    "test:watch": "node --test --watch test/",
+    "e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.2.0",
