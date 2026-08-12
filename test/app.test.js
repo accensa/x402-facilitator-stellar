@@ -296,7 +296,11 @@ describe('caller authentication', () => {
 
     test('both /verify and /settle are protected', async () => {
       for (const route of ['/verify', '/settle']) {
-        assert.equal((await app.post(route, VALID_BODY)).status, 401, `${route} must require a key`);
+        assert.equal(
+          (await app.post(route, VALID_BODY)).status,
+          401,
+          `${route} must require a key`,
+        );
       }
     });
   });

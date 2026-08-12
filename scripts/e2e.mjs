@@ -43,8 +43,8 @@ installRpcRetry({ log: msg => console.log(`    ${msg}`) });
 
 const NETWORK = 'stellar:testnet';
 const XLM_SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
-const MERCHANT = process.env.MERCHANT_ADDRESS
-  ?? 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6';
+const MERCHANT =
+  process.env.MERCHANT_ADDRESS ?? 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6';
 const FACILITATOR_URL = process.env.FACILITATOR_URL ?? 'http://localhost:3402';
 const RESOURCE_PORT = Number(process.env.RESOURCE_PORT ?? 3401);
 
@@ -155,11 +155,11 @@ try {
   console.log(`    status=${unpaid.status}`);
   if (unpaid.status !== 402) throw new Error(`expected 402, got ${unpaid.status}`);
 
-  const body = await unpaid.clone().json().catch(() => undefined);
-  const paymentRequired = http.getPaymentRequiredResponse(
-    name => unpaid.headers.get(name),
-    body,
-  );
+  const body = await unpaid
+    .clone()
+    .json()
+    .catch(() => undefined);
+  const paymentRequired = http.getPaymentRequiredResponse(name => unpaid.headers.get(name), body);
   const req0 = paymentRequired.accepts?.[0];
   console.log(`    asset=${req0?.asset}`);
   console.log(`    amount=${req0?.maxAmountRequired}  payTo=${req0?.payTo}`);

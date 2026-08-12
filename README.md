@@ -2,6 +2,7 @@
   <h1>x402-facilitator-stellar</h1>
   <p><strong>An x402 facilitator for Stellar — verify, settle, supported</strong></p>
   <p>
+    <img src="https://img.shields.io/github/actions/workflow/status/accensa/x402-facilitator-stellar/ci.yml?branch=main" alt="CI Status" />
     <img src="https://img.shields.io/badge/status-conformance%20spike-orange.svg" alt="Status: conformance spike" />
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License Apache 2.0" />
     <img src="https://img.shields.io/badge/stellar-testnet-success.svg" alt="Stellar testnet" />

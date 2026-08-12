@@ -1,0 +1,7 @@
+node_modules
+package-lock.json
+
+# Prose is hand-tuned — centred HTML, tables, mermaid blocks. Reflowing it
+# produces large diffs that hide the change being reviewed, and formatting
+# markdown is not what this check is for.
+*.md
