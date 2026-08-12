@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: x402 specification
+    url: https://github.com/x402-foundation/x402
+    about: Questions about the protocol itself, rather than this facilitator, belong upstream.

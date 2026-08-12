@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+
+# A second push to a PR cancels the first: the older run's result is about code
+# nobody will merge.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # ESLint 9 requires Node >= 22, so lint runs on 22 only. The test
+          # matrix below is what covers the >= 20 engines claim.
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx eslint .
+
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # --check, never --write. CI reports; it does not silently rewrite the
+      # code under review.
+      - run: npx prettier --check .
+
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json says engines >= 20. A claim nothing tests is a guess.
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # No network, no funded account, no .env. The end-to-end conformance run
+      # needs testnet and lives in its own workflow.
+      - run: npm test
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # This project commits to a permissive OSI licence with no AGPL in the
+      # dependency path. That commitment is enforced here rather than asserted
+      # in a README.
+      - run: node scripts/check-licenses.mjs --list
