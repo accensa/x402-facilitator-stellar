@@ -11,8 +11,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/",
-    "test:watch": "node --test --watch test/",
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js",
     "e2e": "node scripts/e2e.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
