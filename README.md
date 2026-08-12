@@ -138,6 +138,26 @@ curl -s localhost:3402/supported | jq
 }
 ```
 
+### Tests
+
+```bash
+npm test          # unit tests — no network, no funded account, no .env
+npm run test:watch
+```
+
+The unit suite covers configuration resolution, the HTTP surface (status codes,
+reason codes, pass-through fidelity, caller auth) and the RPC retry wrapper. It
+stubs the facilitator throughout: `ExactStellarScheme` is upstream's and is not
+retested here.
+
+The end-to-end conformance run is separate, because it needs testnet and two
+funded accounts:
+
+```bash
+FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
+ALICE_SECRET=$(stellar keys show alice) npm run e2e
+```
+
 ### Configuration
 
 | Variable | Default | Notes |
