@@ -156,15 +156,19 @@ export function createApp(config, facilitator, rateLimiter, catalog) {
     requireApiKey(req, res, next);
   }
 
-  function handleRateLimit(res, checkResult) {
+  function setRateLimitHeaders(res, checkResult) {
     if (checkResult) {
       res.set('RateLimit-Limit', checkResult.limit);
       res.set('RateLimit-Remaining', checkResult.remaining);
       res.set('RateLimit-Reset', checkResult.resetAt);
-      if (!checkResult.allowed) {
-        res.set('Retry-After', Math.max(1, checkResult.resetAt - Math.floor(Date.now() / 1000)));
-        return res.status(429).json({ error: 'rate_limited', reason: checkResult.reason });
-      }
+    }
+  }
+
+  function sendRateLimitResponse(res, checkResult) {
+    setRateLimitHeaders(res, checkResult);
+    if (checkResult && !checkResult.allowed) {
+      res.set('Retry-After', Math.max(1, checkResult.resetAt - Math.floor(Date.now() / 1000)));
+      return res.status(429).json({ error: 'rate_limited', reason: checkResult.reason });
     }
   }
 
@@ -205,13 +209,13 @@ export function createApp(config, facilitator, rateLimiter, catalog) {
 
   app.post('/verify', requireApiKey, async (req, res) => {
     const check = rateLimiter.checkVerify(req);
-    if (!check.allowed) return handleRateLimit(res, check);
+    if (!check.allowed) return sendRateLimitResponse(res, check);
+    setRateLimitHeaders(res, check);
 
     const body = readPaymentBody(req, res);
     if (!body) return;
     try {
       rateLimiter.recordVerify(req);
-      handleRateLimit(res, check);
       const result = await facilitator.verify(body.paymentPayload, body.paymentRequirements);
       if (result.isValid) {
         processCataloging(req, body, res, 'payment');
@@ -237,14 +241,14 @@ export function createApp(config, facilitator, rateLimiter, catalog) {
 
   app.post('/settle', requireApiKey, async (req, res) => {
     const check = rateLimiter.checkSettle(req);
-    if (!check.allowed) return handleRateLimit(res, check);
+    if (!check.allowed) return sendRateLimitResponse(res, check);
+    setRateLimitHeaders(res, check);
 
     const body = readPaymentBody(req, res);
     if (!body) return;
     try {
       const result = await facilitator.settle(body.paymentPayload, body.paymentRequirements);
       rateLimiter.recordSettle(req, result.success ? result.transactionFeeStroops || 0 : 0);
-      handleRateLimit(res, check);
       if (result.success) {
         processCataloging(req, body, res, 'payment');
       }
@@ -273,7 +277,8 @@ export function createApp(config, facilitator, rateLimiter, catalog) {
     if (!body) return;
 
     const check = rateLimiter.checkCatalog(req);
-    if (!check.allowed) return handleRateLimit(res, check);
+    if (!check.allowed) return sendRateLimitResponse(res, check);
+    setRateLimitHeaders(res, check);
 
     const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
     if (validation.hardDrop) {
