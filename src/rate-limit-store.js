@@ -158,7 +158,7 @@ export class PostgresStore {
  * error and the caller should refuse to start rather than silently shard the
  * counters per process again.
  */
-export function createRateLimitStore(env = process.env) {
+export function createRateLimitStore(env = process.env, { pool } = {}) {
   const kind = env.RATE_LIMIT_STORE || 'memory';
   if (kind === 'memory') return new MemoryStore();
   if (kind === 'postgres') {
@@ -168,7 +168,9 @@ export function createRateLimitStore(env = process.env) {
           'Refusing to fall back to per-process memory: that would silently double every limit at 2 replicas.',
       );
     }
-    return new PostgresStore({ connectionString: env.DATABASE_URL });
+    // pool is a shared (Vault-managed) pool when #127 is configured; absent
+    // means build one from the connection string as before.
+    return new PostgresStore({ connectionString: env.DATABASE_URL, pool });
   }
   throw new Error(`Unknown RATE_LIMIT_STORE '${kind}' (expected 'memory' or 'postgres').`);
 }

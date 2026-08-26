@@ -9,6 +9,16 @@ import crypto from 'node:crypto';
 export const TESTNET = 'stellar:testnet';
 export const PUBNET = 'stellar:pubnet';
 
+/** True when a postgres:// URL carries userinfo — forbidden in Vault mode (#127). */
+function vaultUrlHasUserinfo(url) {
+  try {
+    const parsed = new URL(url);
+    return Boolean(parsed.username) || Boolean(parsed.password);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Networks this instance serves.
  *
@@ -215,6 +225,53 @@ export function resolveConfig(env = process.env) {
      * set (the outbox table lives in Postgres).
      */
     outboxPollIntervalMs: Number(env.OUTBOX_POLL_INTERVAL_MS ?? 5_000),
+
+    /**
+     * HashiCorp Vault integration (#127): dynamically generated Postgres
+     * credentials instead of a long-lived password in DATABASE_URL.
+     *
+     * Configured by VAULT_ADDR. When set, DATABASE_URL must carry host and
+     * database only (no userinfo) — the username/password come from the Vault
+     * database secrets engine at runtime, live in memory only, and are rotated
+     * as the lease expires. The AppRole role_id/secret_id below are the
+     * bootstrap credentials the orchestrator injects; the dynamically
+     * generated credentials never touch the environment or the logs.
+     */
+    vault: env.VAULT_ADDR
+      ? (() => {
+          const roleId = env.VAULT_APPROLE_ROLE_ID;
+          const secretId = env.VAULT_APPROLE_SECRET_ID;
+          if (!roleId || !secretId) {
+            throw new Error(
+              'VAULT_ADDR is set but VAULT_APPROLE_ROLE_ID and VAULT_APPROLE_SECRET_ID are not. ' +
+                'AppRole authentication requires both (generate a secret_id with ' +
+                '`vault write -f auth/approle/role/<role>/secret-id`).',
+            );
+          }
+          if (!env.DATABASE_URL) {
+            throw new Error(
+              'VAULT_ADDR is set but DATABASE_URL is not. Vault supplies the database ' +
+                'credentials; DATABASE_URL still declares host/port/database (without userinfo).',
+            );
+          }
+          if (vaultUrlHasUserinfo(env.DATABASE_URL)) {
+            throw new Error(
+              'DATABASE_URL must not embed credentials when VAULT_ADDR is set: ' +
+                'Vault is the source of database credentials and a hardcoded userinfo would ' +
+                'silently bypass it. Use postgres://host:port/database and let Vault supply user/password.',
+            );
+          }
+          return {
+            address: env.VAULT_ADDR,
+            namespace: env.VAULT_NAMESPACE || undefined,
+            roleId,
+            secretId,
+            dbMount: env.VAULT_DB_MOUNT ?? 'database',
+            dbRole: env.VAULT_DB_ROLE ?? 'facilitator',
+            pollIntervalMs: Number(env.VAULT_POLL_INTERVAL_MS ?? 10_000),
+          };
+        })()
+      : null,
 
     /**
      * Redlock nodes (#116): comma-separated independent Redis masters. Quorum

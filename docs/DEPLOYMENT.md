@@ -75,7 +75,11 @@ keeps open-mode callers out of each other's buckets.
 | `FACILITATOR_SECRET_PUBNET`| Yes (if pubnet) | `S…` secret for the pubnet signer. |
 | `TRUST_PROXY` | No | Express trust proxy setting: hop count or proxy list (see topology above). Never `true`. |
 | `REDIS_URL` | No | Shared rate-limit buckets across instances, e.g. `redis://redis:6379`. Unset = in-memory (or `RATE_LIMIT_STORE`). Takes precedence over `RATE_LIMIT_STORE`. |
-| `DATABASE_URL` | No | Connection string for PostgreSQL (e.g., `postgres://user:pass@host:5432/db`). Enables persistent idempotency keys; required when `RATE_LIMIT_STORE=postgres`; unset otherwise = in-memory. |
+| `DATABASE_URL` | No | Connection string for PostgreSQL (e.g., `postgres://user:pass@host:5432/db`). Enables persistent idempotency keys; required when `RATE_LIMIT_STORE=postgres`; unset otherwise = in-memory. With `VAULT_ADDR` set, must carry host/port/database **only** (no userinfo) — Vault supplies the credentials. |
+| `VAULT_ADDR` | No | Enable HashiCorp Vault integration: Postgres credentials are fetched dynamically from Vault's database secrets engine instead of a long-lived password in `DATABASE_URL`. See below. |
+| `VAULT_APPROLE_ROLE_ID` / `VAULT_APPROLE_SECRET_ID` | If `VAULT_ADDR` | The AppRole machine identity used to authenticate. The generated database credentials are short-lived and never appear in the environment or the logs. |
+| `VAULT_DB_MOUNT` / `VAULT_DB_ROLE` | No | Database secrets engine mount (default `database`) and role (default `facilitator`) to read `creds` from. |
+| `VAULT_POLL_INTERVAL_MS` | No | How often the lease-refresh loop checks whether credentials need rotating (default `10000`). |
 | `RATE_LIMIT_STORE` | No | `memory` (default) or `postgres`. Postgres-backed shared rate-limit state across replicas — see below. Ignored when `REDIS_URL` is set. |
 | `RPC_BREAKER_THRESHOLD` | No | Consecutive connection failures that open the RPC circuit breaker (default `10`). |
 | `RPC_BREAKER_COOLDOWN_MS` | No | How long an open breaker waits before a half-open probe (default `30000`). |
@@ -125,6 +129,32 @@ during an outage.
   (`READINESS_CACHE_TTL_MS`) and each check runs under its own timeout
   (`READINESS_TIMEOUT_MS`), independent of the ~12s retry budget in the payment
   path. Point load-balancer **traffic gating** here.
+
+## Vault Integration (Dynamic Database Credentials)
+
+For deployments that cannot keep a long-lived database password in
+`DATABASE_URL`, the facilitator can source credentials from HashiCorp Vault:
+
+- **AppRole authentication** — the process logs in with
+  `VAULT_APPROLE_ROLE_ID`/`VAULT_APPROLE_SECRET_ID` and gets a short-lived
+  client token, re-authenticated before the token lease lapses.
+- **Dynamic credentials** — database credentials are read from
+  `VAULT_DB_MOUNT/creds/VAULT_DB_ROLE` (the database secrets engine). The
+  username/password pair lives in memory only: it is never logged, never
+  written to the environment, and never part of any diagnostic output.
+- **Lease rotation** — a background loop refreshes the credentials as the
+  lease approaches expiry (30% of the lease, bounded), and the Postgres pool
+  starts using them for new connections immediately; existing connections are
+  unaffected.
+- **Graceful outage handling** — while a cached lease is still valid, a Vault
+  outage is logged and the cached credentials keep working. Only a boot-time
+  failure with no cached lease degrades further: the service starts without a
+  database-backed pool and each store follows its documented degrade path
+  (in-memory, or fail-closed for the shared rate limiter).
+
+When Vault is enabled, `DATABASE_URL` must not embed credentials — a URL with
+userinfo is refused at boot, because silently falling back to a static
+password would defeat the entire point.
 
 ## Audit Log
 
