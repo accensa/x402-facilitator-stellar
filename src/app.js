@@ -901,7 +901,15 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
     },
     async (req, reply) => {
       const { idempotencyKey } = req.params;
-      const record = await settlementStore.get(idempotencyKey);
+      // Read-after-write consistency (#121): this is the status read that
+      // follows a fresh settle. `getConsistent` serves this process's own
+      // writes from memory and tolerates replication lag against the replica
+      // before confirming a miss on the primary, so "settle then immediately
+      // GET" never returns a transient 404.
+      const record =
+        typeof settlementStore.getConsistent === 'function'
+          ? await settlementStore.getConsistent(idempotencyKey)
+          : await settlementStore.get(idempotencyKey);
       if (!record) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }

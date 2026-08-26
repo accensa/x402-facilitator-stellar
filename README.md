@@ -204,7 +204,10 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
   [#19](https://github.com/accensa/x402-facilitator-stellar/issues/19).
 - **No persistence by default.** The catalog has a PostgreSQL schema in `migrations/` and
   uses it when `DATABASE_URL` is set; the settlement path holds nothing durable, tracked
-  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10).
+  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10). When
+  `DATABASE_URL` is set you can also add `DATABASE_URL_REPLICA` to offload settlement
+  status reads and the reconciliation sweep onto a read replica (CQRS fallback to primary
+  on replication lag) — see `docs/DEPLOYMENT.md` (#121).
 - **`exact` only.** The `upto` scheme has no Stellar specification yet; design notes in
   [`accensa-contracts/docs/ADR-002`](https://github.com/accensa/accensa-contracts/blob/main/docs/ADR-002-upto-scheme.md).
 

@@ -123,7 +123,11 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
         : rateLimitStore instanceof MemoryStore
           ? 'in-memory rate limits'
           : `postgres rate limits (${rateLimitStore.constructor.name})`,
-      config.databaseUrl ? 'postgres idempotency' : 'in-memory idempotency',
+      config.databaseUrl
+        ? config.databaseReplicaUrl
+          ? `postgres CQRS (writes=primary, reads=replica, lag ${config.settlementReplicaLagMs}ms)`
+          : 'postgres idempotency'
+        : 'in-memory idempotency',
       distributedLock ? `redlock (${config.redisNodes.length} node(s))` : 'in-process locking',
       webhooks.kind === 'kafka'
         ? `kafka webhooks (${config.kafka.brokers.length} broker(s))`

@@ -8,6 +8,11 @@ import { PostgresSettlementStore } from './postgres.js';
  * Otherwise returns a `MemorySettlementStore` and logs loudly that settlements
  * are stored in-memory only and not durable across process restarts.
  *
+ * CQRS (#121): when `DATABASE_URL_REPLICA` is also set, the store splits read
+ * and write concerns — writes hit the primary, status reads and the
+ * reconciliation sweep hit the read replica, with `SETTLEMENT_REPLICA_LAG_MS`
+ * bounding the read-after-write staleness window.
+ *
  * @param {object} config - resolved config from resolveConfig()
  * @param {object} [options]
  * @param {Function} [options.log] - logging sink
@@ -15,7 +20,11 @@ import { PostgresSettlementStore } from './postgres.js';
  */
 export function buildSettlementStore(config, { log = msg => console.warn(msg) } = {}) {
   if (config?.databaseUrl) {
-    return new PostgresSettlementStore(config.databaseUrl, { warn: log });
+    return new PostgresSettlementStore(config.databaseUrl, {
+      replicaUrl: config?.databaseReplicaUrl || undefined,
+      replicaLagMs: config?.settlementReplicaLagMs,
+      warn: log,
+    });
   }
 
   log(

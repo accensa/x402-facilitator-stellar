@@ -1,19 +1,50 @@
 import { MemorySettlementStore } from './memory.js';
 
+/**
+ * Postgres-backed settlement store with CQRS read/write split (#121).
+ *
+ * Writes (`save`, `updateState`) always go to the primary pool.
+ * Reads (`get`, `listUnknown`) route to the read-replica pool when one is
+ * configured, keeping historical status queries off the primary event loop so
+ * settlement submissions never contend with scan traffic.
+ *
+ * Read-after-write consistency (#121): Postgres streaming replication is
+ * asynchronous, so a settlement written to the primary can be momentarily
+ * invisible to a replica. We never re-read the very row we just wrote from a
+ * replica: every handler that writes also caches the canonical record into the
+ * in-memory fallback (`super`), and a replica read that cannot yet see a row
+ * requests the caller retry for up to `replicaLagMs`, then re-checks the
+ * primary before declaring it missing. That bounds the staleness window to
+ * (at most) one network round-trip against the primary — the compound copy
+ * converges once replication drains.
+ */
 export class PostgresSettlementStore extends MemorySettlementStore {
   /**
-   * @param {string} databaseUrl - postgres connection string
+   * @param {string} databaseUrl - primary postgres connection string
    * @param {object} [options]
-   * @param {object} [options.pool] - injected pg Pool (for testing)
+   * @param {string} [options.replicaUrl] - read-replica postgres connection string (#121)
+   * @param {object} [options.pool] - injected primary pg Pool (for testing)
+   * @param {object} [options.replicaPool] - injected replica pg Pool (for testing)
+   * @param {number} [options.replicaLagMs] - max acceptable replica lag (ms) before
+   *   falling back to the primary for a missing row (#121)
    * @param {Function} [options.warn] - logger sink
    */
-  constructor(databaseUrl, { pool, warn = msg => console.warn(msg) } = {}) {
+  constructor(
+    databaseUrl,
+    { pool, replicaPool, replicaUrl, replicaLagMs = 1000, warn = msg => console.warn(msg) } = {},
+  ) {
     super();
     this.warn = warn;
-    this.pool = pool;
+    this.pool = pool; // primary (writes + fallback reads)
+    this.replicaPool = replicaPool; // read replica (reads)
+    this.replicaLagMs = replicaLagMs;
     this.degraded = false;
+    this._readyReplica = false;
 
-    if (!this.pool) {
+    if (this.pool) {
+      this.ready = this._ensureTable();
+      this._readyReplica = Promise.resolve();
+    } else {
       import('pg')
         .then(({ default: pg }) => {
           this.pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
@@ -23,9 +54,31 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         .catch(err =>
           this._degrade(`pg unavailable (${err.message}); using memory settlement store`),
         );
-    } else {
-      this.ready = this._ensureTable();
     }
+
+    // A replica is optional. When one is configured we lazy-init its pool and
+    // surface a `ready` promise the caller can await before routing reads.
+    if (replicaPool) {
+      this.replicaPool = replicaPool;
+      this._readyReplica = Promise.resolve();
+    } else if (replicaUrl) {
+      import('pg')
+        .then(({ default: pg }) => {
+          this.replicaPool = new pg.Pool({ connectionString: replicaUrl, max: 20 });
+          this.replicaPool.on('error', err =>
+            this.warn(`[SettlementStore] replica pool error: ${err.message}`),
+          );
+          this._readyReplica = Promise.resolve();
+        })
+        .catch(err => this.warn(`[SettlementStore] pg unavailable for replica (${err.message})`));
+    } else {
+      this._readyReplica = Promise.resolve();
+    }
+  }
+
+  /** True when reads should target the replica (a replica is wired up). */
+  get usesReplica() {
+    return Boolean(this.replicaPool) && !this.degraded;
   }
 
   _degrade(message) {
@@ -64,37 +117,80 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     }
   }
 
+  /** @returns {object} the live read pool (replica when CQRS is configured). */
+  _readPool() {
+    return this.usesReplica ? this.replicaPool : this.pool;
+  }
+
   async get(idempotencyKey) {
-    if (this.degraded || !this.pool) return super.get(idempotencyKey);
+    // The in-memory copy is kept in sync by every successful write (see the
+    // `super.*` calls below) and double-checks the very rows this process wrote.
+    // A replica read of our own just-submitted write could otherwise lag.
+    const local = await super.get(idempotencyKey);
+    if (local) return local;
+
+    if (this.degraded || !this.pool) return null;
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
-        'SELECT idempotency_key, network, scheme, payer, pay_to, asset, amount, state, tx_hash, error_reason, error_message, response, key_id, created_at, updated_at FROM settlements WHERE idempotency_key = $1',
-        [idempotencyKey],
-      );
-      if (rows.length === 0) return null;
-      const r = rows[0];
-      return {
-        idempotency_key: r.idempotency_key,
-        network: r.network,
-        scheme: r.scheme,
-        payer: r.payer,
-        pay_to: r.pay_to,
-        asset: r.asset,
-        amount: r.amount,
-        state: r.state,
-        tx_hash: r.tx_hash,
-        error_reason: r.error_reason,
-        error_message: r.error_message,
-        response: r.response,
-        key_id: r.key_id,
-        created_at: new Date(r.created_at).toISOString(),
-        updated_at: new Date(r.updated_at).toISOString(),
-      };
+      return await this._queryGet(this._readPool(), idempotencyKey);
     } catch (err) {
       this._degrade(`get failed: ${err.message}`);
       return super.get(idempotencyKey);
     }
+  }
+
+  /**
+   * Performs a single get against the given pool, returning the row or null.
+   */
+  async _queryGet(pool, idempotencyKey) {
+    const { rows } = await pool.query(
+      'SELECT idempotency_key, network, scheme, payer, pay_to, asset, amount, state, tx_hash, error_reason, error_message, response, key_id, created_at, updated_at FROM settlements WHERE idempotency_key = $1',
+      [idempotencyKey],
+    );
+    if (rows.length === 0) return null;
+    return this._toRecord(rows[0]);
+  }
+
+  /**
+   * Read with a replica-lag tolerance (#121): when a replica is configured,
+   * a row that the replica hasn't propagated yet is retried until `replicaLagMs`
+   * elapses, then checked against the primary so a genuine miss is still a miss
+   * and a recent write is surfaced. This is what makes "settle, then immediately
+   * GET" consistent despite asynchronous replication.
+   */
+  async _queryGetWithLag(idempotencyKey) {
+    if (!this.usesReplica) return this._queryGet(this.pool, idempotencyKey);
+
+    const started = Date.now();
+    for (;;) {
+      const row = await this._queryGet(this.replicaPool, idempotencyKey);
+      if (row) return row;
+      if (Date.now() - started >= this.replicaLagMs) break;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    // Replica still can't see it. Assume recent write / replication drain and
+    // confirm against the primary before returning a genuine miss.
+    return this._queryGet(this.pool, idempotencyKey);
+  }
+
+  _toRecord(r) {
+    return {
+      idempotency_key: r.idempotency_key,
+      network: r.network,
+      scheme: r.scheme,
+      payer: r.payer,
+      pay_to: r.pay_to,
+      asset: r.asset,
+      amount: r.amount,
+      state: r.state,
+      tx_hash: r.tx_hash,
+      error_reason: r.error_reason,
+      error_message: r.error_message,
+      response: r.response,
+      key_id: r.key_id,
+      created_at: new Date(r.created_at).toISOString(),
+      updated_at: new Date(r.updated_at).toISOString(),
+    };
   }
 
   async save(record) {
@@ -129,24 +225,7 @@ export class PostgresSettlementStore extends MemorySettlementStore {
           record.key_id ?? null,
         ],
       );
-      const r = rows[0];
-      const entry = {
-        idempotency_key: r.idempotency_key,
-        network: r.network,
-        scheme: r.scheme,
-        payer: r.payer,
-        pay_to: r.pay_to,
-        asset: r.asset,
-        amount: r.amount,
-        state: r.state,
-        tx_hash: r.tx_hash,
-        error_reason: r.error_reason,
-        error_message: r.error_message,
-        response: r.response,
-        key_id: r.key_id,
-        created_at: new Date(r.created_at).toISOString(),
-        updated_at: new Date(r.updated_at).toISOString(),
-      };
+      const entry = this._toRecord(rows[0]);
       await super.save(entry);
       return entry;
     } catch (err) {
@@ -179,23 +258,7 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         ],
       );
       if (rows.length === 0) return null;
-      const r = rows[0];
-      const entry = {
-        idempotency_key: r.idempotency_key,
-        network: r.network,
-        scheme: r.scheme,
-        payer: r.payer,
-        pay_to: r.pay_to,
-        asset: r.asset,
-        amount: r.amount,
-        state: r.state,
-        tx_hash: r.tx_hash,
-        error_reason: r.error_reason,
-        error_message: r.error_message,
-        key_id: r.key_id,
-        created_at: new Date(r.created_at).toISOString(),
-        updated_at: new Date(r.updated_at).toISOString(),
-      };
+      const entry = this._toRecord(rows[0]);
       await super.updateState(idempotencyKey, state, details);
       return entry;
     } catch (err) {
@@ -204,30 +267,41 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     }
   }
 
-  async listUnknown() {
-    if (this.degraded || !this.pool) return super.listUnknown();
+  /**
+   * Read-after-write-consistent GET (#121): the settlement-status route uses
+   * this instead of `get()` so a client can settle and immediately read back
+   * the recorded status even while the replica is draining. Local writes are
+   * served from memory; anything else tolerates replica lag up to
+   * `replicaLagMs` before confirming against the primary.
+   */
+  async getConsistent(idempotencyKey) {
+    const local = await super.get(idempotencyKey);
+    if (local) return local;
+    if (this.degraded || !this.pool) return null;
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
+      await this._readyReplica;
+      return await this._queryGetWithLag(idempotencyKey);
+    } catch (err) {
+      this._degrade(`getConsistent failed: ${err.message}`);
+      return super.get(idempotencyKey);
+    }
+  }
+
+  async listUnknown() {
+    // The reconciliation sweep is a read of historical state — route it to the
+    // replica too. Replayed writes are applied to the primary, so listing
+    // unknown records from a replica is safe: any row the replica sees is either
+    // already resolved on the primary or legitimately still unknown.
+    const pool = this._readPool();
+    if (this.degraded || !pool) return super.listUnknown();
+    try {
+      await this.ready;
+      const { rows } = await pool.query(
         'SELECT idempotency_key, network, scheme, payer, pay_to, asset, amount, state, tx_hash, error_reason, error_message, key_id, created_at, updated_at FROM settlements WHERE state = $1',
         ['unknown'],
       );
-      return rows.map(r => ({
-        idempotency_key: r.idempotency_key,
-        network: r.network,
-        scheme: r.scheme,
-        payer: r.payer,
-        pay_to: r.pay_to,
-        asset: r.asset,
-        amount: r.amount,
-        state: r.state,
-        tx_hash: r.tx_hash,
-        error_reason: r.error_reason,
-        error_message: r.error_message,
-        key_id: r.key_id,
-        created_at: new Date(r.created_at).toISOString(),
-        updated_at: new Date(r.updated_at).toISOString(),
-      }));
+      return rows.map(r => this._toRecord(r));
     } catch (err) {
       this._degrade(`listUnknown failed: ${err.message}`);
       return super.listUnknown();

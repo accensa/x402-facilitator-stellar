@@ -211,6 +211,22 @@ export function resolveConfig(env = process.env) {
     databaseUrl: env.DATABASE_URL || null,
 
     /**
+     * Read-replica connection string for CQRS (#121). When set alongside
+     * DATABASE_URL, settlement status reads (`GET /settlements/:key`) and the
+     * reconciliation sweep run against the replica while writes (save,
+     * updateState) stay on the primary. Unset = reads and writes share the
+     * primary (today's behaviour).
+     */
+    databaseReplicaUrl: env.DATABASE_URL_REPLICA || null,
+
+    /**
+     * Replication-lag tolerance for read-after-write consistency (#121), ms.
+     * How long a status read waits for the replica to propagate a just-written
+     * row before confirming the miss against the primary.
+     */
+    settlementReplicaLagMs: Number(env.SETTLEMENT_REPLICA_LAG_MS ?? 1000),
+
+    /**
      * Redlock nodes (#116): comma-separated independent Redis masters. Quorum
      * needs a majority, so three or more is the intended shape. Empty means
      * in-process locking only (single instance).

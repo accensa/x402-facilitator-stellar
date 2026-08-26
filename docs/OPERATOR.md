@@ -203,6 +203,11 @@ counters) or `RATE_LIMIT_STORE=postgres` with `DATABASE_URL` (fails closed with 
 `rate_limit_store_unavailable` — a limiter that cannot see its counters must not answer
 "allowed").
 
+**CQRS read replica (#121):** settlement status reads and the reconciliation sweep can be
+offloaded to a read replica with `DATABASE_URL_REPLICA` (plus a streaming replica),
+keeping historical queries off the primary that carries new settlement submissions. See
+[`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) for the read-after-write consistency behaviour.
+
 **What callers see:** `429` with a reason code and `RateLimit-Limit` /
 `RateLimit-Remaining` / `RateLimit-Reset` / `Retry-After` headers. `GET /usage` (API
 key required — the one route that refuses open mode) shows a caller their own meters.
