@@ -16,30 +16,55 @@ export const PUBNET = 'stellar:pubnet';
  * signer secret, because the failure mode of accidentally running a mainnet
  * facilitator with a testnet-shaped config is losing real money.
  */
-export function resolveConfig(env = process.env) {
-  const secret = env.FACILITATOR_SECRET;
-  if (!secret) {
+function parseSecrets(env, pluralKey, singularKey) {
+  const raw = env[pluralKey] ?? env[singularKey];
+  if (!raw) {
     throw new Error(
-      'FACILITATOR_SECRET is required (S... testnet secret key). ' +
+      `${singularKey} is unset (${pluralKey} or ${singularKey} is required). ` +
         'Generate one with: stellar keys generate facilitator --network testnet --fund',
     );
   }
-  if (!secret.startsWith('S')) {
-    throw new Error('FACILITATOR_SECRET must be a Stellar secret key (starts with S).');
+  const secrets = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (secrets.length === 0) {
+    throw new Error(`${pluralKey} or ${singularKey} cannot be empty.`);
   }
 
-  /**
-   * Per-network configuration.
-   *
-   * Signer, RPC endpoint and fee ceiling are all network-specific and are kept
-   * that way deliberately: sharing any of them is how a testnet key ends up
-   * submitting to pubnet, or how a pubnet scheme ends up simulating against a
-   * testnet endpoint.
-   */
+  const seen = new Set();
+  for (const s of secrets) {
+    if (!s.startsWith('S')) {
+      throw new Error(`Facilitator secret key must be a Stellar secret key (starts with S).`);
+    }
+    if (seen.has(s)) {
+      throw new Error(`Duplicate secret key found in ${pluralKey} or ${singularKey}.`);
+    }
+    seen.add(s);
+  }
+  return secrets;
+}
+
+function parseOptionalSecret(env, key) {
+  const raw = env[key]?.trim();
+  if (!raw) return null;
+  if (!raw.startsWith('S')) {
+    throw new Error(`${key} must be a valid Stellar secret key (starts with S).`);
+  }
+  return raw;
+}
+
+export function resolveConfig(env = process.env) {
+  const testnetSecrets = parseSecrets(env, 'FACILITATOR_SECRETS', 'FACILITATOR_SECRET');
+  const testnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET');
+
   const networks = [TESTNET];
   const perNetwork = {
     [TESTNET]: {
-      secret,
+      secrets: testnetSecrets,
+      secret: testnetSecrets[0],
+      feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
       maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS ?? 50_000),
     },
@@ -100,12 +125,12 @@ export function resolveConfig(env = process.env) {
   }
 
   if (env.ENABLE_PUBNET === 'true') {
-    if (!env.FACILITATOR_SECRET_PUBNET) {
-      throw new Error(
-        'ENABLE_PUBNET=true but FACILITATOR_SECRET_PUBNET is unset. ' +
-          'Refusing to serve pubnet with the testnet signer.',
-      );
-    }
+    const pubnetSecrets = parseSecrets(
+      env,
+      'FACILITATOR_SECRETS_PUBNET',
+      'FACILITATOR_SECRET_PUBNET',
+    );
+    const pubnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET_PUBNET');
     if (!env.STELLAR_RPC_URL_PUBNET) {
       throw new Error(
         'ENABLE_PUBNET=true but STELLAR_RPC_URL_PUBNET is unset. ' +
@@ -114,7 +139,9 @@ export function resolveConfig(env = process.env) {
     }
     networks.push(PUBNET);
     perNetwork[PUBNET] = {
-      secret: env.FACILITATOR_SECRET_PUBNET,
+      secrets: pubnetSecrets,
+      secret: pubnetSecrets[0],
+      feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
       maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS_PUBNET ?? 50_000),
     };
@@ -220,5 +247,7 @@ export function resolveConfig(env = process.env) {
     rateLimits,
     embeddingsUrl: env.EMBEDDINGS_URL || null,
     enableReranking: env.ENABLE_RERANKING === 'true',
+    shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),
+    requestTimeoutMs: Number(env.REQUEST_TIMEOUT_MS ?? 30_000),
   };
 }

@@ -102,6 +102,7 @@ file entirely: there, the environment comes from the orchestrator.
 cp .env.example .env   # then fill in FACILITATOR_SECRET
 npm start              # or: npm run dev (adds --watch)
 curl localhost:3402/healthz
+curl localhost:3402/readyz
 ```
 
 `FACILITATOR_SECRET` is a signing key. `.env` is gitignored — never commit it.
@@ -186,10 +187,6 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
 
 ## Known Gaps
 
-- **One signer.** `ExactStellarScheme` accepts an *array* of signers with a round-robin
-  `selectSigner`, plus an optional `feeBumpSigner` that decouples fee payment from
-  sequence-number management. That pair is how bursty agent traffic avoids sequence
-  contention. One signer is enough to prove conformance and not enough to serve load.
 - **Bazaar is built but unproven against a second implementation.** Discovery, search and
   automatic cataloging landed on 2026-08-12 and are documented in
   [`docs/BAZAAR.md`](docs/BAZAAR.md): a catalog datastore with migrations,

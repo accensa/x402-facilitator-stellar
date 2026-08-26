@@ -56,7 +56,7 @@ Cross-origin access is decided **per route class**, because the two classes carr
 | Route class | Routes | Default policy |
 | --- | --- | --- |
 | Public reads | `GET /supported`, `GET /discovery/resources`, `GET /discovery/search` (and `/healthz`) | Any origin. These are unauthenticated and carry no credential worth protecting — a browser-based agent or catalog explorer needs them. |
-| Authenticated | `POST /verify`, `POST /settle`, `GET /usage`, `POST /discovery/resources` | **No grant by default.** These routes carry an API key; a permissive policy would let any web page send a caller's key somewhere it should not go. |
+| Authenticated | `POST /verify`, `POST /settle`, `GET /usage`, `GET /settlements/:idempotencyKey`, `POST /discovery/resources` | **No grant by default.** These routes carry an API key; a permissive policy would let any web page send a caller's key somewhere it should not go. |
 
 Allowed origins for the authenticated class are configured via `CORS_ALLOWED_ORIGINS` as a comma-separated list:
 

@@ -23,6 +23,8 @@ Reasons are separated into **Local Transport Reasons** (emitted by this server) 
 | `internal_error` | An internal server error occurred. | ⚠️ Maybe | Backoff and retry |
 | `soroban_rpc_unreachable` | The Stellar RPC node is unreachable or the circuit breaker is open. | ✅ Yes | Exponential backoff and retry |
 | `lock_timeout` | Timed out acquiring the distributed lock for settlement. | ✅ Yes | Retry the `/settle` request |
+| `request_timeout` | The request timed out before completing. | ✅ Yes | Retry the request |
+| `submitted_outcome_unknown` | The settlement was submitted to the network, but timed out waiting for confirmation. | ⚠️ Maybe | Do NOT resubmit blindly; check transaction hash status on-chain |
 
 ## Upstream Scheme Reasons (`@x402/stellar`)
 

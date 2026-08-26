@@ -58,14 +58,21 @@ export function createReadinessChecker(
   const call = rpcCall ?? ((url, body) => defaultRpcCall(url, body, timeoutMs));
   const targets = config.networks.map(network => {
     const netConfig = config.perNetwork[network];
+    const secrets = netConfig.secrets ?? (netConfig.secret ? [netConfig.secret] : []);
+    const addresses = secrets.map(sec => Keypair.fromSecret(sec).publicKey());
+    const feeBumpAddress = netConfig.feeBumpSecret
+      ? Keypair.fromSecret(netConfig.feeBumpSecret).publicKey()
+      : null;
     return {
       network,
       rpcUrl: netConfig.rpcUrl ?? (network === TESTNET ? DEFAULT_TESTNET_RPC : undefined),
-      address: Keypair.fromSecret(netConfig.secret).publicKey(),
+      addresses,
+      feeBumpAddress,
     };
   });
 
   let cache = null;
+  let isShuttingDown = false;
 
   async function checkRpc(target) {
     const res = await call(target.rpcUrl, {
@@ -79,29 +86,57 @@ export function createReadinessChecker(
       : { ok: false, error: `rpc health '${status}' is not 'healthy'` };
   }
 
-  async function checkSigner(target) {
-    const accountId = Keypair.fromPublicKey(target.address).xdrAccountId();
-    const key = xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId }));
-    const res = await call(target.rpcUrl, {
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'getLedgerEntries',
-      params: { keys: [key.toXDR('base64')] },
-    });
-    const entries = res?.result?.entries ?? [];
-    if (entries.length === 0) {
-      return { ok: false, error: 'signer account does not exist (unfunded)' };
+  async function checkSignerAddress(rpcUrl, address) {
+    try {
+      const accountId = Keypair.fromPublicKey(address).xdrAccountId();
+      const key = xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId }));
+      const res = await call(rpcUrl, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'getLedgerEntries',
+        params: { keys: [key.toXDR('base64')] },
+      });
+      const entries = res?.result?.entries ?? [];
+      if (entries.length === 0) {
+        return { ok: false, address, error: `signer account ${address} does not exist (unfunded)` };
+      }
+      const entryData = xdr.LedgerEntryData.fromXDR(entries[0].val, 'base64');
+      const balance = Number(entryData.account().balance());
+      if (balance < minBalanceStroops) {
+        return {
+          ok: false,
+          address,
+          balance_stroops: balance,
+          error: `signer ${address} balance ${balance} is below floor ${minBalanceStroops}`,
+        };
+      }
+      return { ok: true, address, balance_stroops: balance };
+    } catch (err) {
+      return { ok: false, address, error: err.message };
     }
-    const entryData = xdr.LedgerEntryData.fromXDR(entries[0].val, 'base64');
-    const balance = Number(entryData.account().balance());
-    if (balance < minBalanceStroops) {
+  }
+
+  async function checkSigners(target) {
+    const results = [];
+    for (const addr of target.addresses) {
+      results.push(await checkSignerAddress(target.rpcUrl, addr));
+    }
+    if (target.feeBumpAddress) {
+      results.push(await checkSignerAddress(target.rpcUrl, target.feeBumpAddress));
+    }
+
+    const allOk = results.every(r => r.ok);
+    const firstBalance = results[0]?.balance_stroops;
+    if (!allOk) {
+      const failing = results.filter(r => !r.ok);
       return {
         ok: false,
-        balance_stroops: balance,
-        error: `signer balance ${balance} is below floor ${minBalanceStroops}`,
+        balance_stroops: firstBalance,
+        error: failing.map(f => f.error).join('; '),
+        signers: results,
       };
     }
-    return { ok: true, balance_stroops: balance };
+    return { ok: true, balance_stroops: firstBalance, signers: results };
   }
 
   async function checkNetwork(target) {
@@ -113,7 +148,7 @@ export function createReadinessChecker(
     }
     let signer;
     try {
-      signer = await checkSigner(target);
+      signer = await checkSigners(target);
     } catch (err) {
       signer = { ok: false, error: err.message };
     }
@@ -127,6 +162,14 @@ export function createReadinessChecker(
   }
 
   async function check() {
+    if (isShuttingDown) {
+      return {
+        ok: false,
+        status: 'shutting_down',
+        checked_at: new Date().toISOString(),
+        reason: 'shutdown_in_progress',
+      };
+    }
     const fresh = cache && Date.now() - cache.checked_at_ms < cacheTtlMs;
     if (fresh) return cache.snapshot;
 
@@ -168,7 +211,12 @@ export function createReadinessChecker(
     cache = null;
   }
 
-  return { check, invalidate };
+  function setShuttingDown() {
+    isShuttingDown = true;
+    cache = null;
+  }
+
+  return { check, invalidate, setShuttingDown };
 }
 
 /**

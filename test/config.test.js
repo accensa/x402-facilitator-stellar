@@ -38,7 +38,7 @@ test('resolveConfig: requires secret', () => {
 
 test('resolveConfig: pubnet requires its own secret', () => {
   const env = { FACILITATOR_SECRET: 'S123', ENABLE_PUBNET: 'true' };
-  assert.throws(() => resolveConfig(env), /FACILITATOR_SECRET_PUBNET is unset/);
+  assert.throws(() => resolveConfig(env), /FACILITATOR_SECRET_PUBNET is required/);
 });
 
 test('resolveConfig: pubnet requires its own RPC URL', () => {

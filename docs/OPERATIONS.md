@@ -104,3 +104,50 @@ Example Response:
 ## Open Mode Limits
 
 If `FACILITATOR_API_KEYS` is omitted, the service runs in open mode. In this mode, limits from `RATE_LIMIT_GLOBAL` are enforced per source IP address rather than per API key. This prevents a single abusive client from draining a testnet faucet while still keeping onboarding frictionless.
+
+## Multi-Signer Pool Management (#9)
+
+Agent payment traffic is naturally bursty. When multiple settlement requests arrive concurrently, submitting them using a single Stellar account causes sequence-number contention and transaction serialization. To achieve higher throughput, configure a multi-signer pool.
+
+### Sizing the Pool
+
+Calculate the required pool size using expected throughput and observed settlement latency:
+
+$$ \text{Pool Size} = \lceil \text{Expected Settlements/sec} \times \text{Average Settlement Latency (sec)} \rceil $$
+
+For example, if you target **20 settlements/sec** and average on-chain settlement latency is **5 seconds**, you require a pool of at least **100 signers** ($20 \times 5 = 100$).
+
+### Configuration
+
+Configure a comma-separated list of Stellar secret keys in `FACILITATOR_SECRETS` (for testnet) or `FACILITATOR_SECRETS_PUBNET` (for pubnet):
+
+```env
+FACILITATOR_SECRETS=S1...,S2...,S3...
+```
+
+For backward compatibility, single-signer deployments using `FACILITATOR_SECRET` remain supported.
+
+### Fee-Bump Signer & Operational Tradeoffs
+
+You can optionally configure `FEE_BUMP_SECRET` (or `FEE_BUMP_SECRET_PUBNET`). When configured, settlements are wrapped in a fee-bump transaction sponsored by the fee-bump account.
+
+**Operational Tradeoff:**
+- **Pros:** Decouples fee payment from sequence-number management across pool signers. Only the fee-bump account needs to hold XLM for transaction fees, simplifying funding and monitoring.
+- **Cons:** Concentrates fee payment on a single account, making that fee-bump account a single point of failure if its XLM balance is depleted.
+
+### Signer Funding
+
+Every account in the pool (and the optional fee-bump account) must exist on-chain and be funded above `READINESS_FUNDING_FLOOR_STROOPS`. `GET /readyz` checks funding for all pool signers and reports 503 if any signer is underfunded.
+
+### Stuck-Signer Detection & Observability
+
+`x402-facilitator-stellar` exposes Prometheus metrics at `GET /metrics`:
+- `x402_signer_selected_total{network="...", signer="..."}`: Counter tracking how many times each signer has been selected.
+- `x402_signer_inflight{network="...", signer="..."}`: Gauge tracking active in-flight settlements per signer.
+
+**Detecting Stuck Signers:**
+If a specific signer's `x402_signer_selected_total` counter stops incrementing while other signers continue to advance, or if `x402_signer_inflight` remains non-zero for longer than maximum settlement latency, that signer's account sequence number may be stuck or desynchronized on the RPC node.
+
+### Adding Signers
+
+To add a new signer to the pool, generate and fund a new Stellar account, append its secret key to `FACILITATOR_SECRETS`, and restart the facilitator process. Boot validation ensures that malformed or duplicate secret keys are rejected before accepting traffic.
