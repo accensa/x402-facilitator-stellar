@@ -74,13 +74,13 @@ export async function reconcileUnknownSettlements(store, config = {}, { rpcCall 
  * Starts periodic background reconciliation loop.
  */
 export function startReconciliationLoop(store, config, { intervalMs = 30_000, rpcCall } = {}) {
-  const timer = setInterval(() => {
+  const timer = globalThis.setInterval(() => {
     reconcileUnknownSettlements(store, config, { rpcCall }).catch(err => {
       console.warn(`[Reconciliation] Loop error: ${err.message}`);
     });
   }, intervalMs);
 
   return {
-    stop: () => clearInterval(timer),
+    stop: () => globalThis.clearInterval(timer),
   };
 }

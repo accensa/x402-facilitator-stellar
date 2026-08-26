@@ -48,7 +48,7 @@ class SignerMetrics {
    * @returns {string}
    */
   toPrometheusText() {
-    let lines = [];
+    const lines = [];
     lines.push('# HELP x402_signer_selected_total Total times a signer was selected by network.');
     lines.push('# TYPE x402_signer_selected_total counter');
     for (const [key, count] of this.selectedTotal.entries()) {

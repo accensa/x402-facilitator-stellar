@@ -12,7 +12,7 @@ function assertValidReason(reason) {
   assert.ok(reason, 'Reason must not be null or undefined');
   assert.ok(
     ALL_VALID_REASONS.has(reason),
-    `Emitted reason "${reason}" is not a member of the exported enums in src/reasons.js`
+    `Emitted reason "${reason}" is not a member of the exported enums in src/reasons.js`,
   );
 }
 
@@ -86,8 +86,8 @@ describe('Exhaustive Rejection Reason Taxonomy', () => {
       facilitator: stubFacilitator({
         verify: async () => {
           throw new Error('Some internal explosion');
-        }
-      })
+        },
+      }),
     });
     try {
       const res = await errorApp.post('/verify', VALID_BODY);
@@ -106,8 +106,8 @@ describe('Exhaustive Rejection Reason Taxonomy', () => {
           const err = new Error('breaker');
           err.code = 'RPC_BREAKER_OPEN';
           throw err;
-        }
-      })
+        },
+      }),
     });
     try {
       const res = await rpcErrorApp.post('/verify', VALID_BODY);
@@ -122,15 +122,15 @@ describe('Exhaustive Rejection Reason Taxonomy', () => {
   test('Lock Timeout', async () => {
     const lockError = new Error('Timeout');
     lockError.name = 'LockAcquireTimeoutError';
-    
+
     // Lock logic is inside settle
     const lockApp = await serve({
       distributedLock: {
         withLock: async () => {
           throw lockError;
         },
-        quit: async () => {}
-      }
+        quit: async () => {},
+      },
     });
     try {
       const res = await lockApp.post('/settle', VALID_BODY);

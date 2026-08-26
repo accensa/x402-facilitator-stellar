@@ -99,7 +99,11 @@ const PAYMENT_BODY_SCHEMA = {
  * @returns {import('fastify').FastifyInstance}
  */
 export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
-  const { distributedLock = null, webhooks = null, settlementStore = extras.settlementStore ?? buildSettlementStore(config) } = extras;
+  const {
+    distributedLock = null,
+    webhooks = null,
+    settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+  } = extras;
   const app = Fastify({
     // Client IP resolution. Unset leaves Fastify's default (off), correct where
     // the port is published directly — local development and docker-compose.
@@ -389,7 +393,9 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
     // The presented key material itself is deliberately never recorded.
     const reject = reason => {
       audit('auth_failure', { actor: `ip:${req.ip}`, reason });
-      reply.code(401).send({ isValid: false, invalidReason: reason, invalidMessage: 'unauthorized', reason });
+      reply
+        .code(401)
+        .send({ isValid: false, invalidReason: reason, invalidMessage: 'unauthorized', reason });
     };
 
     const authHeader = req.headers.authorization;
@@ -431,7 +437,11 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
    */
   async function requireApiKeyStrict(req, reply) {
     if (config.apiKeys.length === 0) {
-      reply.code(401).send({ isValid: false, invalidReason: 'open_mode_usage_forbidden', invalidMessage: 'unauthorized' });
+      reply.code(401).send({
+        isValid: false,
+        invalidReason: 'open_mode_usage_forbidden',
+        invalidMessage: 'unauthorized',
+      });
       return;
     }
     return requireApiKey(req, reply);
@@ -631,7 +641,11 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           invalidReason = 'soroban_rpc_unreachable';
         }
         if (invalidReason !== 'facilitator_error') {
-          audit('rpc_unreachable', { actor: req.keyId ?? `ip:${req.ip}`, op: 'verify', reason: invalidReason });
+          audit('rpc_unreachable', {
+            actor: req.keyId ?? `ip:${req.ip}`,
+            op: 'verify',
+            reason: invalidReason,
+          });
         }
         return reply.send({
           isValid: false,
@@ -682,13 +696,20 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           return reply.send({
             success: false,
             errorReason: 'submitted_outcome_unknown',
-            errorMessage: existingRecord.error_message || 'settlement in progress or outcome unknown',
+            errorMessage:
+              existingRecord.error_message || 'settlement in progress or outcome unknown',
             transaction: existingRecord.tx_hash || '',
             network: existingRecord.network,
           });
         }
         if (existingRecord.state === 'failed') {
-          const RETRYABLE = new Set(['rate_limited', 'catalog_rate_limited', 'soroban_rpc_unreachable', 'lock_timeout', 'request_timeout']);
+          const RETRYABLE = new Set([
+            'rate_limited',
+            'catalog_rate_limited',
+            'soroban_rpc_unreachable',
+            'lock_timeout',
+            'request_timeout',
+          ]);
           if (!RETRYABLE.has(existingRecord.error_reason)) {
             handleRateLimit(reply, check);
             if (existingRecord.response) {
@@ -843,7 +864,10 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         }
 
         let transaction = '';
-        if (body.paymentPayload?.transaction && typeof body.paymentPayload.transaction === 'string') {
+        if (
+          body.paymentPayload?.transaction &&
+          typeof body.paymentPayload.transaction === 'string'
+        ) {
           transaction = body.paymentPayload.transaction;
         }
 

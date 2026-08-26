@@ -20,7 +20,9 @@ export class PostgresSettlementStore extends MemorySettlementStore {
           this.pool.on('error', err => this._degrade(`Postgres error: ${err.message}`));
           this.ready = this._ensureTable();
         })
-        .catch(err => this._degrade(`pg unavailable (${err.message}); using memory settlement store`));
+        .catch(err =>
+          this._degrade(`pg unavailable (${err.message}); using memory settlement store`),
+        );
     } else {
       this.ready = this._ensureTable();
     }

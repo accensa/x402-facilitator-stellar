@@ -82,7 +82,10 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
     };
 
     const dummySecret = Keypair.random().secret();
-    const config = resolveConfig({ FACILITATOR_SECRET: dummySecret, FACILITATOR_API_KEYS: 'test-key:sec123' });
+    const config = resolveConfig({
+      FACILITATOR_SECRET: dummySecret,
+      FACILITATOR_API_KEYS: 'test-key:sec123',
+    });
     const mockRateLimiter = {
       checkSettle: async () => ({ allowed: true }),
       recordSettle: async () => {},
@@ -143,9 +146,16 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       key_id: 'callerA',
     });
 
-    const app = createApp(config, { getSupported: () => ({}) }, { checkSettle: async () => ({ allowed: true }) }, {}, null, {
-      settlementStore: store,
-    });
+    const app = createApp(
+      config,
+      { getSupported: () => ({}) },
+      { checkSettle: async () => ({ allowed: true }) },
+      {},
+      null,
+      {
+        settlementStore: store,
+      },
+    );
 
     try {
       // Caller A requests own settlement -> 200 OK

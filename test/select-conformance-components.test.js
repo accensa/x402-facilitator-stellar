@@ -15,7 +15,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT = fileURLToPath(new URL('../scripts/select-conformance-components.mjs', import.meta.url));
+const SCRIPT = fileURLToPath(
+  new URL('../scripts/select-conformance-components.mjs', import.meta.url),
+);
 
 /** Builds a throwaway e2e tree with the components named in `layout`. */
 function makeE2eDir(layout = {}) {

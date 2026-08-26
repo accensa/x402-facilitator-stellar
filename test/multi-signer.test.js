@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { Keypair } from '@stellar/stellar-sdk';
+import { Keypair, xdr } from '@stellar/stellar-sdk';
 import { resolveConfig } from '../src/config.js';
 import { buildFacilitator } from '../src/facilitator.js';
 import { createApp } from '../src/app.js';
@@ -108,15 +108,24 @@ describe('Multi-Signer Pool & Fee-Bump Signer (#9)', () => {
     const rpcStub = async (_url, body) => {
       if (body.method === 'getHealth') return { result: { status: 'healthy' } };
       if (body.method === 'getLedgerEntries') {
-        checkedAddresses.push(body.params.keys[0]);
-        // Mock entry with high balance (> minBalanceStroops 10000000)
+        const signerAddr = body.params.keys[0];
+        checkedAddresses.push(signerAddr);
+        const acct = new xdr.AccountEntry({
+          accountId: k1.xdrPublicKey(),
+          balance: new xdr.Int64(100_000_000),
+          seqNum: new xdr.SequenceNumber(new xdr.Int64(0)),
+          numSubEntries: 0,
+          inflationDest: null,
+          flags: 0,
+          homeDomain: '',
+          thresholds: Buffer.from([1, 0, 0, 0]),
+          signers: [],
+          ext: new xdr.AccountEntryExt(0),
+        });
+        const entry = xdr.LedgerEntryData.account(acct);
         return {
           result: {
-            entries: [
-              {
-                val: 'AAAAAgAAAAA1YTYAAAAA', // Valid entry
-              },
-            ],
+            entries: [{ val: entry.toXDR('base64') }],
           },
         };
       }
@@ -129,6 +138,7 @@ describe('Multi-Signer Pool & Fee-Bump Signer (#9)', () => {
     });
 
     const report = await checker.check();
+    assert.equal(report.ok, true);
     assert.equal(checkedAddresses.length, 2);
   });
 

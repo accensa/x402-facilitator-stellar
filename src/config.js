@@ -125,7 +125,11 @@ export function resolveConfig(env = process.env) {
   }
 
   if (env.ENABLE_PUBNET === 'true') {
-    const pubnetSecrets = parseSecrets(env, 'FACILITATOR_SECRETS_PUBNET', 'FACILITATOR_SECRET_PUBNET');
+    const pubnetSecrets = parseSecrets(
+      env,
+      'FACILITATOR_SECRETS_PUBNET',
+      'FACILITATOR_SECRET_PUBNET',
+    );
     const pubnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET_PUBNET');
     if (!env.STELLAR_RPC_URL_PUBNET) {
       throw new Error(
