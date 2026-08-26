@@ -158,7 +158,9 @@ async function shutdown(signal) {
   const timeoutPromise = new Promise(resolve => {
     forceExitTimer = setTimeout(() => {
       const inFlight = typeof app.getInFlightCount === 'function' ? app.getInFlightCount() : 0;
-      console.warn(`[Shutdown] Deadline of ${graceMs}ms reached; ${inFlight} request(s) still in flight.`);
+      console.warn(
+        `[Shutdown] Deadline of ${graceMs}ms reached; ${inFlight} request(s) still in flight.`,
+      );
       resolve('timeout');
     }, graceMs);
   });

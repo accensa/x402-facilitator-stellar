@@ -387,11 +387,16 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
     // The presented key material itself is deliberately never recorded.
     const reject = reason => {
       audit('auth_failure', { actor: `ip:${req.ip}`, reason });
-      reply.code(401).send({ isValid: false, invalidReason: reason, invalidMessage: 'unauthorized' });
+      reply
+        .code(401)
+        .send({ isValid: false, invalidReason: reason, invalidMessage: 'unauthorized', reason });
     };
 
     const authHeader = req.headers.authorization;
     if (!authHeader) return reject('missing_auth_header');
+    if (authHeader === 'Bearer' || authHeader === 'Bearer ') {
+      return reject('malformed_auth_header');
+    }
 
     let presentedKey = '';
     if (authHeader.startsWith('Bearer ')) {
@@ -428,7 +433,11 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
    */
   async function requireApiKeyStrict(req, reply) {
     if (config.apiKeys.length === 0) {
-      reply.code(401).send({ isValid: false, invalidReason: 'open_mode_usage_forbidden', invalidMessage: 'unauthorized' });
+      reply.code(401).send({
+        isValid: false,
+        invalidReason: 'open_mode_usage_forbidden',
+        invalidMessage: 'unauthorized',
+      });
       return;
     }
     return requireApiKey(req, reply);
@@ -455,7 +464,12 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           'Retry-After',
           Math.max(1, checkResult.resetAt - Math.floor(Date.now() / 1000)),
         );
-        return reply.code(429).send({ isValid: false, invalidReason: 'rate_limited', invalidMessage: checkResult.reason });
+        return reply.code(429).send({
+          isValid: false,
+          invalidReason: 'rate_limited',
+          invalidMessage: checkResult.reason,
+          reason: checkResult.reason,
+        });
       }
     }
     return null;
@@ -618,7 +632,11 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           invalidReason = 'soroban_rpc_unreachable';
         }
         if (invalidReason !== 'facilitator_error') {
-          audit('rpc_unreachable', { actor: req.keyId ?? `ip:${req.ip}`, op: 'verify', reason: invalidReason });
+          audit('rpc_unreachable', {
+            actor: req.keyId ?? `ip:${req.ip}`,
+            op: 'verify',
+            reason: invalidReason,
+          });
         }
         return reply.send({
           isValid: false,
@@ -754,7 +772,10 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         }
 
         let transaction = '';
-        if (body.paymentPayload?.transaction && typeof body.paymentPayload.transaction === 'string') {
+        if (
+          body.paymentPayload?.transaction &&
+          typeof body.paymentPayload.transaction === 'string'
+        ) {
           transaction = body.paymentPayload.transaction;
         }
 
