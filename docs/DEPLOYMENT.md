@@ -277,16 +277,53 @@ The default `@x402/stellar` package relies on the public Stellar testnet RPC. Th
 
 When `DATABASE_URL` is set, the database must be provisioned (PostgreSQL 16+)
 and migrated before the main facilitator process binds to the port, so the
-schema is ready when the first settlement arrives:
+schema is ready when the first settlement arrives.
+
+**Using node-pg-migrate (recommended):**
+
+```bash
+# Apply all pending migrations
+npm run db:migrate
+
+# Or in a Docker entrypoint:
+node scripts/db-migrate.js up && node src/server.js
+```
+
+**For databases that already have the original SQL tables:**
+
+If the database was provisioned with the original `.sql` migration files,
+register them as applied so node-pg-migrate does not re-create them:
+
+```bash
+npm run db:seed-legacy
+```
+
+**Legacy manual approach (still supported):**
 
 ```bash
 psql "$DATABASE_URL" -f migrations/001_bazaar_catalog.sql
 psql "$DATABASE_URL" -f migrations/002_idempotency_keys.sql
+psql "$DATABASE_URL" -f migrations/002_rate_limit_buckets.sql
 ```
 
-Migrations are applied on deploy (or handled by an init container). They are
-forward-compatible: each creates its tables/indexes if absent and touches
-nothing else.
+After using the legacy approach on an existing database, run `db:seed-legacy`
+to register the tables in the node-pg-migrate tracking table.
+
+**Rolling back a migration:**
+
+```bash
+npm run db:migrate:down        # undo last migration
+node scripts/db-migrate.js down 3  # undo last 3 migrations
+```
+
+**Checking migration compatibility (CI runs this automatically):**
+
+```bash
+npm run check:migration
+```
+
+See [MIGRATIONS.md](MIGRATIONS.md) for the full expand-and-contract
+migration guide and runbook.
 
 ## Resource Sizing
 
@@ -297,5 +334,8 @@ nothing else.
 
 To roll back a deployment:
 1. Revert to the previously known-good container image tag/digest.
-2. If a database migration was part of the failed deployment, evaluate if the previous version's code is compatible with the new schema (we aim for forward-compatible migrations). If not, apply the down-migration before restarting the previous image.
+2. If a database migration was part of the failed deployment, evaluate if the previous version's code is compatible with the new schema (we aim for forward-compatible migrations). If not, apply the down-migration before restarting the previous image:
+   ```bash
+   npm run db:migrate:down
+   ```
 3. Restart the service.

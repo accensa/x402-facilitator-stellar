@@ -14,10 +14,12 @@ import { installRpcRetry } from './rpc-retry.js';
 import { RateLimiter } from './rate-limit.js';
 import { createRateLimitStore, MemoryStore } from './rate-limit-store.js';
 import { RedisRateLimiter } from './redis-rate-limit.js';
+import { CrdtRateLimitStore } from './crdt-rate-limit-store.js';
 import { createDistributedLock } from './distributed-lock.js';
 import { buildIdempotencyStore } from './idempotency.js';
 import { MemoryCatalogStore } from './catalog/memory.js';
 import { createWebhookDispatcher } from './webhooks/dispatcher.js';
+import { FailoverHealthChecker } from './failover-health.js';
 import { createApp } from './app.js';
 
 // A .env file is a development convenience, not a deployment mechanism — in
@@ -52,18 +54,34 @@ const config = resolveConfig();
 // daily fee ceiling alive across restarts. A misconfiguration refuses to start:
 // silently falling back to per-process memory would double every limit at two
 // replicas and reset the fee ceiling at every deploy — the bug this fixes.
-const rateLimitStore = createRateLimitStore();
-rateLimitStore.ready?.catch(err => {
-  console.error(`[RateLimit] shared store failed to initialise: ${err.message}`);
-});
 
 const { facilitator, signers } = buildFacilitator(config);
-// Store selection, in order of preference. REDIS_URL (upstream) wins when
-// present; RATE_LIMIT_STORE=postgres (#94) is the Postgres-backed shared
-// store; unset means the per-process memory default.
-const rateLimiter = config.redisUrl
-  ? new RedisRateLimiter(config.rateLimits, { redisUrl: config.redisUrl })
-  : new RateLimiter(config.rateLimits, rateLimitStore);
+
+// Store selection, in order of preference:
+//   1. RATE_LIMIT_STORE=crdt (#126): CRDT G-Counter store for multi-region
+//      deployments. Uses CockroachDB/multi-region Postgres for global state
+//      with local counters that survive partitions.
+//   2. REDIS_URL (upstream): Redis-backed rate limiter with memory fallback.
+//   3. RATE_LIMIT_STORE=postgres (#94): Postgres-backed shared store.
+//   4. Default: per-process memory.
+let rateLimiter;
+let crdtStore = null;
+let rateLimitStore;
+if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
+  crdtStore = new CrdtRateLimitStore({
+    region: config.region || 'default',
+    databaseUrl: config.databaseUrl,
+  });
+  rateLimiter = new RateLimiter(config.rateLimits, crdtStore);
+} else if (config.redisUrl) {
+  rateLimiter = new RedisRateLimiter(config.rateLimits, { redisUrl: config.redisUrl });
+} else {
+  rateLimitStore = createRateLimitStore();
+  rateLimitStore.ready?.catch(err => {
+    console.error(`[RateLimit] shared store failed to initialise: ${err.message}`);
+  });
+  rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
+}
 const catalog = new MemoryCatalogStore(config);
 const idempotency = buildIdempotencyStore(config);
 
@@ -82,6 +100,15 @@ const webhooks = await createWebhookDispatcher({
   url: config.webhookUrl,
 });
 
+// Multi-region failover health (#126).
+const failoverHealth = config.region
+  ? new FailoverHealthChecker({
+      region: config.region,
+      regions: config.regions,
+      warn: msg => console.warn(`  ${msg}`),
+      log: msg => console.log(`  ${msg}`),
+    })
+  : null;
 import { buildSettlementStore } from './store/index.js';
 import { startReconciliationLoop } from './store/reconciliation.js';
 
@@ -92,6 +119,7 @@ const app = createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
   distributedLock,
   webhooks,
+  failoverHealth,
   settlementStore,
 });
 
@@ -120,20 +148,29 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
     `  state    : ${[
       config.redisUrl
         ? 'redis rate limits'
-        : rateLimitStore instanceof MemoryStore
-          ? 'in-memory rate limits'
-          : `postgres rate limits (${rateLimitStore.constructor.name})`,
-      config.databaseUrl
-        ? config.databaseReplicaUrl
-          ? `postgres CQRS (writes=primary, reads=replica, lag ${config.settlementReplicaLagMs}ms)`
-          : 'postgres idempotency'
-        : 'in-memory idempotency',
+        : crdtStore
+          ? `crdt rate limits (${config.region})`
+          : rateLimitStore instanceof MemoryStore
+            ? 'in-memory rate limits'
+            : rateLimitStore
+              ? `postgres rate limits (${rateLimitStore.constructor.name})`
+              : 'in-memory rate limits',
+      config.databaseUrl ? 'postgres idempotency' : 'in-memory idempotency',
       distributedLock ? `redlock (${config.redisNodes.length} node(s))` : 'in-process locking',
       webhooks.kind === 'kafka'
         ? `kafka webhooks (${config.kafka.brokers.length} broker(s))`
         : 'direct webhooks',
-    ].join(', ')}`,
+      config.region ? `region: ${config.region}` : null,
+    ]
+      .filter(Boolean)
+      .join(', ')}`,
   );
+
+  // Start failover health monitoring (#126).
+  if (failoverHealth) {
+    failoverHealth.start();
+    console.log(`  failover : ${config.regions.length} region(s) configured`);
+  }
 
   // The consumer group performs actual webhook delivery; the producer is
   // already wired by the dispatcher constructor path above.
@@ -148,6 +185,15 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
  */
 async function shutdown(signal) {
   console.log(`${signal} received — draining`);
+  try {
+    await app.close();
+    await webhooks.stop().catch(() => {});
+    await distributedLock?.quit().catch(() => {});
+    await crdtStore?.close().catch(() => {});
+    failoverHealth?.stop();
+    horizon.restore();
+  } finally {
+    process.exit(0);
   if (app.readiness && typeof app.readiness.setShuttingDown === 'function') {
     app.readiness.setShuttingDown();
   }

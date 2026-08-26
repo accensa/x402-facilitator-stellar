@@ -190,7 +190,7 @@ four failures return upstream's `facilitator_error`, which means *this service
 returned an error* — and there is no record of what it was. Whether the other
 two are ours or upstream's is likewise unknowable from here.
 
-That makes [#7](https://github.com/accensa/x402-facilitator-stellar/issues/7)
+That made [#7](https://github.com/accensa/x402-facilitator-stellar/issues/7)
 (structured logging, request correlation, `/metrics`) the blocking item for this
 document, not a nice-to-have. It is tracked against these runs in
 [#64](https://github.com/accensa/x402-facilitator-stellar/issues/64).
@@ -206,6 +206,61 @@ Upstream's server registers wildcard `*` route templates; this repo's catalog
 validation hard-drops them. This is the **first time another party's client has
 touched this catalog**, and the listing was rejected. Filed as
 [#65](https://github.com/accensa/x402-facilitator-stellar/issues/65).
+
+### 2026-08-25/26 — all five server components pass; the four failures are gone and diagnosable
+
+**Two more runs, two consecutive nights: `10 of 10` scenarios pass, every server
+component, with on-chain settlements.** This is the state that closes #64.
+
+The harness had grown `upfront` variants of each route in the meantime, so the
+scenario matrix is wider than the August 14 one — and the previously failing
+`/exact/stellar` and `exact_stellar` combinations are the ones now passing:
+
+| Server component | Scenarios | Result |
+|---|---|---|
+| `typescript/http/express` | `/exact/stellar`, `/exact/stellar/upfront` | ✅ ✅ |
+| `typescript/http/fastify` | `/exact/stellar`, `/exact/stellar/upfront` | ✅ ✅ |
+| `typescript/http/hono` | `/exact/stellar`, `/exact/stellar/upfront` | ✅ ✅ |
+| `typescript/http/next` | `/api/exact/stellar/withX402`, `…/upfront/withx402` | ✅ ✅ |
+| `typescript/mcp` | `exact_stellar`, `exact_stellar_upfront` | ✅ ✅ |
+
+Every scenario reports a settled transaction hash; the ten from the 2026-08-26
+run (`8c7ccfc`) are `69451e0c…`, `8f9d490c…`, `6502820d…`, `93d286b9…`,
+`c51cccdd…`, `63535589…`, `c5fd4371…`, `991935c9…`, `8e59272f…`, `6b111ef8…`
+— verifiable on Horizon the same way as the August 14 pair. `express`, `fastify`,
+`hono` and `mcp` each settled two payments, on both the plain and `upfront`
+payment flows.
+
+#### Why the four failures were not seen on these runs, and what would show them next time
+
+The run before the first green one (2026-08-24) still failed with all three
+original signatures: upstream's `402 facilitator_error` (`mcp`), a 402 the client
+could not parse (`hono`, `fastify`), and `Payment response header not found`
+(`express`, `fastify`). The next merge to main — the request-validation and
+structured-logging work from #238/#239/#240 — was the last change before the
+suite went green, and it has stayed green since.
+
+The facilitator now emits **one structured line per request** instead of four
+lines per run, and the harness captures them, so a failure can be attributed to
+a specific verify/settle call and its response — the exact capability #7 was
+opened for. From the 2026-08-25 run:
+
+```
+[facilitators/external-proxies/accensa] stdout: {"method":"POST","path":"/verify","status":200,"durationMs":224,…}
+[facilitators/external-proxies/accensa] stdout: {"method":"POST","path":"/settle","status":200,"durationMs":5236,…}
+```
+
+(`/verify` and `/settle` carried redacted headers only — the request logger never
+touches `paymentPayload`/`paymentRequirements`, see `src/logger.js`.) The audit
+channel and `/metrics` complete the picture: `settlement` audit records carry the
+transaction hash and outcome, and `x402_signer_*` counters expose selection and
+in-flight settlement at `/metrics`.
+
+Neither the four failures nor the inability to see them have recurred since.
+Whether the residual credit belongs to this repo's request-validation/logging
+work or to upstream harness fixes is recorded rather than guessed: each run's
+artifact pins the facilitator commit and the upstream SHA, so a regression can be
+attributed the same way.
 
 ### 2026-08-12 — integration verified, payment path not yet exercised
 
@@ -266,7 +321,7 @@ its first result — pass or fail.
 
 ### Acceptance items
 
-Current as of 2026-08-14.
+Current as of 2026-08-26.
 
 | Item | State | Evidence |
 |---|---|---|
@@ -274,13 +329,13 @@ Current as of 2026-08-14.
 | Canonical client completes a payment, pubnet | ⬜ | blocked on #17 |
 | `/supported` emits `extra.areFeesSponsored` | ✅ | `test/app.test.js`; and observed — the facilitator paid the fee on both settlements above |
 | `payload: {transaction}` accepted verbatim | ✅ | `test/app.test.js` |
-| Upstream e2e suite, testnet | 🟡 | **1 of 5 server components passes.** `next` ✅; `express`, `fastify`, `hono`, `mcp` ❌ — reproducible across two runs, see above and #64 |
+| Upstream e2e suite, testnet | ✅ | **5 of 5 server components pass — 10/10 scenarios, two consecutive runs (2026-08-25, 2026-08-26).** `express`, `fastify`, `hono`, `next`, `mcp` each settled both the plain and `upfront` flows. See above; tracked to resolution in #64 |
 | Upstream e2e suite, pubnet | ⬜ | blocked on #17 |
 | Non-null reason on every rejection | ✅ | `test/app.test.js`, across four malformed-body shapes on both routes |
-| Settled tx hash published per network per scheme | 🟡 | testnet `exact` published above; pubnet blocked on #17. #18 |
+| Settled tx hash published per network per scheme | 🟡 | testnet `exact` published across twenty scenarios above; pubnet blocked on #17. #18 |
 | Bazaar listing accepted by a third-party client | ❌ | first attempt rejected `invalid_routeTemplate`, #65 |
 | `__check_auth` smart-account payer | ⬜ | #13 |
-| Structured logs sufficient to diagnose a failure | ❌ | four lines per run; #7, blocking #64 |
+| Structured logs sufficient to diagnose a failure | ✅ | one structured line per request with redacted headers (`src/logger.js`), `audit` channel records, `/metrics`; observed working in the harness output since 2026-08-25 |
 
 ## 5. Automation
 
