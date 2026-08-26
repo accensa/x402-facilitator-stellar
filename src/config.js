@@ -20,7 +20,7 @@ function parseSecrets(env, pluralKey, singularKey) {
   const raw = env[pluralKey] ?? env[singularKey];
   if (!raw) {
     throw new Error(
-      `${pluralKey} or ${singularKey} is required (S... testnet secret key). ` +
+      `${singularKey} is unset (${pluralKey} or ${singularKey} is required). ` +
         'Generate one with: stellar keys generate facilitator --network testnet --fund',
     );
   }

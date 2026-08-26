@@ -39,7 +39,7 @@ describe('Exhaustive Rejection Reason Taxonomy', () => {
 
   test('Malformed Auth Header', async () => {
     const res = await authApp.post('/verify', VALID_BODY, {
-      headers: { authorization: 'Bearer ' } // Trailing space / empty
+      authorization: 'Bearer ',
     });
     const json = await res.json();
     assertValidReason(json.invalidReason);
@@ -48,7 +48,7 @@ describe('Exhaustive Rejection Reason Taxonomy', () => {
 
   test('Invalid API Key', async () => {
     const res = await authApp.post('/verify', VALID_BODY, {
-      headers: { authorization: 'Bearer wrongkey' }
+      authorization: 'Bearer wrongkey',
     });
     const json = await res.json();
     assertValidReason(json.invalidReason);

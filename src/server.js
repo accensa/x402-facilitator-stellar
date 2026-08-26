@@ -82,10 +82,17 @@ const webhooks = await createWebhookDispatcher({
   url: config.webhookUrl,
 });
 
+import { buildSettlementStore } from './store/index.js';
+import { startReconciliationLoop } from './store/reconciliation.js';
+
+const settlementStore = buildSettlementStore(config);
+const reconciliation = startReconciliationLoop(settlementStore, config);
+
 const app = createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
   distributedLock,
   webhooks,
+  settlementStore,
 });
 
 app.listen({ port: config.port, host: '0.0.0.0' }, () => {
@@ -146,6 +153,7 @@ async function shutdown(signal) {
 
   const shutdownPromise = (async () => {
     try {
+      reconciliation?.stop();
       await app.close();
       await webhooks.stop().catch(() => {});
       await distributedLock?.quit().catch(() => {});

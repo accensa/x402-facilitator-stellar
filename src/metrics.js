@@ -48,21 +48,22 @@ class SignerMetrics {
    * @returns {string}
    */
   toPrometheusText() {
-    const lines = [
-      '# HELP x402_signer_selected_total Total times a signer was selected by network.',
-      '# TYPE x402_signer_selected_total counter',
-    ];
-
+    let lines = [];
+    lines.push('# HELP x402_signer_selected_total Total times a signer was selected by network.');
+    lines.push('# TYPE x402_signer_selected_total counter');
     for (const [key, count] of this.selectedTotal.entries()) {
-      const [network, signer] = key.split(':');
+      const idx = key.lastIndexOf(':');
+      const network = key.substring(0, idx);
+      const signer = key.substring(idx + 1);
       lines.push(`x402_signer_selected_total{network="${network}",signer="${signer}"} ${count}`);
     }
 
     lines.push('# HELP x402_signer_inflight Current in-flight settlements per signer.');
     lines.push('# TYPE x402_signer_inflight gauge');
-
     for (const [key, count] of this.inflight.entries()) {
-      const [network, signer] = key.split(':');
+      const idx = key.lastIndexOf(':');
+      const network = key.substring(0, idx);
+      const signer = key.substring(idx + 1);
       lines.push(`x402_signer_inflight{network="${network}",signer="${signer}"} ${count}`);
     }
 

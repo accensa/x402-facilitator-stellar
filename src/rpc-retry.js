@@ -38,9 +38,9 @@
  * That is safe here for two reasons: a connection-level failure means the
  * request most likely never arrived, and a Soroban transaction is identified by
  * its hash, so a genuine duplicate is rejected as such by the network rather
- * than settling twice. It is not a substitute for idempotency keys in a
- * production facilitator, and should be revisited alongside the durable
- * settlement-status store this spike does not have.
+ * than settling twice. At the HTTP level, issue #10 introduces durable
+ * idempotency keys (`settlements` table) to deduplicate incoming requests and
+ * record status across restarts.
  *
  * ON sendTransaction AND THE BREAKER. A settle whose broadcast has already
  * gone out must never be reported as failed because a breaker tripped
