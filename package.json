@@ -43,6 +43,7 @@
     "eval": "node eval/runner.js"
   },
   "dependencies": {
+    "@fastify/compress": "^9.2.0",
     "@stellar/stellar-sdk": "^16.2.0",
     "@x402/core": "^2.21.0",
     "@x402/extensions": "^2.23.0",

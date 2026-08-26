@@ -82,7 +82,7 @@ const webhooks = await createWebhookDispatcher({
   url: config.webhookUrl,
 });
 
-const app = createApp(config, facilitator, rateLimiter, catalog, idempotency, {
+const app = await createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
   distributedLock,
   webhooks,

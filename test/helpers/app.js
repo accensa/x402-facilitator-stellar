@@ -106,7 +106,7 @@ export async function serve({
   nodeEnv,
   extras,
 } = {}) {
-  const app = createApp(
+  const app = await createApp(
     config ?? testConfig({ corsAllowedOrigins, nodeEnv }),
     facilitator ?? stubFacilitator(),
     rateLimiter ?? stubRateLimiter(),

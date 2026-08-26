@@ -35,6 +35,7 @@
  */
 import crypto from 'node:crypto';
 import Fastify from 'fastify';
+import compress from '@fastify/compress';
 import { validateForCatalog } from './catalog/validation.js';
 import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
@@ -93,9 +94,16 @@ const PAYMENT_BODY_SCHEMA = {
  *   - audit: audit writer override (default createAuditLogger)
  *   - readiness: readiness checker override
  *   - breakerStates: breaker-state reader for the readiness probe (#105)
- * @returns {import('fastify').FastifyInstance}
+ * @returns {Promise<import('fastify').FastifyInstance>}
  */
-export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
+export async function createApp(
+  config,
+  facilitator,
+  rateLimiter,
+  catalog,
+  idempotency,
+  extras = {},
+) {
   const { distributedLock = null, webhooks = null } = extras;
   const app = Fastify({
     // Client IP resolution. Unset leaves Fastify's default (off), correct where
@@ -123,6 +131,31 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
       },
     },
   });
+
+  /**
+   * Compression (#69), registered with the plugin default 1kb threshold rather
+   * than a custom one, after measuring the actual payloads (see the PR):
+   *
+   *   - GET /discovery/resources (full 100-entry page): 71,587 B -> 2,801 B
+   *   - GET /discovery/search (ranked results):          71,605 B -> 2,813 B
+   *
+   * Those are the only responses over a few hundred bytes — the settlement hot
+   * path (/verify, /settle, /supported, /usage) stays well under 1kb and is
+   * deliberately left uncompressed so we don't burn CPU on the hot path to save
+   * nothing. gzip wins ~96% on the discovery reads because they are large JSON
+   * with heavily repeated keys, which is exactly the case gzip is good at.
+   *
+   * The plugin emits `Vary: Accept-Encoding` on compressed responses, so a
+   * shared cache in front of the service cannot serve a gzipped body to a
+   * client that did not ask for one; a request without `Accept-Encoding` gets
+   * the same valid uncompressed body as before. Brotli is out of scope by
+   * choice — gzip is what the stock x402 clients understand.
+   */
+  // Must be awaited: Fastify applies a registered plugin's hooks to routes
+  // registered after it only once its register promise resolves (fastify-plugin
+  // or not), so registering the routes below without this await would silently
+  // ship an uncompressed surface.
+  await app.register(compress);
 
   /**
    * Request logging (#78/#86 lineage): one redacted line per request. The

@@ -78,7 +78,7 @@ async function bench(name, path, body) {
   // mute it (and only it) while the benchmark runs.
   const realLog = console.log;
   console.log = () => {};
-  const app = createApp(config, facilitator, rateLimiter, catalog);
+  const app = await createApp(config, facilitator, rateLimiter, catalog);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const base = `http://127.0.0.1:${app.server.address().port}`;
 
