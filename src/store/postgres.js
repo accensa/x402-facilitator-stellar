@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import { OutboxStore } from '../outbox/store.js';
 import { MemorySettlementStore } from './memory.js';
 
 export class PostgresSettlementStore extends MemorySettlementStore {
@@ -6,24 +8,30 @@ export class PostgresSettlementStore extends MemorySettlementStore {
    * @param {object} [options]
    * @param {object} [options.pool] - injected pg Pool (for testing)
    * @param {Function} [options.warn] - logger sink
+   * @param {object} [options.outbox] - OutboxStore sharing this pool (default:
+   *   created lazily from the pool; the transactional outbox is how settlement
+   *   notifications survive crashes, #123)
    */
-  constructor(databaseUrl, { pool, warn = msg => console.warn(msg) } = {}) {
+  constructor(databaseUrl, { pool, warn = msg => console.warn(msg), outbox } = {}) {
     super();
     this.warn = warn;
     this.pool = pool;
     this.degraded = false;
+    this.outbox = outbox ?? null;
 
     if (!this.pool) {
       import('pg')
         .then(({ default: pg }) => {
           this.pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
           this.pool.on('error', err => this._degrade(`Postgres error: ${err.message}`));
+          this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
           this.ready = this._ensureTable();
         })
         .catch(err =>
           this._degrade(`pg unavailable (${err.message}); using memory settlement store`),
         );
     } else {
+      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
       this.ready = this._ensureTable();
     }
   }
@@ -59,6 +67,9 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         CREATE INDEX IF NOT EXISTS idx_settlements_key_id ON settlements(key_id);
         CREATE INDEX IF NOT EXISTS idx_settlements_state ON settlements(state);
       `);
+      // The outbox table is created with the settlement schema so the atomic
+      // settle+enqueue transaction never finds its table missing (#123).
+      await this.outbox?.ready;
     } catch (err) {
       this._degrade(`failed to create table: ${err.message}`);
     }
@@ -201,6 +212,104 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     } catch (err) {
       this._degrade(`updateState failed: ${err.message}`);
       return super.updateState(idempotencyKey, state, details);
+    }
+  }
+
+  /**
+   * Settlement state change + notification enqueue in ONE transaction (#123).
+   *
+   * The guarantee the issue asks for: if the process crashes after settlement
+   * but before the notification reaches the broker, the notification must not
+   * be lost. Both the `settled` state change and the `outbox_events` insert
+   * commit atomically here, so the background worker (src/outbox/) can
+   * publish it afterwards — a crash at any point leaves the event either
+   * uncommitted (nothing settled, nothing to notify) or pending in the
+   * outbox (publishable later).
+   *
+   * Returns `atomicallyEnqueued: false` when there is no usable Postgres (no
+   * pool or degraded) — the caller then falls back to the direct webhook
+   * publish, which is the pre-outbox behaviour.
+   *
+   * @param {string} idempotencyKey
+   * @param {object} details - updateState details (tx_hash, response, ...)
+   * @param {object|null} event - notification event; null = state change only
+   * @param {object} [opts]
+   * @param {string} [opts.eventId] - caller-chosen idempotency key for the event
+   * @returns {Promise<{atomicallyEnqueued: boolean, record: object|null, event: object|null}>}
+   */
+  async settleAndEnqueue(idempotencyKey, details, event, { eventId } = {}) {
+    if (this.degraded || !this.pool) {
+      const record = await super.updateState(idempotencyKey, 'settled', details);
+      return { atomicallyEnqueued: false, record, event };
+    }
+    try {
+      await this.ready;
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const { rows } = await client.query(
+          `UPDATE settlements SET
+            state = 'settled',
+            tx_hash = COALESCE($2, tx_hash),
+            error_reason = COALESCE($3, error_reason),
+            error_message = COALESCE($4, error_message),
+            response = COALESCE($5, response),
+            updated_at = NOW()
+          WHERE idempotency_key = $1
+          RETURNING idempotency_key, network, scheme, payer, pay_to, asset, amount, state, tx_hash, error_reason, error_message, response, key_id, created_at, updated_at`,
+          [
+            idempotencyKey,
+            details.tx_hash ?? null,
+            details.error_reason ?? null,
+            details.error_message ?? null,
+            details.response ? JSON.stringify(details.response) : null,
+          ],
+        );
+
+        const resolvedEvent =
+          event == null ? null : { ...event, id: eventId ?? event.id ?? crypto.randomUUID() };
+        if (rows.length > 0 && resolvedEvent) {
+          await this.outbox.insertEvent(client, {
+            eventId: resolvedEvent.id,
+            type: resolvedEvent.type,
+            payload: resolvedEvent,
+          });
+        }
+        await client.query('COMMIT');
+
+        let entry = null;
+        if (rows.length > 0) {
+          const r = rows[0];
+          entry = {
+            idempotency_key: r.idempotency_key,
+            network: r.network,
+            scheme: r.scheme,
+            payer: r.payer,
+            pay_to: r.pay_to,
+            asset: r.asset,
+            amount: r.amount,
+            state: r.state,
+            tx_hash: r.tx_hash,
+            error_reason: r.error_reason,
+            error_message: r.error_message,
+            response: r.response,
+            key_id: r.key_id,
+            created_at: new Date(r.created_at).toISOString(),
+            updated_at: new Date(r.updated_at).toISOString(),
+          };
+          await super.updateState(idempotencyKey, 'settled', details);
+        }
+        return { atomicallyEnqueued: true, record: entry, event: resolvedEvent };
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      this._degrade(`settleAndEnqueue failed: ${err.message}`);
+      const record = await super.updateState(idempotencyKey, 'settled', details);
+      return { atomicallyEnqueued: false, record, event };
     }
   }
 

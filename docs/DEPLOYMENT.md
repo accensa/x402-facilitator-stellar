@@ -174,11 +174,34 @@ schema is ready when the first settlement arrives:
 ```bash
 psql "$DATABASE_URL" -f migrations/001_bazaar_catalog.sql
 psql "$DATABASE_URL" -f migrations/002_idempotency_keys.sql
+psql "$DATABASE_URL" -f migrations/003_settlement_store.sql
+psql "$DATABASE_URL" -f migrations/004_outbox_events.sql
 ```
 
 Migrations are applied on deploy (or handled by an init container). They are
 forward-compatible: each creates its tables/indexes if absent and touches
 nothing else.
+
+## Settlement Notifications (Transactional Outbox)
+
+Settlement notifications are written to an `outbox_events` table in the SAME
+transaction as the settlement state change (`settleAndEnqueue` in
+`src/store/postgres.js`), then a background worker (`src/outbox/`) polls and
+publishes them through the webhook dispatcher. If the process crashes after
+settlement but before the broker accepts the message, the notification is still
+in the outbox and is published on restart — at-least-once delivery, with the
+database as the durability boundary.
+
+- Enabled when `DATABASE_URL` is set (migration `004_outbox_events.sql` must
+  be applied). Without Postgres, notifications fall back to the previous
+  fire-and-forget direct publish.
+- The worker polls every `OUTBOX_POLL_INTERVAL_MS` (default `5000` ms). It
+  claims rows with `FOR UPDATE SKIP LOCKED`, so multiple replicas can run it
+  without double-publishing; a claim carries a lease, so a worker that dies
+  mid-publish is re-claimed and re-published by the next poll (duplicates are
+  possible, loss is not).
+- A row whose publish keeps failing is retried up to 10 times, then marked
+  `failed` and left for an operator (visible via the `outbox_events` table).
 
 ## Resource Sizing
 

@@ -84,9 +84,28 @@ const webhooks = await createWebhookDispatcher({
 
 import { buildSettlementStore } from './store/index.js';
 import { startReconciliationLoop } from './store/reconciliation.js';
+import { startOutboxWorker } from './outbox/index.js';
 
 const settlementStore = buildSettlementStore(config);
 const reconciliation = startReconciliationLoop(settlementStore, config);
+
+// Transactional outbox (#123): the settle path writes the notification in the
+// same transaction as the 'settled' state change (see app.js); this worker
+// polls those rows and publishes them through the webhook dispatcher. It runs
+// only when there is something durable to poll (Postgres) and something to
+// publish to; otherwise the app falls back to the fire-and-forget webhook
+// path, which is the pre-outbox behaviour.
+const outbox = settlementStore.outbox ?? null;
+const outboxWorker =
+  outbox && typeof webhooks.publish === 'function'
+    ? startOutboxWorker({
+        outbox,
+        publish: record => webhooks.publish(record),
+        intervalMs: config.outboxPollIntervalMs,
+        log: msg => console.warn(msg),
+      })
+    : null;
+outboxWorker?.start();
 
 const app = createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
@@ -154,6 +173,7 @@ async function shutdown(signal) {
   const shutdownPromise = (async () => {
     try {
       reconciliation?.stop();
+      await outboxWorker?.stop();
       await app.close();
       await webhooks.stop().catch(() => {});
       await distributedLock?.quit().catch(() => {});

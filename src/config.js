@@ -211,6 +211,12 @@ export function resolveConfig(env = process.env) {
     databaseUrl: env.DATABASE_URL || null,
 
     /**
+     * Outbox worker poll cadence (#123). Only relevant when DATABASE_URL is
+     * set (the outbox table lives in Postgres).
+     */
+    outboxPollIntervalMs: Number(env.OUTBOX_POLL_INTERVAL_MS ?? 5_000),
+
+    /**
      * Redlock nodes (#116): comma-separated independent Redis masters. Quorum
      * needs a majority, so three or more is the intended shape. Empty means
      * in-process locking only (single instance).

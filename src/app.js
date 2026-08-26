@@ -775,26 +775,40 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           );
           handleRateLimit(reply, check);
           if (result.success) {
-            await settlementStore.updateState(idempotencyKey, 'settled', {
-              tx_hash: result.transaction,
-              response: result,
-            });
+            // Settlement notification (#123): the event is written to the
+            // outbox in the SAME database transaction as the 'settled' state
+            // change, so a crash between settling and notifying cannot lose
+            // the notification — the outbox worker publishes it afterwards.
+            // Only when no durable outbox exists (in-memory store or degraded
+            // Postgres) do we fall back to the fire-and-forget webhook
+            // publish (#117), which is the pre-outbox behaviour.
+            const event = webhooks
+              ? {
+                  type: 'settlement.completed',
+                  transaction: result.transaction,
+                  network: result.network,
+                  payer: result.payer,
+                  payTo: body.paymentRequirements.payTo,
+                  amount: body.paymentRequirements.maxAmountRequired,
+                  asset: body.paymentRequirements.asset,
+                }
+              : null;
+
+            const enqueued = await settlementStore.settleAndEnqueue(
+              idempotencyKey,
+              { tx_hash: result.transaction, response: result },
+              event,
+            );
 
             await processCataloging(req, body, reply, 'payment');
 
-            // Webhook notification (#117): published, not delivered inline.
-            // A slow receiving server must never sit inside this HTTP
-            // request's lifecycle — see src/webhooks/.
-            if (webhooks && typeof webhooks.enqueue === 'function') {
-              webhooks.enqueue({
-                type: 'settlement.completed',
-                transaction: result.transaction,
-                network: result.network,
-                payer: result.payer,
-                payTo: body.paymentRequirements.payTo,
-                amount: body.paymentRequirements.maxAmountRequired,
-                asset: body.paymentRequirements.asset,
-              });
+            if (
+              !enqueued.atomicallyEnqueued &&
+              enqueued.event &&
+              webhooks &&
+              typeof webhooks.enqueue === 'function'
+            ) {
+              webhooks.enqueue(enqueued.event);
             }
           } else {
             await settlementStore.updateState(idempotencyKey, 'failed', {
