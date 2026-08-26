@@ -1,12 +1,13 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { Keypair } from '@stellar/stellar-sdk';
 import { createApp } from '../src/app.js';
 import { resolveConfig } from '../src/config.js';
 import { requestState } from '../src/request-state.js';
 
 describe('Request Timeouts (#8)', () => {
   const baseConfig = resolveConfig({
-    FACILITATOR_SECRET: 'SB3K23456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEF',
+    FACILITATOR_SECRET: Keypair.random().secret(),
     REQUEST_TIMEOUT_MS: '50',
   });
 

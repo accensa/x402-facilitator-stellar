@@ -129,7 +129,8 @@ describe('readiness checker', () => {
     const poorReport = await poor.check();
     const signer = poorReport.networks['stellar:testnet'].checks.signer_funded;
     assert.equal(signer.ok, false);
-    assert.equal(signer.balance_stroops, 500);
+    // Multi-signer: individual signer results are in signer.signers[]
+    assert.equal(signer.signers[0].balance_stroops, 500);
     assert.match(signer.error, /below floor 1000000/);
   });
 
