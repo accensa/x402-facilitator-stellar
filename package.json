@@ -44,6 +44,8 @@
     "format:check": "prettier --check .",
     "licenses": "node scripts/check-licenses.mjs",
     "eval": "node eval/runner.js",
+    "fund:testnet": "node scripts/fund-testnet-accounts.mjs",
+    "prepare:testnet-usdc": "node scripts/prepare-testnet-usdc.mjs",
     "db:migrate": "node scripts/db-migrate.js up",
     "db:migrate:down": "node scripts/db-migrate.js down",
     "db:status": "node scripts/db-migrate.js status",

@@ -96,12 +96,14 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         .then(({ default: pg }) => {
           this.pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
           this.pool.on('error', err => this._degrade(`Postgres error: ${err.message}`));
+          this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
           this.ready = this._ensureSchema();
         })
         .catch(err =>
           this._degrade(`pg unavailable (${err.message}); using memory settlement store`),
         );
     } else {
+      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
       this.ready = this._ensureSchema();
     }
   }
@@ -332,18 +334,46 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
+        // The same event-then-projection write as updateState(), folded into
+        // the outbox transaction: append SettlementSettled to the event log
+        // and update the read model in one statement, then insert the
+        // notification row — all atomic, so a crash between settling and
+        // notifying can never lose the notification (#123, #130).
+        const eventType = eventTypeForState('settled');
         const { rows } = await client.query(
-          `UPDATE settlements SET
-            state = 'settled',
-            tx_hash = COALESCE($2, tx_hash),
-            error_reason = COALESCE($3, error_reason),
-            error_message = COALESCE($4, error_message),
-            response = COALESCE($5, response),
-            updated_at = NOW()
-          WHERE idempotency_key = $1
-          RETURNING idempotency_key, network, scheme, payer, pay_to, asset, amount, state, tx_hash, error_reason, error_message, response, key_id, created_at, updated_at`,
+          `WITH next_seq AS (
+            SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+            FROM settlement_events WHERE idempotency_key = $1
+          ),
+          ins_event AS (
+            INSERT INTO settlement_events (idempotency_key, seq, event_type, event_version, payload, recorded_at)
+            SELECT $1, next_seq.seq, $2, 1, $3::jsonb, NOW()
+            FROM next_seq
+            WHERE EXISTS (SELECT 1 FROM settlement_projections WHERE idempotency_key = $1)
+            RETURNING idempotency_key, seq, recorded_at
+          )
+          UPDATE settlement_projections SET
+            state = $4,
+            tx_hash = COALESCE($5, settlement_projections.tx_hash),
+            error_reason = COALESCE($6, settlement_projections.error_reason),
+            error_message = COALESCE($7, settlement_projections.error_message),
+            response = COALESCE($8, settlement_projections.response),
+            version = ins_event.seq,
+            updated_at = ins_event.recorded_at
+          FROM ins_event
+          WHERE settlement_projections.idempotency_key = ins_event.idempotency_key
+          RETURNING ${QUALIFIED_PROJECTION_COLUMNS}`,
           [
             idempotencyKey,
+            eventType,
+            JSON.stringify({
+              idempotency_key: idempotencyKey,
+              tx_hash: details.tx_hash ?? null,
+              error_reason: details.error_reason ?? null,
+              error_message: details.error_message ?? null,
+              response: details.response ?? null,
+            }),
+            'settled',
             details.tx_hash ?? null,
             details.error_reason ?? null,
             details.error_message ?? null,
@@ -364,24 +394,7 @@ export class PostgresSettlementStore extends MemorySettlementStore {
 
         let entry = null;
         if (rows.length > 0) {
-          const r = rows[0];
-          entry = {
-            idempotency_key: r.idempotency_key,
-            network: r.network,
-            scheme: r.scheme,
-            payer: r.payer,
-            pay_to: r.pay_to,
-            asset: r.asset,
-            amount: r.amount,
-            state: r.state,
-            tx_hash: r.tx_hash,
-            error_reason: r.error_reason,
-            error_message: r.error_message,
-            response: r.response,
-            key_id: r.key_id,
-            created_at: new Date(r.created_at).toISOString(),
-            updated_at: new Date(r.updated_at).toISOString(),
-          };
+          entry = mapProjectionRow(rows[0]);
           await super.updateState(idempotencyKey, 'settled', details);
         }
         return { atomicallyEnqueued: true, record: entry, event: resolvedEvent };

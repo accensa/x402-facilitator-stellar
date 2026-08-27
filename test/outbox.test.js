@@ -26,16 +26,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  * assert transaction ordering.
  */
 function fakePool() {
+  // Event-sourced store (#130): `settlements` here is the read model
+  // (settlement_projections), seeded directly and updated by the same CTE
+  // the real store issues — an append to settlement_events paired with the
+  // projection write derived from it.
   const settlements = new Map();
+  const events = [];
   const outbox = new Map(); // id -> row
   let nextId = 1;
   const queries = [];
 
   const nowIso = () => new Date().toISOString();
   const rowView = r => ({ ...r, created_at: r.created_at, updated_at: r.updated_at });
+  const nextSeq = key => {
+    const seqs = events.filter(e => e.idempotency_key === key).map(e => e.seq);
+    return seqs.length ? Math.max(...seqs) + 1 : 1;
+  };
 
   const pool = {
     settlements,
+    events,
     outbox,
     queries,
     /** Direct row access for test setup/assertions. */
@@ -78,36 +88,20 @@ function fakePool() {
       queries.push({ sql: flat, params });
       if (sql.includes('CREATE TABLE') || sql.includes('CREATE INDEX')) return { rows: [] };
 
-      // get(idempotencyKey)
-      if (sql.includes('FROM settlements WHERE idempotency_key = $1')) {
-        const row = settlements.get(params[0]);
-        return { rows: row ? [rowView(row)] : [] };
-      }
-
-      // listUnknown()
-      if (sql.includes('FROM settlements WHERE state = $1')) {
-        const rows = [...settlements.values()].filter(r => r.state === params[0]);
-        return { rows: rows.map(rowView) };
-      }
-
-      // save(): INSERT ... ON CONFLICT (idempotency_key) DO UPDATE ... RETURNING
-      if (sql.includes('INSERT INTO settlements')) {
-        const [
-          key,
-          network,
-          scheme,
-          payer,
-          payTo,
-          asset,
-          amount,
-          state,
-          txHash,
-          errorReason,
-          errorMessage,
-          response,
-          keyId,
-        ] = params;
-        const ts = nowIso();
+      // save(): SettlementInitiated CTE — append event + upsert projection
+      if (flat.includes("'SettlementInitiated'")) {
+        const [key, payloadJson, network, scheme, payer, payTo, asset, amount, txHash, keyId] =
+          params;
+        const seq = nextSeq(key);
+        const recordedAt = nowIso();
+        events.push({
+          idempotency_key: key,
+          seq,
+          event_type: 'SettlementInitiated',
+          event_version: 1,
+          payload: JSON.parse(payloadJson),
+          recorded_at: recordedAt,
+        });
         const existing = settlements.get(key);
         const row = {
           idempotency_key: key,
@@ -117,50 +111,56 @@ function fakePool() {
           pay_to: payTo,
           asset,
           amount,
-          state: state ?? 'submitted',
-          tx_hash: txHash ?? existing?.tx_hash ?? null,
-          error_reason: errorReason ?? existing?.error_reason ?? null,
-          error_message: errorMessage ?? existing?.error_message ?? null,
-          response: response ? JSON.parse(response) : (existing?.response ?? null),
-          key_id: keyId ?? null,
-          created_at: existing?.created_at ?? ts,
-          updated_at: ts,
+          state: 'submitted',
+          tx_hash: txHash,
+          error_reason: null,
+          error_message: null,
+          response: null,
+          key_id: keyId,
+          version: seq,
+          created_at: existing?.created_at ?? recordedAt,
+          updated_at: recordedAt,
         };
         settlements.set(key, row);
-        return { rows: [rowView(row)] };
+        return { rows: [{ ...row }] };
       }
 
-      // updateState(): generic UPDATE ... SET state = $2 ... RETURNING
-      if (sql.includes('UPDATE settlements SET') && !sql.includes("state = 'settled'")) {
-        const [key, state, txHash, errorReason, errorMessage, response] = params;
-        const row = settlements.get(key);
-        if (!row) return { rows: [] };
-        const updated = {
-          ...row,
+      // updateState() / settleAndEnqueue(): event-then-projection CTE.
+      // settleAndEnqueue passes state 'settled' as $4; updateState passes the
+      // requested state — the fake can't tell them apart by SQL, so it applies
+      // whatever state the caller requested, exactly like the real store.
+      // Must be checked BEFORE the plain SELECT dispatches below: this CTE
+      // contains `FROM settlement_projections WHERE idempotency_key = $1`
+      // as a substring (inside the EXISTS clause).
+      if (
+        sql.includes('WHERE settlement_projections.idempotency_key = ins_event.idempotency_key')
+      ) {
+        const [key, eventType, payloadJson, state, txHash, errorReason, errorMessage, response] =
+          params;
+        const existing = settlements.get(key);
+        if (!existing) return { rows: [] };
+        const seq = nextSeq(key);
+        const recordedAt = nowIso();
+        events.push({
+          idempotency_key: key,
+          seq,
+          event_type: eventType,
+          event_version: 1,
+          payload: JSON.parse(payloadJson),
+          recorded_at: recordedAt,
+        });
+        const row = {
+          ...existing,
           state,
-          tx_hash: txHash ?? row.tx_hash,
-          error_reason: errorReason ?? row.error_reason,
-          error_message: errorMessage ?? row.error_message,
-          response: response ? JSON.parse(response) : row.response,
-          updated_at: nowIso(),
+          tx_hash: txHash ?? existing.tx_hash,
+          error_reason: errorReason ?? existing.error_reason,
+          error_message: errorMessage ?? existing.error_message,
+          response: response ? JSON.parse(response) : existing.response,
+          version: seq,
+          updated_at: recordedAt,
         };
-        settlements.set(key, updated);
-        return { rows: [rowView(updated)] };
-      }
-
-      // settleAndEnqueue(): UPDATE ... SET state = 'settled' ... RETURNING
-      if (sql.includes('UPDATE settlements SET') && sql.includes("state = 'settled'")) {
-        const [key, txHash] = params;
-        const row = settlements.get(key);
-        if (!row) return { rows: [] };
-        const updated = {
-          ...row,
-          state: 'settled',
-          tx_hash: txHash ?? row.tx_hash,
-          updated_at: nowIso(),
-        };
-        settlements.set(key, updated);
-        return { rows: [rowView(updated)] };
+        settlements.set(key, row);
+        return { rows: [{ ...row }] };
       }
 
       if (sql.includes('UPDATE outbox_events SET') && sql.includes("status = 'claimed'")) {
@@ -190,6 +190,22 @@ function fakePool() {
             created_at: new Date(r.createdAt).toISOString(),
           })),
         };
+      }
+
+      // get(idempotencyKey) — a bare SELECT (not the CTE, which is dispatched
+      // above).
+      if (
+        flat.startsWith('SELECT') &&
+        flat.includes('FROM settlement_projections WHERE idempotency_key = $1')
+      ) {
+        const row = settlements.get(params[0]);
+        return { rows: row ? [rowView(row)] : [] };
+      }
+
+      // listUnknown()
+      if (flat.includes('FROM settlement_projections WHERE state = $1')) {
+        const rows = [...settlements.values()].filter(r => r.state === params[0]);
+        return { rows: rows.map(rowView) };
       }
 
       if (sql.includes("status = 'published'")) {
@@ -432,7 +448,9 @@ describe('settleAndEnqueue — same transaction as the state change (#123)', () 
     const flat = pool.queries.map(q => q.sql);
     const begin = flat.indexOf('BEGIN');
     const commit = flat.indexOf('COMMIT');
-    const update = flat.findIndex(s => s.includes('UPDATE settlements SET'));
+    const update = flat.findIndex(s =>
+      s.includes('WHERE settlement_projections.idempotency_key = ins_event.idempotency_key'),
+    );
     const insert = flat.findIndex(s => s.includes('INSERT INTO outbox_events'));
     assert.ok(
       begin < update && update < insert && insert < commit,
@@ -450,7 +468,10 @@ describe('settleAndEnqueue — same transaction as the state change (#123)', () 
     const originalQuery = pool.query.bind(pool);
     let failNext = true;
     pool.query = async (sql, params) => {
-      if (failNext && sql.includes('UPDATE settlements SET')) {
+      if (
+        failNext &&
+        sql.includes('WHERE settlement_projections.idempotency_key = ins_event.idempotency_key')
+      ) {
         failNext = false;
         throw new Error('connection lost');
       }
@@ -595,8 +616,12 @@ describe('reconciliation notifies through the outbox (#123)', () => {
       idempotency_key: 'unresolved-2',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
-      state: 'unknown',
       tx_hash: 'tx_confirmed_456',
+    });
+    // Event-sourced store (#130): 'unknown' is a state the projection derives
+    // from an appended event, not a field on save().
+    await store.updateState('unresolved-2', 'unknown', {
+      error_reason: 'submitted_outcome_unknown',
     });
     const mockRpc = async () => ({ result: { status: 'SUCCESS' } });
 

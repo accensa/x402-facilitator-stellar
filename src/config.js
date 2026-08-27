@@ -93,6 +93,12 @@ export function resolveConfig(env = process.env) {
       id = keyStr.substring(0, colonIdx);
       secretPart = keyStr.substring(colonIdx + 1);
     }
+    // Validate that key id can be used in env var names (alphanumeric and underscore only)
+    if (!/^[A-Za-z0-9_]+$/.test(id)) {
+      throw new Error(
+        `API key id "${id}" contains invalid characters. Key ids must be alphanumeric and underscore only to work with RATE_LIMIT_ overrides.`,
+      );
+    }
     return {
       id,
       hash: crypto.createHash('sha256').update(secretPart).digest(),
@@ -127,10 +133,19 @@ export function resolveConfig(env = process.env) {
     keys: {},
   };
 
+  // Build a set of configured key ids (uppercased) for validation
+  const configuredKeyIds = new Set(apiKeys.map(k => k.id.toUpperCase()));
+
   for (const k of Object.keys(env)) {
     if (k.startsWith('RATE_LIMIT_') && k !== 'RATE_LIMIT_GLOBAL') {
       const keyId = k.substring(11); // remove RATE_LIMIT_
-      rateLimits.keys[keyId] = parseLimits(env[k]);
+      // Validate that the key id exists in configured API keys (case-insensitive)
+      if (!configuredKeyIds.has(keyId.toUpperCase())) {
+        throw new Error(
+          `RATE_LIMIT_${keyId} is configured but no API key with id "${keyId}" exists in FACILITATOR_API_KEYS.`,
+        );
+      }
+      rateLimits.keys[keyId.toUpperCase()] = parseLimits(env[k]);
     }
   }
 

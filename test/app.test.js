@@ -302,16 +302,24 @@ describe('POST /settle', () => {
     }
   });
 
-
   test('repeated settlement crosses feeSpd and returns fee_ceiling_exceeded', async () => {
     // We use the real RateLimiter to test the integration.
     const { testConfig } = await import('./helpers/app.js');
     const { RateLimiter } = await import('../src/rate-limit.js');
+    // feeSpd sits above the 50000-stroop worst-case reservation (checkSettle
+    // reserves the max fee before settling) so the first settle passes; two
+    // settles then cross the ceiling.
     const rateLimiter = new RateLimiter({
       global: { verifyRpm: 100, settleRpm: 100, settleRph: 100, settleRpd: 100, feeSpd: 150000 },
       keys: {
-        custom_key: { verifyRpm: 100, settleRpm: 100, settleRph: 100, settleRpd: 100, feeSpd: 25000 }
-      }
+        CUSTOM_KEY: {
+          verifyRpm: 100,
+          settleRpm: 100,
+          settleRph: 100,
+          settleRpd: 100,
+          feeSpd: 75000,
+        },
+      },
     });
 
     const app = await serve({
@@ -322,7 +330,7 @@ describe('POST /settle', () => {
           success: true,
           transaction: 'tx1',
           network: 'stellar:testnet',
-        })
+        }),
       }),
     });
 
@@ -457,8 +465,9 @@ describe('GET /usage', () => {
       const res = await app.get('/usage', { authorization: 'Bearer s3cret' });
       assert.equal(res.status, 200);
       const json = await res.json();
-      // Scoped to the presented key, not to the whole instance.
-      assert.equal(json.keyId, 'admin');
+      // Scoped to the presented key, not to the whole instance. Key ids are
+      // normalized to uppercase at auth.
+      assert.equal(json.keyId, 'ADMIN');
     } finally {
       await app.close();
     }
@@ -498,10 +507,11 @@ describe('automatic cataloging', () => {
     }
   });
 
-
   test('POST /discovery/resources returns JSON, not HTML, when the limiter errors', async () => {
     const rateLimiter = stubRateLimiter();
-    rateLimiter.checkCatalog = () => { throw new Error('limiter is on fire'); };
+    rateLimiter.checkCatalog = () => {
+      throw new Error('limiter is on fire');
+    };
     const app = await serve({ rateLimiter });
     try {
       const res = await app.post('/discovery/resources', VALID_BODY);
@@ -517,7 +527,9 @@ describe('automatic cataloging', () => {
 
   test('a synchronous catalog error (e.g. rate limiter crash) does not fail the payment', async () => {
     const rateLimiter = stubRateLimiter({ allow: true });
-    rateLimiter.checkCatalog = () => { throw new Error('limiter is on fire'); };
+    rateLimiter.checkCatalog = () => {
+      throw new Error('limiter is on fire');
+    };
     const app = await serve({ rateLimiter });
     try {
       const res = await app.post('/settle', VALID_BODY);

@@ -88,12 +88,19 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
   crdtStore = new CrdtRateLimitStore({
     region: config.region || 'default',
     databaseUrl: config.databaseUrl,
+    maxSize: 10000,
   });
+  // RateLimiter expects the { global, keys, perNetwork } limits shape, which
+  // lives at config.rateLimits — passing the whole config would leave
+  // `global` undefined and crash every rate-limited route.
   rateLimiter = new RateLimiter(config.rateLimits, crdtStore);
 } else if (config.redisUrl) {
   rateLimiter = new RedisRateLimiter(config.rateLimits, { redisUrl: config.redisUrl });
 } else {
-  rateLimitStore = createRateLimitStore();
+  rateLimitStore = createRateLimitStore(process.env, {
+    maxSize: 10000,
+    pool: vaultDatabase?.pool,
+  });
   rateLimitStore.ready?.catch(err => {
     console.error(`[RateLimit] shared store failed to initialise: ${err.message}`);
   });
@@ -221,15 +228,6 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
  */
 async function shutdown(signal) {
   console.log(`${signal} received — draining`);
-  try {
-    await app.close();
-    await webhooks.stop().catch(() => {});
-    await distributedLock?.quit().catch(() => {});
-    await crdtStore?.close().catch(() => {});
-    failoverHealth?.stop();
-    horizon.restore();
-  } finally {
-    process.exit(0);
   if (app.readiness && typeof app.readiness.setShuttingDown === 'function') {
     app.readiness.setShuttingDown();
   }
@@ -244,7 +242,10 @@ async function shutdown(signal) {
       await vaultDatabase?.stop();
       await app.close();
       await webhooks.stop().catch(() => {});
-      await distributedLock?.quit().catch(() => {});
+      await distributedLock?.quit()?.catch(() => {});
+      await crdtStore?.close().catch(() => {});
+      failoverHealth?.stop();
+      await rateLimiter?.close?.().catch(() => {});
       horizon.restore();
     } catch (err) {
       console.error(`Error during shutdown: ${err.message}`);

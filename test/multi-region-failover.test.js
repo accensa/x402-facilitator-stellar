@@ -218,7 +218,7 @@ describe('multi-region: failover detection timing', () => {
     );
   });
 
-  test('failover state is reported in /health/ready response', async () => {
+  test('failover state is reported in /readyz response', async () => {
     const checker = new FailoverHealthChecker({
       region: 'us-east-1',
       failureThreshold: 2,
@@ -237,7 +237,7 @@ describe('multi-region: failover detection timing', () => {
       extras: { failoverHealth: checker },
     });
 
-    const res = await get('/health/ready');
+    const res = await get('/readyz');
     const body = await res.json();
 
     // Response includes the failover block.
@@ -264,7 +264,7 @@ describe('multi-region: failover detection timing', () => {
       extras: { failoverHealth: checker },
     });
 
-    const res = await get('/health/ready');
+    const res = await get('/readyz');
     const body = await res.json();
 
     assert.ok(body.failover);
@@ -275,9 +275,9 @@ describe('multi-region: failover detection timing', () => {
     await checker.stop();
   });
 
-  test('/health/ready without failoverHealth excludes failover block', async () => {
+  test('/readyz without failoverHealth excludes failover block', async () => {
     const { close, get } = await serve();
-    const res = await get('/health/ready');
+    const res = await get('/readyz');
     const body = await res.json();
 
     assert.equal(body.failover, undefined);
