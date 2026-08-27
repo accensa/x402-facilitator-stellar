@@ -22,13 +22,13 @@ function testValidation() {
   };
   assert.strictEqual(validateDiscoveryDeclaration(valid).length, 0);
 
-  const invalid = {
+  const incomplete = {
     routeTemplate: '/api/data/{id}',
     pricing: { amount: '1', asset: 'USDC' },
   };
-  const errors = validateDiscoveryDeclaration(invalid);
-  assert.strictEqual(errors.length, 1);
-  assert.ok(errors[0].includes('Missing description for parameter: id'));
+  const advisories = validateDiscoveryDeclaration(incomplete);
+  assert.strictEqual(advisories.length, 1);
+  assert.ok(advisories[0].includes('Missing description for parameter: id'));
   console.log('✅ testValidation passed');
 }
 

@@ -10,9 +10,7 @@ import {
 /**
  * Distinguishes a hostile routeTemplate (path traversal, protocol smuggling,
  * unparseable percent-encoding) from one that is merely low-quality, such as
- * the wildcard ("*") pattern upstream's own SDK registers by default. Both
- * fail isValidRouteTemplate() identically, but only the former is a security
- * boundary worth discarding the whole resource over — see #65.
+ * the wildcard ("*") pattern upstream's own SDK registers by default.
  */
 function isHostileRouteTemplate(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
@@ -25,25 +23,51 @@ function isHostileRouteTemplate(value) {
   return decoded.includes('..') || decoded.includes('://');
 }
 
-export function validateForCatalog(paymentPayload, paymentRequirements) {
-  const result = {
+function createResult() {
+  return {
     hardDrop: false,
     reason: null,
     softDrops: [],
+    advisories: [],
     resource: null,
   };
+}
 
-  // We rely on upstream extraction for base structure, then enforce our policy
+function addAdvisories(result, declaration) {
+  if (!declaration.routeTemplate) {
+    result.advisories.push('routeTemplate is required');
+  }
+
+  const matches =
+    typeof declaration.routeTemplate === 'string'
+      ? declaration.routeTemplate.match(/\{([^}]+)\}/g)
+      : null;
+  if (matches) {
+    for (const match of matches) {
+      const parameter = match.slice(1, -1);
+      if (!declaration.parameters?.[parameter]) {
+        result.advisories.push(`Missing description for parameter: ${parameter}`);
+      }
+    }
+  }
+
+  if (!declaration.pricing || typeof declaration.pricing !== 'object') {
+    result.advisories.push('pricing object is required');
+  } else {
+    if (!declaration.pricing.amount) result.advisories.push('pricing.amount is required');
+    if (!declaration.pricing.asset) result.advisories.push('pricing.asset is required');
+  }
+}
+
+function validatePolicy(paymentPayload, paymentRequirements, result) {
   const extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
-
   if (!extracted) {
     result.hardDrop = true;
     result.reason = 'missing_or_invalid_discovery_extension';
     return result;
   }
 
-  // 1. extension validation (validate schema of bazaar.info)
-  const rawBazaar = paymentPayload.extensions && paymentPayload.extensions['bazaar'];
+  const rawBazaar = paymentPayload.extensions?.bazaar;
   if (rawBazaar) {
     const schemaResult = validateDiscoveryExtension(rawBazaar);
     if (!schemaResult.valid) {
@@ -53,21 +77,6 @@ export function validateForCatalog(paymentPayload, paymentRequirements) {
     }
   }
 
-  // 2. routeTemplate validation
-  //
-  // Path traversal and protocol smuggling stay a hard drop — that is a real
-  // security boundary (SSRF / traversal), not a quality issue. But a wildcard
-  // ("*") route is low-quality discovery metadata, not a malformed or hostile
-  // one: upstream's own SDK registers it by default and warns that it
-  // degrades to auto-generated parameter names (var1, var2, ...) rather than
-  // refusing to emit it. Hard-dropping the whole resource over that punishes
-  // a seller for the stock SDK's defaults, so this is a soft drop instead —
-  // the resource still lands, without the routeTemplate (extractDiscoveryInfo
-  // above already leaves it undefined and falls back to the payment's own
-  // resource URL), and the quality issue is surfaced via
-  // softDrops/EXTENSION-RESPONSES so the seller can improve it. See #23 for
-  // the soft-drop policy this stays consistent with, and #65 for the
-  // decision.
   const rawTemplate = rawBazaar?.routeTemplate;
   if (rawTemplate !== undefined && !isValidRouteTemplate(rawTemplate)) {
     if (isHostileRouteTemplate(rawTemplate)) {
@@ -78,7 +87,6 @@ export function validateForCatalog(paymentPayload, paymentRequirements) {
     result.softDrops.push('routeTemplate');
   }
 
-  // 3. serviceName validation
   const rawServiceName = paymentPayload.resource?.serviceName;
   if (rawServiceName !== undefined) {
     if (!isValidServiceName(rawServiceName)) {
@@ -89,7 +97,6 @@ export function validateForCatalog(paymentPayload, paymentRequirements) {
     }
   }
 
-  // 4. iconUrl validation
   const rawIconUrl = paymentPayload.resource?.iconUrl;
   if (rawIconUrl !== undefined) {
     if (!isValidIconUrl(rawIconUrl)) {
@@ -100,35 +107,29 @@ export function validateForCatalog(paymentPayload, paymentRequirements) {
     }
   }
 
-  // 5. description validation and truncation
-  const rawDesc = paymentPayload.resource?.description;
-  if (typeof rawDesc === 'string') {
-    let safeDesc = rawDesc.replace(/<[^>]*>?/gm, '').trim();
-    if (safeDesc.length > 200) {
-      safeDesc = safeDesc.substring(0, 200);
+  const rawDescription = paymentPayload.resource?.description;
+  if (typeof rawDescription === 'string') {
+    let description = rawDescription.replace(/<[^>]*>?/gm, '').trim();
+    if (description.length > 200) {
+      description = description.substring(0, 200);
       result.softDrops.push('description_truncated');
     }
-    extracted.description = safeDesc;
+    extracted.description = description;
   }
 
-  // 6. tags validation
   const rawTags = paymentPayload.resource?.tags;
   if (Array.isArray(rawTags)) {
-    const cleanTags = sanitizeTags(rawTags);
-    if (
-      cleanTags.length !== rawTags.length ||
-      JSON.stringify(cleanTags) !== JSON.stringify(rawTags)
-    ) {
+    const tags = sanitizeTags(rawTags);
+    if (tags.length !== rawTags.length || JSON.stringify(tags) !== JSON.stringify(rawTags)) {
       result.softDrops.push('tags_filtered');
     }
-    extracted.tags = cleanTags;
+    extracted.tags = tags;
   }
 
-  // Create final record shape expected by MemoryCatalogStore
-  const record = {
+  result.resource = {
     type: extracted.toolName ? 'mcp' : 'http',
     url: extracted.resourceUrl,
-    toolName: extracted.toolName, // undefined for http
+    toolName: extracted.toolName,
     serviceName: extracted.serviceName,
     description: extracted.description,
     tags: extracted.tags,
@@ -138,7 +139,71 @@ export function validateForCatalog(paymentPayload, paymentRequirements) {
     extensions: extracted.extensions,
     payTo: paymentRequirements.payTo,
   };
-
-  result.resource = record;
   return result;
+}
+
+/**
+ * Runs the authoritative catalog policy. Payment-shaped values are validated
+ * directly; SDK declarations are adapted into the same Bazaar extension shape.
+ * Seller-only guidance is returned as advisories and never changes admission.
+ */
+export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
+  const result = createResult();
+  if (!input || typeof input !== 'object') {
+    result.hardDrop = true;
+    result.reason = 'invalid_declaration';
+    return result;
+  }
+
+  if (input.paymentPayload && input.paymentRequirements) {
+    return validatePolicy(input.paymentPayload, input.paymentRequirements, result);
+  }
+
+  addAdvisories(result, input);
+  const declaration = {
+    x402Version: 2,
+    resource: {
+      url: input.url || input.resourceUrl || 'https://discovery.invalid',
+      serviceName: input.serviceName,
+      description: input.description,
+      iconUrl: input.iconUrl,
+      tags: input.tags,
+    },
+    extensions: {
+      bazaar: {
+        info: input.info || {
+          input: { type: input.type || 'http', method: input.method || 'GET' },
+        },
+        schema: input.schema || {
+          type: 'object',
+          properties: {
+            input: {
+              type: 'object',
+              properties: {
+                type: { type: 'string' },
+                method: { type: 'string' },
+              },
+              required: ['type', 'method'],
+            },
+          },
+          required: ['input'],
+        },
+        routeTemplate: input.routeTemplate,
+      },
+    },
+  };
+
+  const policy = validatePolicy(
+    declaration,
+    {
+      network: input.network || paymentRequirements.network || 'stellar:testnet',
+      payTo: input.payTo || paymentRequirements.payTo || '',
+    },
+    result,
+  );
+  return policy;
+}
+
+export function validateForCatalog(paymentPayload, paymentRequirements) {
+  return validateDiscoveryPolicy({ paymentPayload, paymentRequirements });
 }
