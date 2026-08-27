@@ -356,3 +356,94 @@ only inputs are a network connection and Node 22+; the accounts fund themselves.
 If you get a different result, that is a bug report worth filing — the README
 says a conformance failure is the most useful contribution to this repo, and it
 means it.
+
+## 7. Post-grant maintenance commitment
+
+This section is the stated commitment the SCF RFP §3.6 asks for: how spec and
+`@x402/*` drift is tracked after the grant, what triggers a conformance re-run, how a
+breaking upstream change is handled, and how long conformance is maintained. The
+mechanism below is not aspirational — it is the drift-monitoring work tracked in
+[#15](https://github.com/accensa/x402-facilitator-stellar/issues/15), whose
+implementation (PR [#254](https://github.com/accensa/x402-facilitator-stellar/pull/254))
+configures the automation and writes the reviewed-baseline policy this section commits
+to.
+
+### What is watched, and by what mechanism
+
+Two distinct things drift, and they are watched by two mechanisms:
+
+1. **The wire protocol and the `@x402/*` packages** (conformance). Renovate groups
+   `@x402/*` into a single PR per release (they release together); the nightly
+   conformance job
+   (`.github/workflows/conformance.yml`, daily `0 6 * * *`, also `workflow_dispatch`)
+   runs the upstream x402 e2e suite against our facilitator. The upstream SHA under
+   test is recorded, and the last manually-reviewed SHA is held in `docs/UPSTREAM.md`
+   so every diff is against a known baseline.
+2. **Discovery / Bazaar conventions** (a separate obligation, §3.2). The Bazaar
+   extension schema and the catalog filters come from `@x402/extensions`, which is in
+   the same Renovate group — but the *conventions* (what the catalog must accept, how
+   listing validation behaves) are judged by the same upstream suite plus the
+   search-evaluation harness (`npm run eval`, run in CI). Convention drift is tracked
+   in the same drift issue as wire drift, because the two surface through the same
+   upgrade, but the response differs: a wire break fails the conformance job; a
+   convention break fails the eval gate or the Bazaar conformance scenarios.
+
+### Cadence and triggers
+
+| Trigger | Action | Responsible | SLA |
+| --- | --- | --- | --- |
+| Nightly (daily) | Conformance run against `x402-foundation/x402@main` | CI, no human in the loop | Failure opens/updates a tracking issue with the run URL (workflow change tracked in [#192](https://github.com/accensa/x402-facilitator-stellar/issues/192)) |
+| Weekly | Spec-drift job diffs tracked spec files against `docs/UPSTREAM.md` baseline; opens an issue on change | CI opens; a maintainer reviews within the week | Issue triaged within 5 working days |
+| `@x402/*` bump PR | Conformance job runs against the PR; the PR is blocked on its failure | CI gate; maintainer merges or reverts | Before merge — a red conformance build never merges |
+| Upstream release notice | Release notes / npm advisory | Maintainer review | Reviewed before the next scheduled run |
+
+Ownership: the drift issue is assigned to a named maintainer at all times; an
+unassigned alert is a log line, so the assignment is part of the mechanism, not an
+afterthought.
+
+### Breaking-change response
+
+When an upstream change invalidates current behaviour (a renamed field, a tightened
+validation rule, a new required header):
+
+1. **Detect** — the nightly job or the bump-PR gate goes red and names the upstream
+   SHA; the drift issue records it.
+2. **Assess** — determine whether the break is wire-level (clients must change) or
+   service-level (only we must change). Wire-level breaks are the ones that matter to
+   integrators.
+3. **Communicate** — sellers and agents already integrated are told through the drift
+   issue, the release notes, and — for wire-level breaks — a
+   `docs/CONFORMANCE.md` entry dated with the affected upstream SHA and the support
+   window below. Integrators who do not read the issue tracker are reached via the
+   dependency upgrade path: a grouped `@x402/*` bump carries the break, so anyone who
+   upgrades gets the documentation with it.
+4. **Adopt or hold** — adopt within the support window, or pin the previous `@x402/*`
+   version for the remainder of the window while the break is worked. The pin is a
+   documented, deliberate state, not a silent one.
+
+### Maintenance horizon
+
+Conformance is maintained for **24 months after the grant ends**, and the commitment
+is bounded: after that horizon, this repository's conformance posture will be
+re-assessed and stated explicitly rather than assumed. During the horizon:
+
+- the nightly conformance job and the drift watch keep running on the published
+  schedule;
+- `@x402/*` bumps are adopted within the support window above;
+- the protocol version this service speaks is supported for **one minor version back**
+  from the latest `@x402/*` release, matching the upstream package's own support
+  window.
+
+A bounded commitment that will be kept is worth more than an unbounded one that will
+not; the re-assessment at the horizon is part of the commitment, not a loophole.
+
+### Where this is enforced
+
+- `.github/workflows/conformance.yml` — the nightly run (and its failure notification,
+  [#192](https://github.com/accensa/x402-facilitator-stellar/issues/192)).
+- [#15](https://github.com/accensa/x402-facilitator-stellar/issues/15) — the
+  drift-monitoring issue this section implements; PR
+  [#254](https://github.com/accensa/x402-facilitator-stellar/pull/254) is its
+  automation and policy.
+- `docs/UPSTREAM.md` — the reviewed-baseline SHA and the full review policy (created
+  by the drift-monitoring implementation).

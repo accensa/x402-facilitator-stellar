@@ -25,7 +25,16 @@ let x402HttpClient = null;
 if (AGENT_PAYER_SECRET_KEY) {
   try {
     const payer = createEd25519Signer(AGENT_PAYER_SECRET_KEY, NETWORK);
-    const client = new x402Client().register(NETWORK, new ExactStellarClient(payer));
+    const client = new x402Client()
+      .register(NETWORK, new ExactStellarClient(payer))
+      // @x402/core >= 2.22 enforces client-side spend controls and by default
+      // only pays "default" assets (USDC on Stellar). The MCP is a general
+      // agent wallet whose real caps are MAX_FEE_PER_CALL_STROOPS /
+      // MAX_SESSION_SPEND_STROOPS below — assertCanSpend refuses before any
+      // money moves — so the SDK-level default would wrongly reject XLM-priced
+      // resources (e.g. the repo's own seller example). Disable the SDK
+      // controls; the MCP's own are the ones that matter here.
+      .setSpendControls(false);
     x402HttpClient = new x402HTTPClient(client);
   } catch (err) {
     console.error(`Failed to initialize payer signer: ${err.message}`);

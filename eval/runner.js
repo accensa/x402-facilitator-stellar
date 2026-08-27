@@ -72,8 +72,9 @@ async function runEval() {
     }
   }
 
-  // Wait a tick for async background embeddings to finish
-  await new Promise(resolve => setTimeout(resolve, 100));
+  // Wait for all background embeddings to complete before running queries.
+  // flush() is deterministic — no hardcoded sleep needed.
+  await store.flush();
 
   const K = 3;
   let totalPrecision = 0;

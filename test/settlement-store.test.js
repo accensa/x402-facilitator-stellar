@@ -187,9 +187,11 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       idempotency_key: 'unresolved-1',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
-      state: 'unknown',
-      tx_hash: 'tx_confirmed_123',
     });
+    // Realistic path to 'unknown': submitted, then the outcome couldn't be
+    // confirmed (see app.js's timeout-after-submission handling) — a
+    // settlement never starts life already 'unknown' (#130).
+    await store.updateState('unresolved-1', 'unknown', { tx_hash: 'tx_confirmed_123' });
 
     const mockRpc = async (_url, body) => {
       if (body.method === 'getTransaction' && body.params.hash === 'tx_confirmed_123') {

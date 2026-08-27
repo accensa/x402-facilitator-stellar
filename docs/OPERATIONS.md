@@ -13,7 +13,7 @@ dependency checks**, deliberately: a liveness probe that fails on a downstream
 outage triggers restart loops that make the outage worse (and a restart cannot
 fix someone else's RPC). The Docker `HEALTHCHECK` targets this endpoint.
 
-### `GET /health/ready` — readiness
+### `GET /readyz` — readiness
 
 Returns `200 { status: "ready", ... }` when the instance can settle right now,
 or `503 { ok: false, status: "not_ready", networks: {...} }` naming which check
@@ -34,7 +34,7 @@ become an RPC burst, and every underlying call runs under its own
 ~12s retry budget.
 
 **Probe wiring rule:** restart logic → `/healthz`; traffic gating (load
-balancers, Kubernetes `readinessProbe`) → `/health/ready`.
+balancers, Kubernetes `readinessProbe`) → `/readyz`.
 
 ## Rate Limit Store
 
@@ -151,3 +151,97 @@ If a specific signer's `x402_signer_selected_total` counter stops incrementing w
 ### Adding Signers
 
 To add a new signer to the pool, generate and fund a new Stellar account, append its secret key to `FACILITATOR_SECRETS`, and restart the facilitator process. Boot validation ensures that malformed or duplicate secret keys are rejected before accepting traffic.
+
+## Monitoring
+
+### What is observed
+
+| Source | What it answers | Notes |
+| --- | --- | --- |
+| `GET /healthz` | liveness | Always `{ ok: true }` while the process runs; wire it to restart logic only. |
+| `GET /readyz` | readiness | Per-network RPC reachability and signer funding; names the failing check. Wire to traffic gating. |
+| `GET /metrics` | Prometheus text | Settlement/verification counters, signer selection and in-flight gauges, circuit-breaker state. |
+| Audit log | who did what | Settlements (with tx hash), auth failures, rate-limit rejections, catalog writes — one JSON line per event (`AUDIT_LOG_FILE` to mirror to a file). |
+| Request log | one redacted line per request | Headers redacted; the body is never logged. |
+
+### What to alert on
+
+| Alert | Signal | Runbook step |
+| --- | --- | --- |
+| Instance not ready | `/readyz` 503 | [RPC outage](#runbook-responding-to-an-rpc-outage) / [signer underfunded](#runbook-settlement-starting-to-fail) |
+| RPC unreachable | `soroban_rpc_unreachable` reason codes, breaker open | [RPC outage](#runbook-responding-to-an-rpc-outage) |
+| Signer balance low | readiness `signer_funded` failing | [Settlement starting to fail](#runbook-settlement-starting-to-fail) |
+| Stuck signer | `x402_signer_inflight` non-zero past max latency; selection counter stalled | [Stuck signer](#stuck-signer) |
+| Fee ceiling near cap | `fee_spd` approaching the limit | [Settlement starting to fail](#runbook-settlement-starting-to-fail) |
+
+### The uptime evidence
+
+The RFP asks for a 99%+ availability target evidenced, not asserted. This repo makes
+**no availability claim today**: no instance is operated, so there is nothing to
+measure, and self-reported uptime from the service itself is exactly the kind of
+evidence that does not count. External probes (liveness, readiness, a synthetic
+testnet payment, signer balance) with a named alert owner and a public status page are
+the deliverable, tracked in
+[#19](https://github.com/accensa/x402-facilitator-stellar/issues/19) — this section is
+the monitoring contract that issue will implement, not a claim that it exists yet.
+
+## Runbook
+
+### Runbook: deploying
+
+1. Build and tag the image by digest; push to your registry.
+2. Apply migrations before the process binds the port
+   (`psql "$DATABASE_URL" -f migrations/001_bazaar_catalog.sql`, then
+   `002_idempotency_keys.sql`).
+3. Start; gate traffic on `GET /readyz` going 200.
+4. Smoke-test with a real payment (the buyer guide's script in
+   [`docs/BUYER.md`](./BUYER.md) is a ready-made smoke test).
+
+### Runbook: upgrading
+
+1. Check `docs/CONFORMANCE.md` and the diff of `package.json` for wire-format changes
+   before upgrading — a bump of `@x402/*` can change response shapes.
+2. Rolling restart; both old and new must serve `/verify` during cutover.
+3. If a migration shipped, verify the previous image can still read the new schema
+   before finishing the roll.
+
+### Runbook: rotating keys
+
+1. Generate a new keypair, fund it, append it to `FACILITATOR_SECRETS` (pool mode)
+   alongside the old one; restart; confirm `/readyz` passes and a settlement works.
+2. Remove the old key from the pool; restart again.
+3. For a fee-bump signer, repeat with `FEE_BUMP_SECRET`, funding the new account before
+   the old one is drained.
+
+### Runbook: responding to an RPC outage
+
+1. **Detect:** `/readyz` reports `rpc_reachable: false`; clients see
+   `soroban_rpc_unreachable` and back off themselves.
+2. **Contain:** traffic gating on `/readyz` stops routing new traffic; the circuit
+   breaker refuses fast rather than hanging.
+3. **Diagnose:** check the RPC provider's status; confirm `STELLAR_RPC_URL` /
+   `STELLAR_RPC_URL_PUBNET` point where you think they do.
+4. **Recover:** switch the RPC URL (env change + restart) or wait for the provider; the
+   breaker half-opens probes and closes once the backend heals.
+5. **Do not** restart-loop on `/healthz` — a restart cannot fix someone else's RPC.
+
+### Runbook: settlement starting to fail
+
+1. **Detect:** `/readyz` `signer_funded` fails, or `fee_spd` sits at the ceiling.
+2. **Underfunded signer:** fund the account(s) above `READINESS_FUNDING_FLOOR_STROOPS`;
+   readiness clears on the next check.
+3. **Fee ceiling reached:** the meter working as designed. Raise `fee_spd` for the
+   affected key or accept the cap — the ceiling bounds what an abusive caller can drain.
+4. **Stuck signer:** remove the stuck account from `FACILITATOR_SECRETS`, restart,
+   reconcile the sequence number, re-add once healthy.
+5. **`submitted_outcome_unknown` callers:** tell them to look up the transaction hash
+   on-chain before resubmitting — resubmitting a settled payment risks paying twice.
+
+### Runbook: rollback
+
+Revert to the previously known-good image tag/digest. If a migration shipped in the
+failed deploy, verify the old image's schema compatibility before restarting it (see
+[`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) § Rollback Procedure).
+
+The same runbook, framed for the operator persona with the diagnosis steps spelled out,
+is in [`docs/OPERATOR.md`](./OPERATOR.md) § 7.
