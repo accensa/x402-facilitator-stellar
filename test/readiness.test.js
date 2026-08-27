@@ -69,7 +69,10 @@ function rpcStub({
       return { result: { status: healthy ? 'healthy' : 'degraded' } };
     }
     if (body.method === 'getLedgerEntries') {
-      return { result: { entries: entryVal ? [{ val: entryVal }] : [] } };
+      // Soroban RPC returns the entry's ledger data under `xdr` (shape:
+      // key/xdr/lastModifiedLedgerSeq/extXdr). The stub must mirror the real
+      // wire shape or the checker can pass tests while failing in production.
+      return { result: { entries: entryVal ? [{ xdr: entryVal }] : [] } };
     }
     throw new Error(`unexpected method ${body.method}`);
   };

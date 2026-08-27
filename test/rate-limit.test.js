@@ -84,3 +84,45 @@ test('rate limiter falls back to IP in open mode', async () => {
   // req2 should still be allowed since it's a different IP
   assert.equal((await limiter.checkVerify(req2)).allowed, true);
 });
+
+test('rate limiter sweeps expired buckets', async () => {
+  const config = {
+    global: { verifyRpm: 1, settleRpm: 1, settleRph: 10, settleRpd: 100, feeSpd: 1000, catalogRpm: 1 },
+    keys: {},
+  };
+  const limiter = new RateLimiter(config);
+  const now = Math.floor(Date.now() / 1000);
+  
+  // Directly inject an expired bucket
+  limiter.store.map.set('catalog:127.0.0.1:60', { count: 5, resetAt: now - 10 });
+  await limiter._sweep(now);
+  assert.equal(limiter.store.map.has('catalog:127.0.0.1:60'), false);
+});
+
+test('catalog limiter enforces limits', async () => {
+  const config = {
+    global: { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 500, catalogRpm: 2 },
+    keys: {
+      custom_key: { catalogRpm: 1 }
+    },
+  };
+  const limiter = new RateLimiter(config);
+  
+  // Test global limit (2 RPM)
+  const req1 = { ip: '127.0.0.1' };
+  assert.equal((await limiter.checkCatalog(req1)).allowed, true);
+  await limiter.recordCatalog(req1);
+  assert.equal((await limiter.checkCatalog(req1)).allowed, true);
+  await limiter.recordCatalog(req1);
+  const res1 = await limiter.checkCatalog(req1);
+  assert.equal(res1.allowed, false);
+  assert.equal(res1.reason, 'catalog_rate_limited');
+
+  // Test per-key limit (1 RPM)
+  const req2 = { keyId: 'custom_key', ip: '127.0.0.1' };
+  assert.equal((await limiter.checkCatalog(req2)).allowed, true);
+  await limiter.recordCatalog(req2);
+  const res2 = await limiter.checkCatalog(req2);
+  assert.equal(res2.allowed, false);
+  assert.equal(res2.reason, 'catalog_rate_limited');
+});

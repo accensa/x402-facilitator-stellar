@@ -20,6 +20,9 @@ export class MemoryCatalogStore {
     this.resources = new Map();
     this.embeddingClient = new EmbeddingClient(config.embeddingsUrl);
     this.enableReranking = config.enableReranking;
+    // Track in-flight background embedding promises so callers can await
+    // all of them via flush() instead of relying on a hardcoded sleep.
+    this._pendingEmbeddings = new Set();
   }
 
   _key(resource) {
@@ -62,7 +65,7 @@ export class MemoryCatalogStore {
 
     // Re-embed asynchronously without blocking the upsert (or the payment path)
     if (this.embeddingClient.url) {
-      Promise.resolve().then(async () => {
+      const p = Promise.resolve().then(async () => {
         try {
           const text = this.embeddingClient.composeDocument(entry);
           const vector = await this.embeddingClient.embed(text);
@@ -71,11 +74,24 @@ export class MemoryCatalogStore {
           }
         } catch (err) {
           console.warn(`[Catalog] Failed to re-embed ${key}: ${err.message}`);
+        } finally {
+          this._pendingEmbeddings.delete(p);
         }
       });
+      this._pendingEmbeddings.add(p);
     }
 
     return entry;
+  }
+
+  /**
+   * Await all in-flight background embedding requests.
+   * Use this in tests and eval harnesses instead of a fixed sleep:
+   *
+   *   await store.flush(); // deterministic — no setTimeout needed
+   */
+  async flush() {
+    await Promise.allSettled([...this._pendingEmbeddings]);
   }
 
   async getResource(url, toolName = null) {

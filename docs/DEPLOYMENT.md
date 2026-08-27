@@ -35,6 +35,70 @@ Properties of this mechanism, and why it is wired this way:
   manager injected.
 - **`.env` is gitignored.** `FACILITATOR_SECRET` is a signing key.
 
+### Validated cold-start path
+
+On 2026-08-26 the documented path was walked from a clean clone, following only this
+file and `.env.example`, against live Stellar testnet:
+
+```bash
+git clone <this repo>
+npm ci
+stellar keys generate facilitator --network testnet --fund   # or any funded S... key
+export FACILITATOR_SECRET="$(stellar keys show facilitator --secret)"
+npm start
+```
+
+Result: the process boots, `GET /healthz` returns `{ ok: true }`, `GET /supported`
+advertises `extra.areFeesSponsored: true`, and `GET /readyz` reports `ready` with
+`signer_funded: true` once the account is funded. The full `npm run e2e` conformance
+run (unmodified canonical client, real testnet payment) also passes against the
+locally-run facilitator.
+
+Two things broke during that walk and were fixed in the same change:
+
+- **`GET /readyz` always failed `signer_funded`** with a cryptic "Received undefined"
+  error, even for funded accounts: the checker read `getLedgerEntries` responses as
+  `entry.val`, but Soroban RPC returns the ledger data under `entry.xdr`. Fixed in
+  `src/readiness.js`; the test stubs were updated to the real wire shape so the bug
+  cannot ship again.
+- **The e2e path could not start**: `npm ci` resolved an incoherent `@x402/*` set
+  (`@x402/express@2.23` with `@x402/stellar@2.21`), and the newer express expected a
+  `paymentFlows` API the older stellar did not expose. The `@x402/*` set was aligned
+  to `2.23.0` (the drift this repo commits to tracking in
+  [`docs/CONFORMANCE.md`](./CONFORMANCE.md)); the e2e script and MCP client were then
+  updated for the client-side `spendControls` the new core enforces.
+
+### Hosted deployment
+
+**There is no publicly hosted instance of this facilitator today.** No URL is
+operated, no availability commitment is made, and the README says so explicitly. The
+hosted path — where it runs, its availability target and status page, and how a seller
+obtains credentials — is tracked in
+[#19](https://github.com/accensa/x402-facilitator-stellar/issues/19); until it lands,
+teams wanting a hosted facilitator should run their own from this file or use the
+upstream ecosystem's hosted option (see
+[Stellar's x402 docs](https://developers.stellar.org/docs/build/agentic-payments/x402)).
+
+What a hosted offering will need to state, per the RFP: testnet free and frictionless
+(open mode is the default), mainnet pricing configurable rather than hardwired (fee
+ceilings and per-key limits — see below), and an availability commitment that is
+actually measured rather than claimed.
+
+### Testnet and mainnet posture
+
+| | Testnet (default) | Pubnet (opt-in) |
+| --- | --- | --- |
+| Enable | nothing to do | `ENABLE_PUBNET=true` **and** its own secret **and** its own RPC URL |
+| Signer | `FACILITATOR_SECRET` / `FACILITATOR_SECRETS` | `FACILITATOR_SECRET_PUBNET` / `FACILITATOR_SECRETS_PUBNET` — never the testnet key |
+| RPC | public endpoint by default | `STELLAR_RPC_URL_PUBNET` required; boot refuses the public endpoint |
+| Caller auth | unset keys = open mode (free, frictionless; per-IP limits apply) | API keys strongly recommended; open mode discouraged |
+| Fees | `MAX_TX_FEE_STROOPS` (default 50000) | `MAX_TX_FEE_STROOPS_PUBNET` (default 50000) — configurable, not hardwired |
+| Rate limits | `RATE_LIMIT_GLOBAL`, per-key `RATE_LIMIT_<keyId>` | same, per deployment |
+
+Boot enforces the separation: `ENABLE_PUBNET=true` without an independent pubnet
+secret, or without `STELLAR_RPC_URL_PUBNET`, fails at startup rather than serving
+mainnet with a testnet-shaped config.
+
 ### Deployment topology and client IP resolution
 
 Whether the service can see the real client IP depends on what sits in front of
@@ -84,9 +148,15 @@ keeps open-mode callers out of each other's buckets.
 | `RPC_BREAKER_THRESHOLD` | No | Consecutive connection failures that open the RPC circuit breaker (default `10`). |
 | `RPC_BREAKER_COOLDOWN_MS` | No | How long an open breaker waits before a half-open probe (default `30000`). |
 | `READINESS_TIMEOUT_MS` | No | Per-call timeout for readiness checks, independent of the RPC retry budget (default `3000`). |
-| `READINESS_CACHE_TTL_MS` | No | How long GET /health/ready serves a cached result (default `5000`). |
+| `READINESS_CACHE_TTL_MS` | No | How long GET /readyz serves a cached result (default `5000`). |
 | `READINESS_FUNDING_FLOOR_STROOPS` | No | Minimum signer balance reported by the readiness probe (default `0` = must exist). |
 | `AUDIT_LOG_FILE` | No | File that receives audit records in addition to stdout. |
+| `RATE_LIMIT_GLOBAL` | No | Global default limits as comma-separated `metric=value` pairs (`verify_rpm`, `settle_rpm`, `settle_rph`, `settle_rpd`, `fee_spd`, `catalog_rpm`); applies per IP in open mode. |
+| `RATE_LIMIT_<keyId>` | No | Per-key overrides; any metric omitted falls back to the global. |
+| `HORIZON_HEADERS_TIMEOUT_MS` | No | Response header timeout for Horizon/RPC sockets (default `30000`). |
+| `RPC_FORCE_IPV4` | No | Force IPv4 for outbound RPC/Horizon connections (default `true`; set `false` to let the OS resolve). |
+| `EMBEDDINGS_URL` | No | Embedding endpoint used by `/discovery/search` for semantic retrieval; unset = lexical only. |
+| `ENABLE_RERANKING` | No | `true` turns on the second-pass reranker when an endpoint is available. |
 
 ## Shared Rate-Limit State
 
@@ -123,7 +193,7 @@ during an outage.
 
 - `GET /healthz` — liveness. Always `{ ok: true }` while the process runs; no
   dependency checks. Point container/orchestrator **restart** logic here.
-- `GET /health/ready` — readiness. Checks each configured network's Soroban RPC
+- `GET /readyz` — readiness. Checks each configured network's Soroban RPC
   reachability and the signer account's funded balance; returns `503` naming the
   failing check per network when any is unhealthy. Results are cached
   (`READINESS_CACHE_TTL_MS`) and each check runs under its own timeout
@@ -199,18 +269,53 @@ The default `@x402/stellar` package relies on the public Stellar testnet RPC. Th
 
 When `DATABASE_URL` is set, the database must be provisioned (PostgreSQL 16+)
 and migrated before the main facilitator process binds to the port, so the
-schema is ready when the first settlement arrives:
+schema is ready when the first settlement arrives.
+
+**Using node-pg-migrate (recommended):**
+
+```bash
+# Apply all pending migrations
+npm run db:migrate
+
+# Or in a Docker entrypoint:
+node scripts/db-migrate.js up && node src/server.js
+```
+
+**For databases that already have the original SQL tables:**
+
+If the database was provisioned with the original `.sql` migration files,
+register them as applied so node-pg-migrate does not re-create them:
+
+```bash
+npm run db:seed-legacy
+```
+
+**Legacy manual approach (still supported):**
 
 ```bash
 psql "$DATABASE_URL" -f migrations/001_bazaar_catalog.sql
 psql "$DATABASE_URL" -f migrations/002_idempotency_keys.sql
-psql "$DATABASE_URL" -f migrations/003_settlement_store.sql
-psql "$DATABASE_URL" -f migrations/004_outbox_events.sql
+psql "$DATABASE_URL" -f migrations/002_rate_limit_buckets.sql
 ```
 
-Migrations are applied on deploy (or handled by an init container). They are
-forward-compatible: each creates its tables/indexes if absent and touches
-nothing else.
+After using the legacy approach on an existing database, run `db:seed-legacy`
+to register the tables in the node-pg-migrate tracking table.
+
+**Rolling back a migration:**
+
+```bash
+npm run db:migrate:down        # undo last migration
+node scripts/db-migrate.js down 3  # undo last 3 migrations
+```
+
+**Checking migration compatibility (CI runs this automatically):**
+
+```bash
+npm run check:migration
+```
+
+See [MIGRATIONS.md](MIGRATIONS.md) for the full expand-and-contract
+migration guide and runbook.
 
 ## Settlement Notifications (Transactional Outbox)
 
@@ -242,5 +347,8 @@ database as the durability boundary.
 
 To roll back a deployment:
 1. Revert to the previously known-good container image tag/digest.
-2. If a database migration was part of the failed deployment, evaluate if the previous version's code is compatible with the new schema (we aim for forward-compatible migrations). If not, apply the down-migration before restarting the previous image.
+2. If a database migration was part of the failed deployment, evaluate if the previous version's code is compatible with the new schema (we aim for forward-compatible migrations). If not, apply the down-migration before restarting the previous image:
+   ```bash
+   npm run db:migrate:down
+   ```
 3. Restart the service.

@@ -133,7 +133,14 @@ await new Promise(r => server.once('listening', r));
 // ---------------------------------------------------------------------------
 
 const payer = createEd25519Signer(aliceSecret, NETWORK);
-const client = new x402Client().register(NETWORK, new ExactStellarClient(payer));
+const client = new x402Client()
+  .register(NETWORK, new ExactStellarClient(payer))
+  // @x402/core >= 2.22 enforces client-side spend controls: by default only
+  // "default" assets (USDC on Stellar) are payable. This script prices its own
+  // route in XLM, so the XLM SAC must be opted in explicitly — with the control
+  // left on rather than disabled, since this is a wire-conformance check, not a
+  // spend-policy sandbox.
+  .setSpendControls({ allowedAssets: [{ network: NETWORK, asset: XLM_SAC }] });
 const http = new x402HTTPClient(client);
 
 const RESOURCE = `http://localhost:${RESOURCE_PORT}/api/quote`;
@@ -162,7 +169,7 @@ try {
   const paymentRequired = http.getPaymentRequiredResponse(name => unpaid.headers.get(name), body);
   const req0 = paymentRequired.accepts?.[0];
   console.log(`    asset=${req0?.asset}`);
-  console.log(`    amount=${req0?.maxAmountRequired}  payTo=${req0?.payTo}`);
+  console.log(`    amount=${req0?.maxAmountRequired ?? req0?.price?.amount}  payTo=${req0?.payTo}`);
 
   step(3, 'Client signs the auth entry (payer never sees a transaction)');
   const paymentPayload = await withTransportRetry('sign', () =>
