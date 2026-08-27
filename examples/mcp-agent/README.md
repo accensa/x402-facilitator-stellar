@@ -4,6 +4,18 @@ This example demonstrates how an AI agent uses the `x402-mcp` standalone server 
 
 When started, it automatically configures and funds a Stellar testnet account for the agent via Friendbot. It then spins up the local MCP server and runs through a simulated AI tool loop.
 
+## ⚠️ Trustline prerequisite
+
+The seller example this agent pays prices in **XLM**, the native asset, which needs **no trustline** — nothing to set up for the stock example. The trap is any USDC-priced resource: **the agent (buyer) needs a trustline for the payment asset and a balance of it** before the payment can settle, and the seller needs one to receive it. A missing trustline fails deep in transaction simulation and reads as a generic error, so establish it up front:
+
+```bash
+# From the repo root — funds three fresh testnet accounts AND opens a USDC
+# trustline on each (see scripts/fund-testnet-accounts.mjs)
+npm run fund:testnet
+```
+
+For an existing agent account, `npm run prepare:testnet-usdc` (with `CLIENT_STELLAR_PRIVATE_KEY` / `SERVER_STELLAR_ADDRESS` / `SERVER_STELLAR_PRIVATE_KEY` set) adds the USDC trustline and funds the payer — see the [Buyer / Agent Guide](../../docs/BUYER.md#trustlines) for the concept, both networks, and the exact commands.
+
 ## Prerequisites
 - Node.js >= 20
 - A running x402 Facilitator instance (`npm start` in the repo root).

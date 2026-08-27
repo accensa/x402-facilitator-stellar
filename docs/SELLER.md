@@ -227,6 +227,9 @@ const declaration = createStellarDiscoveryResource({
 });
 ```
 
+Amounts are given as **decimal strings** (e.g. `'2.5'`), never JavaScript numbers, and must have **at most 7 decimal places** — Stellar amounts are 7-decimal fixed point (stroops). `toStroops` rejects anything finer than a stroop rather than silently rounding your price, and rejects numbers outright because they have usually lost precision before conversion. A non-numeric or over-precise amount fails validation with a structured message, not a low-level parse error.
+
+
 Validate a declaration offline, without paying anyone, with the bundled CLI:
 
 ```bash

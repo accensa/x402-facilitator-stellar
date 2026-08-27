@@ -52,6 +52,7 @@ export class CrdtRateLimitStore {
     databaseUrl,
     syncIntervalMs = DEFAULT_SYNC_INTERVAL_MS,
     warn = msg => console.warn(msg),
+    maxSize = 10000,
   }) {
     this.region = region;
     this.pool = pool ?? null;
@@ -61,6 +62,7 @@ export class CrdtRateLimitStore {
 
     /** @type {Map<string, {count: number, resetAt: number}>} local counters */
     this.local = new Map();
+    this.maxSize = maxSize;
 
     this._syncIntervalMs = syncIntervalMs;
     this._syncTimer = null;
@@ -247,19 +249,37 @@ export class CrdtRateLimitStore {
     }
 
     this.local.set(bucketId, { count: localCount, resetAt });
+
+    // Cap the local store size by shedding oldest buckets when limit is hit
+    if (this.local.size > this.maxSize) {
+      const entries = Array.from(this.local.entries());
+      // Sort by resetAt ascending (oldest first)
+      entries.sort((a, b) => a[1].resetAt - b[1].resetAt);
+      // Remove the oldest entries to get back under the limit
+      const toRemove = entries.slice(0, this.local.size - this.maxSize);
+      for (const [id] of toRemove) {
+        this.local.delete(id);
+      }
+    }
+
     return { count: localCount, resetAt };
   }
 
   async sweep(now) {
     // Sweep local.
     for (const [key, entry] of this.local) {
-      if (entry.resetAt <= now) this.local.delete(key);
+      // Defensive: evict buckets without finite resetAt (malformed entries)
+      if (!Number.isFinite(entry.resetAt) || entry.resetAt <= now) this.local.delete(key);
     }
 
     // Sweep remote.
     if (this.degraded || !this.pool) return;
     try {
-      await this.pool.query('DELETE FROM crdt_rate_limit_buckets WHERE reset_at <= $1', [now]);
+      // Defensive: also delete rows with NULL or non-finite reset_at
+      await this.pool.query(
+        'DELETE FROM crdt_rate_limit_buckets WHERE reset_at IS NULL OR reset_at <= $1',
+        [now]
+      );
     } catch (err) {
       this._degrade(`sweep failed: ${err.message}`);
     }
