@@ -101,11 +101,7 @@ const PAYMENT_BODY_SCHEMA = {
  */
 export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
   const { distributedLock = null, webhooks = null, failoverHealth = null } = extras;
-  const {
-    distributedLock = null,
-    webhooks = null,
-    settlementStore = extras.settlementStore ?? buildSettlementStore(config),
-  } = extras;
+  const { settlementStore = extras.settlementStore ?? buildSettlementStore(config) } = extras;
   const app = Fastify({
     // Client IP resolution. Unset leaves Fastify's default (off), correct where
     // the port is published directly — local development and docker-compose.

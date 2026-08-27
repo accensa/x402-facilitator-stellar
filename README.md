@@ -144,7 +144,7 @@ holds today on testnet:
 - [x] **Settled transaction hash published** — see the conformance table below
 - [x] **The x402 repository's e2e suite — 5 of 5 server components pass** (10/10
       scenarios across `express`, `fastify`, `hono`, `next`, `mcp`, 2026-08-25/26)
-- [ ] `stellar:pubnet`
+- [ ] `stellar:pubnet` (code-path verified; on-mainnet proof pending funded keys [#17])
 
 ### Settled on Stellar testnet, 2026-08-14
 
@@ -211,6 +211,14 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
   in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10).
 - **`exact` only.** The `upto` scheme has no Stellar specification yet; design notes in
   [`accensa-contracts/docs/ADR-002`](https://github.com/accensa/accensa-contracts/blob/main/docs/ADR-002-upto-scheme.md).
+- **Pubnet is code-served but unproven on mainnet (#17).** `stellar:pubnet` is served with
+  its own signer pool, RPC provider and fee ceiling, none shared with testnet, and that
+  isolation plus both-networks `/supported` advertising and 7-decimal amounts are pinned by
+  `test/pubnet-conformance.test.js`. What remains is operational, not code: a canonical
+  client completing a real USDC payment on mainnet with the settled hash published needs
+  funded pubnet keys and a contracted RPC, which no CI secret can supply. State and the
+  key-custody/rotation posture are in `docs/DEPLOYMENT.md`; the checkbox above stays
+  unchecked until that proof lands.
 
 ## Contributing
 
