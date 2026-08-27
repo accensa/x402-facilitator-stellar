@@ -36,7 +36,7 @@
  *   Worst-case failover time = detectInterval * failureThreshold = 15s
  *   Worst-case recovery time = detectInterval * recoveryThreshold = 10s
  *   Total failover + recovery < 30s (acceptance criterion)
-  */
+ */
 
 /* globals setInterval, clearInterval, AbortSignal */
 
@@ -144,9 +144,7 @@ export class FailoverHealthChecker {
       if (this.localStatus === 'recovering') {
         // Any failure during recovery resets immediately back to degraded.
         this.localStatus = 'degraded';
-        this.warn(
-          `[FailoverHealth] ${this.region}: degraded again after failure during recovery`,
-        );
+        this.warn(`[FailoverHealth] ${this.region}: degraded again after failure during recovery`);
         this._emit({ type: 'degraded', region: this.region, status: 'degraded' });
       } else if (this._localFailures >= this.failureThreshold && this.localStatus === 'healthy') {
         this.localStatus = 'degraded';

@@ -226,9 +226,7 @@ describe('CrdtRateLimitStore', () => {
     });
 
     const t = now();
-    await Promise.all(
-      Array.from({ length: 100 }, () => store.increment('counter', 1, t + 60, t)),
-    );
+    await Promise.all(Array.from({ length: 100 }, () => store.increment('counter', 1, t + 60, t)));
 
     const got = await store.get('counter', t);
     // In-memory Map is single-threaded within one process, so all 100
