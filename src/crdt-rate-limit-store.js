@@ -278,7 +278,7 @@ export class CrdtRateLimitStore {
       // Defensive: also delete rows with NULL or non-finite reset_at
       await this.pool.query(
         'DELETE FROM crdt_rate_limit_buckets WHERE reset_at IS NULL OR reset_at <= $1',
-        [now]
+        [now],
       );
     } catch (err) {
       this._degrade(`sweep failed: ${err.message}`);

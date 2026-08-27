@@ -73,15 +73,18 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
     databaseUrl: config.databaseUrl,
     maxSize: 10000,
   });
-  rateLimiter = new RateLimiter(config, crdtStore);
+  // RateLimiter expects the { global, keys, perNetwork } limits shape, which
+  // lives at config.rateLimits — passing the whole config would leave
+  // `global` undefined and crash every rate-limited route.
+  rateLimiter = new RateLimiter(config.rateLimits, crdtStore);
 } else if (config.redisUrl) {
-  rateLimiter = new RedisRateLimiter(config, { redisUrl: config.redisUrl });
+  rateLimiter = new RedisRateLimiter(config.rateLimits, { redisUrl: config.redisUrl });
 } else {
   rateLimitStore = createRateLimitStore(process.env, 10000);
   rateLimitStore.ready?.catch(err => {
     console.error(`[RateLimit] shared store failed to initialise: ${err.message}`);
   });
-  rateLimiter = new RateLimiter(config, rateLimitStore);
+  rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
 }
 const catalog = new MemoryCatalogStore(config);
 const idempotency = buildIdempotencyStore(config);
@@ -218,7 +221,7 @@ async function shutdown(signal) {
       await outboxWorker?.stop();
       await app.close();
       await webhooks.stop().catch(() => {});
-      await distributedLock?.quit().catch(() => {});
+      await distributedLock?.quit()?.catch(() => {});
       await crdtStore?.close().catch(() => {});
       failoverHealth?.stop();
       await rateLimiter?.close?.().catch(() => {});

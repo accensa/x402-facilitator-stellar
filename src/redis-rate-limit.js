@@ -162,6 +162,24 @@ export class RedisRateLimiter extends RateLimiter {
     await this._incrementAsync(ownerId, 'catalog', 60, 1);
   }
 
+  /**
+   * Catalogue reads are metered separately from writes with their own bucket
+   * (catalogReadRpm), mirroring the memory limiter in src/rate-limit.js.
+   */
+  checkCatalogRead(req) {
+    const ownerId = req.keyId || req.ip;
+    const limits = this._getKeyConfig(req.keyId);
+    return this._checkAsync(ownerId, 'catalog_read', 60, limits.catalogReadRpm ?? 60).then(res => {
+      if (!res.allowed) res.reason = 'catalog_read_rate_limited';
+      return res;
+    });
+  }
+
+  async recordCatalogRead(req) {
+    const ownerId = req.keyId || req.ip;
+    await this._incrementAsync(ownerId, 'catalog_read', 60, 1);
+  }
+
   async getUsage(keyId) {
     // Degraded / no Redis: the parent's implementation already reads the
     // in-memory store through the store interface (#94).

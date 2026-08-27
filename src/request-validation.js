@@ -31,7 +31,7 @@ function invalid(field, reason, message) {
 /**
  * Validates that a body contains the required payment fields.
  * This is shared validation logic used by both payment routes and discovery routes.
- * 
+ *
  * @param {unknown} body - the parsed JSON request body (req.body)
  * @returns {{valid: true, paymentPayload: object, paymentRequirements: object}
  *   | {valid: false, field: string, reason: string, message: string}}

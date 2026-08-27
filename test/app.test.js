@@ -306,15 +306,18 @@ describe('POST /settle', () => {
     // We use the real RateLimiter to test the integration.
     const { testConfig } = await import('./helpers/app.js');
     const { RateLimiter } = await import('../src/rate-limit.js');
+    // feeSpd sits above the 50000-stroop worst-case reservation (checkSettle
+    // reserves the max fee before settling) so the first settle passes; two
+    // settles then cross the ceiling.
     const rateLimiter = new RateLimiter({
       global: { verifyRpm: 100, settleRpm: 100, settleRph: 100, settleRpd: 100, feeSpd: 150000 },
       keys: {
-        custom_key: {
+        CUSTOM_KEY: {
           verifyRpm: 100,
           settleRpm: 100,
           settleRph: 100,
           settleRpd: 100,
-          feeSpd: 25000,
+          feeSpd: 75000,
         },
       },
     });
@@ -462,8 +465,9 @@ describe('GET /usage', () => {
       const res = await app.get('/usage', { authorization: 'Bearer s3cret' });
       assert.equal(res.status, 200);
       const json = await res.json();
-      // Scoped to the presented key, not to the whole instance.
-      assert.equal(json.keyId, 'admin');
+      // Scoped to the presented key, not to the whole instance. Key ids are
+      // normalized to uppercase at auth.
+      assert.equal(json.keyId, 'ADMIN');
     } finally {
       await app.close();
     }

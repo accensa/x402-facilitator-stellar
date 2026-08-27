@@ -85,8 +85,10 @@ test('resolves custom rate limits from RATE_LIMIT_GLOBAL and RATE_LIMIT_<key>', 
   assert.equal(config.rateLimits.global.settleRph, 50);
   assert.equal(config.rateLimits.global.catalogRpm, 5);
 
-  assert.equal(config.rateLimits.keys.admin.verifyRpm, 1000);
-  assert.equal(config.rateLimits.keys.admin.catalogRpm, 50);
+  // Key ids are normalized to uppercase (the auth layer uppercases req.keyId,
+  // so per-key limits are keyed by the normalized id).
+  assert.equal(config.rateLimits.keys.ADMIN.verifyRpm, 1000);
+  assert.equal(config.rateLimits.keys.ADMIN.catalogRpm, 50);
   // Unspecified per-key limits fall back to global
-  assert.equal(config.rateLimits.keys.admin.settleRph, 100);
+  assert.equal(config.rateLimits.keys.ADMIN.settleRph, 100);
 });

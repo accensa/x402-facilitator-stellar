@@ -86,7 +86,7 @@ export function resolveConfig(env = process.env) {
     // Validate that key id can be used in env var names (alphanumeric and underscore only)
     if (!/^[A-Za-z0-9_]+$/.test(id)) {
       throw new Error(
-        `API key id "${id}" contains invalid characters. Key ids must be alphanumeric and underscore only to work with RATE_LIMIT_ overrides.`
+        `API key id "${id}" contains invalid characters. Key ids must be alphanumeric and underscore only to work with RATE_LIMIT_ overrides.`,
       );
     }
     return {
@@ -132,7 +132,7 @@ export function resolveConfig(env = process.env) {
       // Validate that the key id exists in configured API keys (case-insensitive)
       if (!configuredKeyIds.has(keyId.toUpperCase())) {
         throw new Error(
-          `RATE_LIMIT_${keyId} is configured but no API key with id "${keyId}" exists in FACILITATOR_API_KEYS.`
+          `RATE_LIMIT_${keyId} is configured but no API key with id "${keyId}" exists in FACILITATOR_API_KEYS.`,
         );
       }
       rateLimits.keys[keyId.toUpperCase()] = parseLimits(env[k]);

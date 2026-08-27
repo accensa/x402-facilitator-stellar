@@ -100,7 +100,6 @@ const PAYMENT_BODY_SCHEMA = {
  * @returns {import('fastify').FastifyInstance}
  */
 export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
-<<<<<<< HEAD
   const {
     distributedLock = null,
     webhooks = null,
@@ -682,16 +681,16 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         const scheme = body?.paymentRequirements?.scheme ?? 'unknown';
         console.error(
           `[/verify] Exception: route=/verify network=${network} scheme=${scheme} ` +
-          `error=${err instanceof Error ? err.message : String(err)} ` +
-          `stack=${err instanceof Error ? err.stack : 'no stack'}`
+            `error=${err instanceof Error ? err.message : String(err)} ` +
+            `stack=${err instanceof Error ? err.stack : 'no stack'}`,
         );
-        
+
         let invalidReason = 'facilitator_error';
         if (err?.code === 'REQUEST_TIMEOUT') {
           invalidReason = 'request_timeout';
         } else if (err?.code === 'RPC_BREAKER_OPEN') {
           invalidReason = 'soroban_rpc_unreachable';
-        } else if (err?.message?.includes('unregistered') || err?.message?.includes('scheme')) {
+        } else if (err?.message?.includes('unregistered')) {
           invalidReason = 'unsupported_scheme_network';
         }
         if (invalidReason !== 'facilitator_error') {
@@ -924,10 +923,10 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         const scheme = body?.paymentRequirements?.scheme ?? 'unknown';
         console.error(
           `[/settle] Exception: route=/settle network=${network} scheme=${scheme} ` +
-          `error=${err instanceof Error ? err.message : String(err)} ` +
-          `stack=${err instanceof Error ? err.stack : 'no stack'}`
+            `error=${err instanceof Error ? err.message : String(err)} ` +
+            `stack=${err instanceof Error ? err.stack : 'no stack'}`,
         );
-        
+
         let errorReason = 'facilitator_error';
         if (err?.code === 'SUBMITTED_OUTCOME_UNKNOWN') {
           errorReason = 'submitted_outcome_unknown';
@@ -938,7 +937,7 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         } else if (err?.code === 'RPC_BREAKER_OPEN') {
           errorReason = 'soroban_rpc_unreachable';
           audit('rpc_unreachable', { actor: req.keyId ?? `ip:${req.ip}`, op: 'settle' });
-        } else if (err?.message?.includes('unregistered') || err?.message?.includes('scheme')) {
+        } else if (err?.message?.includes('unregistered')) {
           errorReason = 'unsupported_scheme_network';
         }
 
@@ -985,7 +984,9 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
 
-      if (req.keyId && record.key_id && record.key_id !== req.keyId) {
+      // Key ids are case-insensitive by design (normalized to uppercase at
+      // auth, see requireApiKey), so compare against the normalized form.
+      if (req.keyId && record.key_id && record.key_id.toUpperCase() !== req.keyId) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
 
@@ -1012,7 +1013,9 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
 
-      if (req.keyId && record.key_id && record.key_id !== req.keyId) {
+      // Key ids are case-insensitive by design (normalized to uppercase at
+      // auth, see requireApiKey), so compare against the normalized form.
+      if (req.keyId && record.key_id && record.key_id.toUpperCase() !== req.keyId) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
 
