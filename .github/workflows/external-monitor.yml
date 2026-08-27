@@ -1,0 +1,58 @@
+name: external-monitor
+
+# External availability probing (issue #19).
+#
+# Runs FROM GITHUB'S INFRASTRUCTURE, i.e. outside our own — so an outage on our
+# side cannot also silence its own monitor. It executes monitoring/probes.mjs
+# against the public endpoint and, on failure, opens (or updates) an incident.
+#
+# Required repo secrets:
+#   FACILITATOR_URL        public endpoint to probe (e.g. https://facilitator.example.com)
+#   MONITORING_CONFIG      optional path to a JSON config committed/secret for the env
+#   ALERT_WEBHOOK_URL      where to post the alert (Slack/PagerDuty/Discord webhook)
+# For synthetic-payment probing also set SYNTHETIC_PAYMENT=true and the e2e
+# secrets (FACILITATOR_SECRET, ALICE_SECRET) — see scripts/e2e.mjs.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # every 15 minutes
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run external probes
+        id: probe
+        env:
+          FACILITATOR_URL: ${{ secrets.FACILITATOR_URL }}
+          MONITORING_CONFIG: ${{ secrets.MONITORING_CONFIG }}
+          ALICE_SECRET: ${{ secrets.ALICE_SECRET }}
+          FACILITATOR_SECRET: ${{ secrets.FACILITATOR_SECRET }}
+          SYNTHETIC_PAYMENT: ${{ secrets.SYNTHETIC_PAYMENT }}
+        run: |
+          node monitoring/probes.mjs
+        continue-on-error: true
+
+      - name: Post alert on failure
+        if: steps.probe.outcome == 'failure'
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          if [ -n "${ALERT_WEBHOOK_URL}" ]; then
+            curl -fsS -X POST "${ALERT_WEBHOOK_URL}" \
+              -H 'content-type: application/json' \
+              -d "{\"text\":\"x402-facilitator-stellar external probe FAILED for ${FACILITOR_URL}: see monitoring/out/status.json\"}"
+          fi
+          echo "::error::External probe failed — see monitoring/out/status.json"
+          exit 1

@@ -1,0 +1,33 @@
+{
+  "endpoint": "https://facilitator.example.com",
+  "timeoutMs": 5000,
+  "probe": {
+    "healthz": true,
+    "readyz": true,
+    "supported": true,
+    "syntheticPayment": {
+      "enabled": false,
+      "command": "node scripts/e2e.mjs",
+      "timeoutMs": 60000
+    },
+    "signerBalance": {
+      "enabled": true,
+      "horizonUrl": "https://horizon-testnet.stellar.org",
+      "signers": [
+        {
+          "address": "GPLACEHOLDER_FACILITATOR_SIGNER_ADDRESS",
+          "network": "stellar:testnet",
+          "warnFloorStroops": 100000000,
+          "signalFloorStroops": 10000000
+        }
+      ]
+    }
+  },
+  "thresholds": {
+    "latencyWarnMs": {
+      "healthz": 100,
+      "readyz": 500,
+      "supported": 200
+    }
+  }
+}

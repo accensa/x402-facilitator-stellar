@@ -249,5 +249,20 @@ export function resolveConfig(env = process.env) {
     enableReranking: env.ENABLE_RERANKING === 'true',
     shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),
     requestTimeoutMs: Number(env.REQUEST_TIMEOUT_MS ?? 30_000),
+
+    /**
+     * Degraded-mode policy for settlement (#10, tracked in #19).
+     *
+     * When a durable settlement store was configured (`DATABASE_URL` set) but it
+     * is currently unreachable, settling without a record risks double-settling
+     * on retry. With this flag on, `/settle` refuses fast with
+     * `settlement_store_unavailable` (503) instead of falling back to a
+     * process-local record. `/verify` is unaffected — it reads nothing durable.
+     *
+     * Default off: an instance that never expected a durable store (open testnet,
+     * `DATABASE_URL` unset) must not start refusing to settle. Turn this on for
+     * any deployment that relies on the store for idempotency/audit.
+     */
+    requireDurableSettlementStore: env.SETTLE_REQUIRE_DURABLE_STORE === 'true',
   };
 }

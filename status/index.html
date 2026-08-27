@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>x402-facilitator-stellar · Status</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        max-width: 820px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      h1 {
+        font-size: 1.4rem;
+      }
+      .banner {
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        font-weight: 600;
+        margin: 1rem 0;
+      }
+      .operational {
+        background: #1f7a3d;
+        color: #fff;
+      }
+      .degraded {
+        background: #b8860b;
+        color: #111;
+      }
+      .down {
+        background: #b3261e;
+        color: #fff;
+      }
+      .no_sla {
+        background: #444;
+        color: #fff;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 1rem 0;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.4rem 0.6rem;
+        border-bottom: 1px solid #ccc;
+      }
+      .state-ok,
+      .state-operational {
+        color: #1f7a3d;
+        font-weight: 600;
+      }
+      .state-warn,
+      .state-degraded,
+      .state-unknown {
+        color: #b8860b;
+        font-weight: 600;
+      }
+      .state-down {
+        color: #b3261e;
+        font-weight: 600;
+      }
+      .incident {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        margin: 0.75rem 0;
+      }
+      .severity-high {
+        color: #b3261e;
+        font-weight: 700;
+      }
+      a {
+        color: #4a90d9;
+      }
+      footer {
+        margin-top: 2rem;
+        color: #888;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>x402-facilitator-stellar · Status</h1>
+    <div id="banner" class="banner no_sla">Loading…</div>
+
+    <h2>Components</h2>
+    <table id="components">
+      <tbody></tbody>
+    </table>
+
+    <h2>Published targets</h2>
+    <p id="targets"></p>
+
+    <h2>Incident history</h2>
+    <div id="incidents"><p>No incidents recorded.</p></div>
+
+    <footer>
+      Probed externally from outside our infrastructure. Raw probe output:
+      <a href="status.json">status.json</a> · <a href="incidents.json">incidents.json</a> · See
+      <a href="https://github.com/accensa/x402-facilitator-stellar/issues/19">issue #19</a>.
+    </footer>
+
+    <script>
+      const stateClass = s => `state-${String(s || 'unknown').toLowerCase()}`;
+      async function load() {
+        let status = {};
+        let incidents = { incidents: [] };
+        try {
+          status = await (await fetch('status.json')).json();
+        } catch (e) {}
+        try {
+          incidents = await (await fetch('incidents.json')).json();
+        } catch (e) {}
+
+        const banner = document.getElementById('banner');
+        banner.className = `banner ${status.status || 'no_sla'}`;
+        banner.textContent = status.statusText || status.status || 'unknown';
+
+        const tb = document.querySelector('#components tbody');
+        tb.innerHTML = '';
+        for (const c of status.components || []) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${c.name}</td><td class="${stateClass(c.state)}">${c.state}</td>`;
+          tb.appendChild(tr);
+        }
+
+        if (status.targets) {
+          const t = status.targets;
+          document.getElementById('targets').innerHTML =
+            `Availability (30d): healthz ${t.availability.healthz}, readyz ${t.availability.readyz}, ` +
+            `verify ${t.availability.verify}, settle ${t.availability.settle}, supported ${t.availability.supported}, ` +
+            `synthetic payment ${t.availability.syntheticPayment}. ` +
+            `Latency: verify p50/p95/p99 ${t.latencyMs.verify.p50}/${t.latencyMs.verify.p95}/${t.latencyMs.verify.p99} ms, ` +
+            `settle ${t.latencyMs.settle.p50}/${t.latencyMs.settle.p95}/${t.latencyMs.settle.p99} ms. ` +
+            `Reviewed ${t.reviewer}.`;
+        }
+
+        const inc = document.getElementById('incidents');
+        if (incidents.incidents && incidents.incidents.length) {
+          inc.innerHTML = '';
+          for (const i of incidents.incidents) {
+            const d = document.createElement('div');
+            d.className = 'incident';
+            d.innerHTML =
+              `<strong>${i.title}</strong> <span class="severity-${i.severity}">[${i.severity}]</span> ` +
+              `<span class="${stateClass(i.status)}">${i.status}</span><br>` +
+              `<small>${i.startedAt} → ${i.resolvedAt || 'open'}</small><br>` +
+              `<p>${i.summary}</p>` +
+              (i.link ? `<a href="${i.link}">details</a>` : '');
+            inc.appendChild(d);
+          }
+        }
+      }
+      load();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,37 @@
+name: publish-status
+
+# Publishes the public status page (issue #19) to GitHub Pages.
+# The page is static and reads status.json / incidents.json at runtime, so
+# updating those two files (or wiring monitoring/out/status.json into them) is
+# enough to change what dependents see.
+
+on:
+  push:
+    paths:
+      - 'status/**'
+      - '.github/workflows/publish-status.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: status
+      - id: deployment
+        uses: actions/deploy-pages@v4

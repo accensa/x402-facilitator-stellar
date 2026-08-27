@@ -1,0 +1,15 @@
+{
+  "incidents": [
+    {
+      "id": "INC-2026-08-14-SILENT-OUTAGE-RISK",
+      "title": "Pre-deployment: settlement-breaking outage could go unnoticed",
+      "status": "resolved",
+      "severity": "high",
+      "startedAt": "2026-08-14T00:00:00Z",
+      "resolvedAt": "2026-08-27T00:00:00Z",
+      "affected": ["monitoring", "status-page"],
+      "summary": "Before external monitoring existed, a facilitator could report liveness green while settlement was broken, and no one would know until a dependent checked production. This is the exact failure mode that cost the org 207 permanently lost ledgers in a prior silent indexer outage. Issue #19 closes the gap: external probes (including a synthetic testnet payment), a named on-call owner with escalation, degraded-mode contracts, and this incident history. Recorded honestly as the first entry so the page shows a real, credible history rather than a perpetually green 'no incidents ever'.",
+      "link": "https://github.com/accensa/x402-facilitator-stellar/issues/19"
+    }
+  ]
+}

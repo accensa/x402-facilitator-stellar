@@ -1,0 +1,33 @@
+{
+  "service": "x402-facilitator-stellar",
+  "status": "no_sla",
+  "statusText": "No public deployment yet — availability targets published, not yet measured (blocked by #16)",
+  "endpoint": null,
+  "updatedAt": "2026-08-27T00:00:00Z",
+  "targets": {
+    "availability": {
+      "healthz": "99.9%",
+      "readyz": "99.9%",
+      "verify": "99.5%",
+      "settle": "99.5%",
+      "supported": "99.9%",
+      "syntheticPayment": "99.0%"
+    },
+    "latencyMs": {
+      "verify": { "p50": 150, "p95": 600, "p99": 1500 },
+      "settle": { "p50": 2000, "p95": 6000, "p99": 12000 },
+      "supported": { "p50": 20, "p95": 80, "p99": 200 }
+    },
+    "window": "availability 30d rolling, latency 7d rolling",
+    "reviewer": "Facilitator On-Call (weekly, Mon 09:00 UTC)"
+  },
+  "components": [
+    { "name": "Liveness (/healthz)", "state": "unknown" },
+    { "name": "Readiness (/readyz)", "state": "unknown" },
+    { "name": "Verify (/verify)", "state": "unknown" },
+    { "name": "Settle (/settle)", "state": "unknown" },
+    { "name": "Supported (/supported)", "state": "unknown" },
+    { "name": "Synthetic payment (testnet)", "state": "unknown" },
+    { "name": "Signer pool funding", "state": "unknown" }
+  ]
+}

@@ -7,7 +7,8 @@
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License Apache 2.0" />
     <img src="https://img.shields.io/badge/stellar-testnet-success.svg" alt="Stellar testnet" />
     <img src="https://img.shields.io/badge/x402-v2-blue.svg" alt="x402 v2" />
-  </p>
+    <img src="https://img.shields.io/badge/status-page-blue.svg" alt="Status page" />
+   </p>
   <p>
     <a href="#conformance"><strong>Conformance</strong></a> ·
     <a href="#documentation"><strong>Documentation</strong></a> ·
@@ -81,6 +82,7 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Conformance](docs/CONFORMANCE.md) · [Deployment](docs/DEPLOYMENT.md) ·
 [Operations](docs/OPERATIONS.md) · [Authentication](docs/AUTHENTICATION.md) ·
 [Threat model](docs/THREAT-MODEL.md) · [Audit readiness](docs/AUDIT.md) ·
+[Public status page](https://accensa.github.io/x402-facilitator-stellar/) ·
 [Privacy](docs/PRIVACY.md) · [Glossary](docs/GLOSSARY.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
@@ -200,8 +202,11 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
   ([#65](https://github.com/accensa/x402-facilitator-stellar/issues/65)).
 - **No deployment.** There is a `Dockerfile`, a `docker-compose.yml` and
   [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), but no instance is running at a URL anyone
-  can hit. Availability targets and a status page are tracked in
-  [#19](https://github.com/accensa/x402-facilitator-stellar/issues/19).
+  can hit. Availability targets, external monitoring and a public status page are
+  specified in [#19](https://github.com/accensa/x402-facilitator-stellar/issues/19)
+  and published at **<https://accensa.github.io/x402-facilitator-stellar/>** — currently
+  showing `no_sla` until a public endpoint exists (blocked by
+  [#16](https://github.com/accensa/x402-facilitator-stellar/issues/16)).
 - **No persistence by default.** The catalog has a PostgreSQL schema in `migrations/` and
   uses it when `DATABASE_URL` is set; the settlement path holds nothing durable, tracked
   in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10).
