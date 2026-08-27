@@ -100,10 +100,8 @@ const PAYMENT_BODY_SCHEMA = {
  * @returns {import('fastify').FastifyInstance}
  */
 export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
+  const { distributedLock = null, webhooks = null, failoverHealth = null } = extras;
   const {
-    distributedLock = null,
-    webhooks = null,
-    failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
   } = extras;
   const app = Fastify({
