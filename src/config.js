@@ -67,6 +67,8 @@ export function resolveConfig(env = process.env) {
       feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
       maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS ?? 50_000),
+      keyManagerUrl: env.KEY_MANAGER_URL || null,
+      keyManagerPollIntervalMs: Number(env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0),
     },
   };
 
@@ -144,6 +146,10 @@ export function resolveConfig(env = process.env) {
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
       maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS_PUBNET ?? 50_000),
+      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET || null,
+      keyManagerPollIntervalMs: Number(
+        env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
+      ),
     };
   }
 
