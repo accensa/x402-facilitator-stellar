@@ -336,6 +336,9 @@ Current as of 2026-08-26.
 | Bazaar listing accepted by a third-party client | ❌ | first attempt rejected `invalid_routeTemplate`, #65 |
 | `__check_auth` smart-account payer | ⬜ | #13 |
 | Structured logs sufficient to diagnose a failure | ✅ | one structured line per request with redacted headers (`src/logger.js`), `audit` channel records, `/metrics`; observed working in the harness output since 2026-08-25 |
+| SEP-41 7-decimal amount handling, exact stroops | ✅ | `test/conformance-sep41-decimals.test.js` — 12 cases pinning exact stroop equality across boundary/truncation/rejection (#152) |
+| Ledger-expiry and replay wire behaviour | ✅ | `test/conformance-expiry-replay.test.js` — expired payloads rejected with machine-readable reasons; identical replays served from the settlement store, never double-submitted (#159) |
+| Verify/settle within interactive budget | ✅ | `test/conformance-resource-budget.test.js` — round-trip latency and bound measurements under §3.6's interactive budget; headroom recorded (#161) |
 
 ## 5. Automation
 
