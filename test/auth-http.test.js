@@ -64,10 +64,11 @@ describe('with API keys configured', () => {
 
   test('the key id is attached to the request, not the key', async () => {
     // /usage echoes req.keyId, which is how a caller is identified in metering
-    // and logs without the secret travelling with it.
+    // and logs without the secret travelling with it. Key ids are normalized
+    // to uppercase at auth.
     const res = await app.get('/usage', { authorization: 'Bearer supersecret' });
     assert.equal(res.status, 200);
-    assert.equal((await res.json()).keyId, 'admin');
+    assert.equal((await res.json()).keyId, 'ADMIN');
   });
 
   test('both /verify and /settle are protected', async () => {
@@ -87,8 +88,8 @@ describe('with several keys configured', () => {
 
   test('every key works, not just the first', async () => {
     for (const [key, id] of [
-      ['aaa', 'first'],
-      ['bbb', 'second'],
+      ['aaa', 'FIRST'],
+      ['bbb', 'SECOND'],
     ]) {
       const res = await app.get('/usage', { authorization: `Bearer ${key}` });
       assert.equal(res.status, 200);

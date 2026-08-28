@@ -16,15 +16,13 @@ import { PostgresSettlementStore } from './postgres.js';
  * @param {object} config - resolved config from resolveConfig()
  * @param {object} [options]
  * @param {Function} [options.log] - logging sink
+ * @param {object} [options.pool] - shared pg Pool to use (a Vault-managed pool,
+ *   #127); absent means the store builds its own from databaseUrl
  * @returns {MemorySettlementStore|PostgresSettlementStore}
  */
-export function buildSettlementStore(config, { log = msg => console.warn(msg) } = {}) {
+export function buildSettlementStore(config, { log = msg => console.warn(msg), pool } = {}) {
   if (config?.databaseUrl) {
-    return new PostgresSettlementStore(config.databaseUrl, {
-      replicaUrl: config?.databaseReplicaUrl || undefined,
-      replicaLagMs: config?.settlementReplicaLagMs,
-      warn: log,
-    });
+    return new PostgresSettlementStore(config.databaseUrl, { warn: log, pool });
   }
 
   log(

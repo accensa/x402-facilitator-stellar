@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import { OutboxStore } from '../outbox/store.js';
 import { MemorySettlementStore } from './memory.js';
 import { eventTypeForState } from '../eventstore/events.js';
 import { projectSettlement } from '../eventstore/projection.js';
@@ -82,18 +84,18 @@ export class PostgresSettlementStore extends MemorySettlementStore {
    * @param {number} [options.replicaLagMs] - max acceptable replica lag (ms) before
    *   falling back to the primary for a missing row (#121)
    * @param {Function} [options.warn] - logger sink
+   * @param {object} [options.outbox] - OutboxStore sharing this pool (default:
+   *   created lazily from the pool; the transactional outbox is how settlement
+   *   notifications survive crashes, #123)
    */
-  constructor(
-    databaseUrl,
-    { pool, replicaPool, replicaUrl, replicaLagMs = 1000, warn = msg => console.warn(msg) } = {},
-  ) {
+  constructor(databaseUrl, { pool, warn = msg => console.warn(msg), outbox } = {}) {
     super();
     this.warn = warn;
     this.pool = pool; // primary (writes + fallback reads)
     this.replicaPool = replicaPool; // read replica (reads)
     this.replicaLagMs = replicaLagMs;
     this.degraded = false;
-    this._readyReplica = false;
+    this.outbox = outbox ?? null;
 
     if (this.pool) {
       this.ready = this._ensureTable();
@@ -103,6 +105,7 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         .then(({ default: pg }) => {
           this.pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
           this.pool.on('error', err => this._degrade(`Postgres error: ${err.message}`));
+          this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
           this.ready = this._ensureSchema();
         })
         .catch(err =>
@@ -126,6 +129,7 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         })
         .catch(err => this.warn(`[SettlementStore] pg unavailable for replica (${err.message})`));
     } else {
+      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
       this.ready = this._ensureSchema();
     }
   }
@@ -180,6 +184,9 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         CREATE INDEX IF NOT EXISTS idx_settlement_projections_key_id ON settlement_projections(key_id);
         CREATE INDEX IF NOT EXISTS idx_settlement_projections_state ON settlement_projections(state);
       `);
+      // The outbox table is created with the settlement schema so the atomic
+      // settle+enqueue transaction never finds its table missing (#123).
+      await this.outbox?.ready;
     } catch (err) {
       this._degrade(`failed to create schema: ${err.message}`);
     }
@@ -392,23 +399,111 @@ export class PostgresSettlementStore extends MemorySettlementStore {
   }
 
   /**
-   * Read-after-write-consistent GET (#121): the settlement-status route uses
-   * this instead of `get()` so a client can settle and immediately read back
-   * the recorded status even while the replica is draining. Local writes are
-   * served from memory; anything else tolerates replica lag up to
-   * `replicaLagMs` before confirming against the primary.
+   * Settlement state change + notification enqueue in ONE transaction (#123).
+   *
+   * The guarantee the issue asks for: if the process crashes after settlement
+   * but before the notification reaches the broker, the notification must not
+   * be lost. Both the `settled` state change and the `outbox_events` insert
+   * commit atomically here, so the background worker (src/outbox/) can
+   * publish it afterwards — a crash at any point leaves the event either
+   * uncommitted (nothing settled, nothing to notify) or pending in the
+   * outbox (publishable later).
+   *
+   * Returns `atomicallyEnqueued: false` when there is no usable Postgres (no
+   * pool or degraded) — the caller then falls back to the direct webhook
+   * publish, which is the pre-outbox behaviour.
+   *
+   * @param {string} idempotencyKey
+   * @param {object} details - updateState details (tx_hash, response, ...)
+   * @param {object|null} event - notification event; null = state change only
+   * @param {object} [opts]
+   * @param {string} [opts.eventId] - caller-chosen idempotency key for the event
+   * @returns {Promise<{atomicallyEnqueued: boolean, record: object|null, event: object|null}>}
    */
-  async getConsistent(idempotencyKey) {
-    const local = await super.get(idempotencyKey);
-    if (local) return local;
-    if (this.degraded || !this.pool) return null;
+  async settleAndEnqueue(idempotencyKey, details, event, { eventId } = {}) {
+    if (this.degraded || !this.pool) {
+      const record = await super.updateState(idempotencyKey, 'settled', details);
+      return { atomicallyEnqueued: false, record, event };
+    }
     try {
       await this.ready;
-      await this._readyReplica;
-      return await this._queryGetWithLag(idempotencyKey);
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        // The same event-then-projection write as updateState(), folded into
+        // the outbox transaction: append SettlementSettled to the event log
+        // and update the read model in one statement, then insert the
+        // notification row — all atomic, so a crash between settling and
+        // notifying can never lose the notification (#123, #130).
+        const eventType = eventTypeForState('settled');
+        const { rows } = await client.query(
+          `WITH next_seq AS (
+            SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+            FROM settlement_events WHERE idempotency_key = $1
+          ),
+          ins_event AS (
+            INSERT INTO settlement_events (idempotency_key, seq, event_type, event_version, payload, recorded_at)
+            SELECT $1, next_seq.seq, $2, 1, $3::jsonb, NOW()
+            FROM next_seq
+            WHERE EXISTS (SELECT 1 FROM settlement_projections WHERE idempotency_key = $1)
+            RETURNING idempotency_key, seq, recorded_at
+          )
+          UPDATE settlement_projections SET
+            state = $4,
+            tx_hash = COALESCE($5, settlement_projections.tx_hash),
+            error_reason = COALESCE($6, settlement_projections.error_reason),
+            error_message = COALESCE($7, settlement_projections.error_message),
+            response = COALESCE($8, settlement_projections.response),
+            version = ins_event.seq,
+            updated_at = ins_event.recorded_at
+          FROM ins_event
+          WHERE settlement_projections.idempotency_key = ins_event.idempotency_key
+          RETURNING ${QUALIFIED_PROJECTION_COLUMNS}`,
+          [
+            idempotencyKey,
+            eventType,
+            JSON.stringify({
+              idempotency_key: idempotencyKey,
+              tx_hash: details.tx_hash ?? null,
+              error_reason: details.error_reason ?? null,
+              error_message: details.error_message ?? null,
+              response: details.response ?? null,
+            }),
+            'settled',
+            details.tx_hash ?? null,
+            details.error_reason ?? null,
+            details.error_message ?? null,
+            details.response ? JSON.stringify(details.response) : null,
+          ],
+        );
+
+        const resolvedEvent =
+          event == null ? null : { ...event, id: eventId ?? event.id ?? crypto.randomUUID() };
+        if (rows.length > 0 && resolvedEvent) {
+          await this.outbox.insertEvent(client, {
+            eventId: resolvedEvent.id,
+            type: resolvedEvent.type,
+            payload: resolvedEvent,
+          });
+        }
+        await client.query('COMMIT');
+
+        let entry = null;
+        if (rows.length > 0) {
+          entry = mapProjectionRow(rows[0]);
+          await super.updateState(idempotencyKey, 'settled', details);
+        }
+        return { atomicallyEnqueued: true, record: entry, event: resolvedEvent };
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
     } catch (err) {
-      this._degrade(`getConsistent failed: ${err.message}`);
-      return super.get(idempotencyKey);
+      this._degrade(`settleAndEnqueue failed: ${err.message}`);
+      const record = await super.updateState(idempotencyKey, 'settled', details);
+      return { atomicallyEnqueued: false, record, event };
     }
   }
 

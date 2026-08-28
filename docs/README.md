@@ -14,6 +14,7 @@ Welcome to the X402 Facilitator documentation. Choose the path that best matches
 
 **Reference:**
 - [Architecture](./ARCHITECTURE.md): System design, components, and the discovery path
+- [Business Model](./BUSINESS-MODEL.md): who pays for what, metering, and why the rate limits sit where they do
 - [Event Sourcing](./EVENT-SOURCING.md): The append-only settlement state machine and its audit trail
 - [Glossary](./GLOSSARY.md): Terminology (Stellar, X402, and Facilitator concepts)
 - [Deployment](./DEPLOYMENT.md): Containers, topology, environment variables, shared stores
