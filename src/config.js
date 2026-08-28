@@ -26,6 +26,21 @@ function vaultUrlHasUserinfo(url) {
  * signer secret, because the failure mode of accidentally running a mainnet
  * facilitator with a testnet-shaped config is losing real money.
  */
+/**
+ * Parse a positive integer from an env var, with a default and optional bounds
+ * check. Rejects NaN, negatives, and values above max. (#175)
+ */
+function parsePositiveInt(value, { name, defaultValue, min = 1, max = Number.MAX_SAFE_INTEGER }) {
+  const raw = value ?? String(defaultValue);
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || n > max) {
+    throw new Error(
+      `${name} must be a finite integer between ${min} and ${max}, got "${raw}".`,
+    );
+  }
+  return n;
+}
+
 function parseSecrets(env, pluralKey, singularKey) {
   const raw = env[pluralKey] ?? env[singularKey];
   if (!raw) {
@@ -76,7 +91,7 @@ export function resolveConfig(env = process.env) {
       secret: testnetSecrets[0],
       feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
-      maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS ?? 50_000),
+      maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS, { name: 'MAX_TX_FEE_STROOPS', defaultValue: 50_000, min: 100, max: 10_000_000 }),
     },
   };
 
@@ -168,7 +183,7 @@ export function resolveConfig(env = process.env) {
       secret: pubnetSecrets[0],
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
-      maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS_PUBNET ?? 50_000),
+      maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS_PUBNET, { name: 'MAX_TX_FEE_STROOPS_PUBNET', defaultValue: 50_000, min: 100, max: 10_000_000 }),
     };
   }
 
@@ -218,7 +233,7 @@ export function resolveConfig(env = process.env) {
     .filter(Boolean);
 
   return {
-    port: Number(env.PORT ?? 3402),
+    port: parsePositiveInt(env.PORT, { name: 'PORT', defaultValue: 3402, min: 1, max: 65535 }),
 
     /**
      * Deployment environment. Unset in the Docker image by default; only used

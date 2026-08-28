@@ -7,7 +7,7 @@ services:
       - '${PORT:-3402}:3402'
     environment:
       - FACILITATOR_SECRET=${FACILITATOR_SECRET}
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/x402_facilitator
+      - DATABASE_URL=postgres://${POSTGRES_USER:-facilitator}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-x402_facilitator}
       - REDIS_URL=redis://redis:6379
       # Redlock quorum (#116): three independent masters.
       - REDIS_NODES=redis://redis-node-1:6379,redis://redis-node-2:6379,redis://redis-node-3:6379
@@ -96,15 +96,14 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=x402_facilitator
-    ports:
-      - '5432:5432'
+      - POSTGRES_USER=${POSTGRES_USER:-facilitator}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-x402_facilitator}
+    # No host port binding — DB is only reachable from inside the compose network.
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-facilitator}']
       interval: 5s
       timeout: 5s
       retries: 5
