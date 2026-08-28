@@ -99,17 +99,42 @@ export async function createWebhookDispatcher({
   log = () => {},
   warn = msg => console.warn(msg),
 } = {}) {
+  /** The wire record, shared by the request-path enqueue and the outbox publish. */
+  const buildRecord = event => ({
+    id: event.id ?? crypto.randomUUID(),
+    ...event,
+    url: event.url ?? url,
+    publishedAt: new Date().toISOString(),
+  });
+
   if (!brokers.length) {
     log('webhooks: no Kafka brokers configured — delivering directly (no durability)');
     return {
       kind: 'direct',
       /** Fire-and-forget: never blocks or fails the caller. */
       enqueue(event) {
-        const target = event.url ?? url;
-        if (!target) return;
+        const record = buildRecord(event);
+        if (!record.url) return;
         Promise.resolve().then(() =>
-          deliverWebhook({ url: target, body: { ...event, url: target }, warn, fetchImpl }),
+          deliverWebhook({ url: record.url, body: record, warn, fetchImpl }),
         );
+      },
+      /**
+       * Awaitable publish for the outbox worker (#123): direct delivery with
+       * the retry policy, resolving only when a receiver answered. Throws when
+       * there is no URL or every attempt failed — the worker then leaves the
+       * event pending and retries on the next cycle.
+       */
+      async publish(event) {
+        const record = buildRecord(event);
+        if (!record.url) throw new Error('webhook delivery attempted without a receiver url');
+        const res = await deliverWebhook({ url: record.url, body: record, warn, fetchImpl });
+        if (!res.delivered) {
+          throw new Error(
+            `webhook delivery to ${record.url} failed after retries (last status ${res.status ?? 'transport error'})`,
+          );
+        }
+        return record;
       },
       async start() {},
       async stop() {},
@@ -137,12 +162,7 @@ export async function createWebhookDispatcher({
      * a webhook outage must not fail a settled payment.
      */
     enqueue(event) {
-      const record = {
-        id: event.id ?? crypto.randomUUID(),
-        ...event,
-        url: event.url ?? url,
-        publishedAt: new Date().toISOString(),
-      };
+      const record = buildRecord(event);
       Promise.resolve()
         .then(async () => {
           await producer.send({
@@ -157,6 +177,21 @@ export async function createWebhookDispatcher({
             deliverWebhook({ url: record.url, body: record, warn, fetchImpl }).catch(() => {});
           }
         });
+    },
+
+    /**
+     * Awaitable publish for the outbox worker (#123): resolves only when the
+     * broker acknowledged the message; throws on failure so the worker keeps
+     * the event pending for the next cycle. No direct-delivery fallback here
+     * — the outbox row IS the durability, and a fallback would double-send.
+     */
+    async publish(event) {
+      const record = buildRecord(event);
+      await producer.send({
+        topic,
+        messages: [{ key: record.id, value: JSON.stringify(record) }],
+      });
+      return record;
     },
 
     /** Starts the consumer group that performs actual delivery. */

@@ -1,3 +1,12 @@
+/**
+ * In-memory catalog store.
+ *
+ * This implementation uses a Map for storage and an EmbeddingClient for
+ * semantic search. Pagination parameters (limit, offset) are assumed to be
+ * validated and clamped by the API boundary layer (src/app.js) before being
+ * passed to these methods. The catalog interface guarantees that limit and
+ * offset are safe integers within acceptable bounds.
+ */
 import { scoreResource } from './search.js';
 import { EmbeddingClient } from './embeddings.js';
 
@@ -20,6 +29,9 @@ export class MemoryCatalogStore {
     this.resources = new Map();
     this.embeddingClient = new EmbeddingClient(config.embeddingsUrl);
     this.enableReranking = config.enableReranking;
+    // Track in-flight background embedding promises so callers can await
+    // all of them via flush() instead of relying on a hardcoded sleep.
+    this._pendingEmbeddings = new Set();
   }
 
   _key(resource) {
@@ -62,7 +74,7 @@ export class MemoryCatalogStore {
 
     // Re-embed asynchronously without blocking the upsert (or the payment path)
     if (this.embeddingClient.url) {
-      Promise.resolve().then(async () => {
+      const p = Promise.resolve().then(async () => {
         try {
           const text = this.embeddingClient.composeDocument(entry);
           const vector = await this.embeddingClient.embed(text);
@@ -71,11 +83,24 @@ export class MemoryCatalogStore {
           }
         } catch (err) {
           console.warn(`[Catalog] Failed to re-embed ${key}: ${err.message}`);
+        } finally {
+          this._pendingEmbeddings.delete(p);
         }
       });
+      this._pendingEmbeddings.add(p);
     }
 
     return entry;
+  }
+
+  /**
+   * Await all in-flight background embedding requests.
+   * Use this in tests and eval harnesses instead of a fixed sleep:
+   *
+   *   await store.flush(); // deterministic — no setTimeout needed
+   */
+  async flush() {
+    await Promise.allSettled([...this._pendingEmbeddings]);
   }
 
   async getResource(url, toolName = null) {
@@ -108,14 +133,9 @@ export class MemoryCatalogStore {
 
     const total = items.length;
 
-    let parsedLimit = parseInt(params.limit, 10);
-    if (isNaN(parsedLimit)) parsedLimit = 20;
-
-    let parsedOffset = parseInt(params.offset, 10);
-    if (isNaN(parsedOffset)) parsedOffset = 0;
-
-    const limit = Math.min(Math.max(1, parsedLimit), 100);
-    const offset = Math.max(0, parsedOffset);
+    // Assume limit and offset are validated and clamped by API boundary
+    const limit = params.limit ?? 20;
+    const offset = params.offset ?? 0;
 
     return {
       items: items.slice(offset, offset + limit),
@@ -204,9 +224,8 @@ export class MemoryCatalogStore {
       return this._key(a.item).localeCompare(this._key(b.item));
     });
 
-    let parsedLimit = parseInt(params.limit, 10);
-    if (isNaN(parsedLimit)) parsedLimit = 20;
-    const limit = Math.min(Math.max(1, parsedLimit), 100);
+    // Assume limit is validated and clamped by API boundary
+    const limit = params.limit ?? 20;
 
     let startIndex = 0;
     if (params.cursor) {
@@ -219,6 +238,9 @@ export class MemoryCatalogStore {
         // invalid cursor, ignore
       }
     }
+
+    // Ensure startIndex is within bounds
+    startIndex = Math.max(0, Math.min(startIndex, combinedItems.length));
 
     let paginatedItems = combinedItems.slice(startIndex, startIndex + limit).map(s => s.item);
 

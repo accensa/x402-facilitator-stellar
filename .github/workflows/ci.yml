@@ -86,6 +86,21 @@ jobs:
       # in a README.
       - run: node scripts/check-licenses.mjs --list
 
+  migration:
+    name: migration compat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Zero-downtime migration guardrail: blocks merging of schema changes
+      # that break backward compatibility (DROP in expand, RENAME, LOCK TABLE,
+      # etc.). See docs/MIGRATIONS.md for the full rule set.
+      - run: npm run check:migration
+
   eval:
     name: eval
     runs-on: ubuntu-latest
