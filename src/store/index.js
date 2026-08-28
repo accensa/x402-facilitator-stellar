@@ -22,7 +22,13 @@ import { PostgresSettlementStore } from './postgres.js';
  */
 export function buildSettlementStore(config, { log = msg => console.warn(msg), pool } = {}) {
   if (config?.databaseUrl) {
-    return new PostgresSettlementStore(config.databaseUrl, { warn: log, pool });
+    // CQRS (#121): when a read replica is configured, split reads from writes.
+    return new PostgresSettlementStore(config.databaseUrl, {
+      warn: log,
+      pool,
+      replicaUrl: config.databaseReplicaUrl ?? null,
+      replicaLagMs: config.settlementReplicaLagMs ?? 1000,
+    });
   }
 
   log(

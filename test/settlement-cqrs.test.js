@@ -8,8 +8,10 @@ import { Keypair } from '@stellar/stellar-sdk';
 
 /**
  * Minimal fake pg Pool mimicking the subset of the `pg` API the store uses:
- * `query()` and `on('error')`. The primary pool is always "fresh", while a
- * replica can be made to "lag" for specific keys (pretend the row hasn't
+ * `query()` and `on('error')`, dispatching on the event-sourced statements the
+ * store actually emits (#130): an append to settlement_events paired with the
+ * projection write derived from it. The primary pool is always "fresh", while
+ * a replica can be made to "lag" for specific keys (pretend the row hasn't
  * replicated yet) to exercise the read-after-write path (#121).
  */
 function fakePool(overrides = {}) {
@@ -17,78 +19,88 @@ function fakePool(overrides = {}) {
   for (const r of overrides.seed ?? []) store.set(r.idempotency_key, r);
   const lagKeys = new Set(overrides.lagKeys ?? []);
   const queryCalls = { select: 0, insert: 0, update: 0 };
+  const nowIso = () => new Date().toISOString();
   return {
     queryCalls,
     store,
     on: () => {},
     // Simulates the schema bootstrap the store runs.
-    query: async (text, params) => {
-      if (/CREATE TABLE|CREATE INDEX/.test(text)) return { rows: [] };
-      if (/^SELECT/.test(text)) {
+    query: async (text, params = []) => {
+      const flat = text.replace(/\s+/g, ' ').trim();
+      if (/CREATE TABLE|CREATE INDEX/.test(flat)) return { rows: [] };
+
+      // save(): SettlementInitiated CTE — append event + upsert projection.
+      if (flat.includes("'SettlementInitiated'")) {
+        queryCalls.insert++;
+        const [key, , network, scheme, payer, payTo, asset, amount, txHash, keyId] = params;
+        const existing = store.get(key);
+        const recordedAt = nowIso();
+        const row = {
+          idempotency_key: key,
+          network,
+          scheme,
+          payer,
+          pay_to: payTo,
+          asset,
+          amount,
+          state: 'submitted',
+          tx_hash: txHash,
+          error_reason: null,
+          error_message: null,
+          response: null,
+          key_id: keyId,
+          version: (existing?.version ?? 0) + 1,
+          created_at: existing?.created_at ?? recordedAt,
+          updated_at: recordedAt,
+        };
+        store.set(key, row);
+        return { rows: [{ ...row }] };
+      }
+
+      // updateState()/settleAndEnqueue(): event-then-projection CTE.
+      if (
+        flat.includes('WHERE settlement_projections.idempotency_key = ins_event.idempotency_key')
+      ) {
+        queryCalls.update++;
+        const [key, , , state, txHash, errorReason, errorMessage, response] = params;
+        const existing = store.get(key);
+        if (!existing) return { rows: [] };
+        const row = {
+          ...existing,
+          state,
+          tx_hash: txHash ?? existing.tx_hash,
+          error_reason: errorReason ?? existing.error_reason,
+          error_message: errorMessage ?? existing.error_message,
+          response: response ? JSON.parse(response) : existing.response,
+          version: existing.version + 1,
+          updated_at: nowIso(),
+        };
+        store.set(key, row);
+        return { rows: [{ ...row }] };
+      }
+
+      if (flat.includes('FROM settlement_projections WHERE idempotency_key = $1')) {
         queryCalls.select++;
-        // listUnknown: `WHERE state = $1` — scan all rows by state.
-        if (/state = \$1/.test(text)) {
-          const state = params[0];
-          const rows = [...store.values()].filter(r => r.state === state);
-          return { rows };
-        }
-        // get: equality on idempotency_key.
         const key = params[0];
         if (lagKeys.has(key)) {
           // Replica hasn't propagated this row yet.
           return { rows: [] };
         }
         const row = store.get(key);
-        return { rows: row ? [row] : [] };
+        return { rows: row ? [{ ...row }] : [] };
       }
-      if (/^INSERT/.test(text)) {
-        queryCalls.insert++;
-        const row = rowFromParams(text, params);
-        store.set(row.idempotency_key, row);
-        return { rows: [row] };
+
+      // listUnknown: `WHERE state = $1` — scan all rows by state.
+      if (flat.includes('FROM settlement_projections WHERE state = $1')) {
+        queryCalls.select++;
+        const state = params[0];
+        const rows = [...store.values()].filter(r => r.state === state);
+        return { rows };
       }
-      if (/^UPDATE/.test(text)) {
-        queryCalls.update++;
-        const existing = store.get(params[0]);
-        if (!existing) return { rows: [] };
-        // UPDATE params: $1 key, $2 state, $3 tx_hash, $4 error_reason,
-        // $5 error_message, $6 response.
-        const row = Object.assign({}, existing, {
-          state: params[1],
-          tx_hash: params[2] ?? existing.tx_hash,
-          error_reason: params[3] ?? existing.error_reason,
-          error_message: params[4] ?? existing.error_message,
-          response: params[5] ?? existing.response,
-          updated_at: new Date(),
-        });
-        store.set(params[0], row);
-        return { rows: [row] };
-      }
+
       return { rows: [] };
     },
   };
-}
-
-// Renders a settlement row shape from the `RETURNING` columns the store expects.
-function rowFromParams(text, params) {
-  const base = {
-    idempotency_key: params[0],
-    network: params[1],
-    scheme: params[2],
-    payer: params[3] ?? null,
-    pay_to: params[4] ?? null,
-    asset: params[5] ?? null,
-    amount: params[6] ?? null,
-    state: params[7] ?? 'submitted',
-    tx_hash: params[8] ?? null,
-    error_reason: params[9] ?? null,
-    error_message: params[10] ?? null,
-    response: params[11] ?? null,
-    key_id: params[12] ?? null,
-    created_at: new Date(),
-    updated_at: new Date(),
-  };
-  return base;
 }
 
 describe('CQRS read replica settlement store (#121)', () => {
@@ -174,9 +186,10 @@ describe('CQRS read replica settlement store (#121)', () => {
       state: 'submitted',
     });
 
-    // The replica is lagged for fresh-1, but the in-memory fallback (kept in
-    // sync by save) must win immediately.
-    const got = await store.get('fresh-1');
+    // The replica is lagged for fresh-1, but read-after-write
+    // (`getConsistent`, what the status endpoint uses) serves this process's
+    // own write from memory immediately.
+    const got = await store.getConsistent('fresh-1');
     assert.equal(got.state, 'submitted');
   });
 
@@ -231,7 +244,7 @@ describe('CQRS read replica settlement store (#121)', () => {
     assert.equal(rows.length, 2);
   });
 
-  test('buildSettlementStore wires replicaUrl and replicaLagMs from config', () => {
+  test('buildSettlementStore wires replicaUrl and replicaLagMs from config', async () => {
     const config = resolveConfig({
       FACILITATOR_SECRET: Keypair.random().secret(),
       DATABASE_URL: 'postgres://primary:5432/x402',
@@ -241,10 +254,22 @@ describe('CQRS read replica settlement store (#121)', () => {
     assert.equal(config.databaseReplicaUrl, 'postgres://replica:5432/x402');
     assert.equal(config.settlementReplicaLagMs, 2500);
 
-    const store = buildSettlementStore(config, { log: () => {} });
+    // Inject a fake primary pool so buildSettlementStore's lazy `import('pg')`
+    // never tries to resolve the fake hostname (getaddrinfo ENOTFOUND primary)
+    // out from under the test. The replica is only configured via
+    // `replicaUrl`, which just constructs a real pg.Pool that never queries at
+    // this stage, so no connection is attempted there either.
+    const fakePool = {
+      on: () => {},
+      query: async () => ({ rows: [] }),
+      connect: async () => ({ query: async () => ({ rows: [] }), release: () => {} }),
+      end: async () => {},
+    };
+    const store = buildSettlementStore(config, { log: () => {}, pool: fakePool });
     assert.ok(store instanceof PostgresSettlementStore);
-    // Not wired synchronously (lazy `import('pg')`), but the config is correct.
+    // The config fields are forwarded into the store's replica settings.
     assert.equal(store.replicaLagMs, 2500);
+    assert.equal(store.replicaUrl, 'postgres://replica:5432/x402');
   });
 
   test('GET /settlements/:key serves a fresh settlement even when the replica lags', async () => {

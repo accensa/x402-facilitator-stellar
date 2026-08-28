@@ -88,18 +88,37 @@ export class PostgresSettlementStore extends MemorySettlementStore {
    *   created lazily from the pool; the transactional outbox is how settlement
    *   notifications survive crashes, #123)
    */
-  constructor(databaseUrl, { pool, warn = msg => console.warn(msg), outbox } = {}) {
+  constructor(
+    databaseUrl,
+    {
+      pool,
+      replicaPool,
+      replicaUrl,
+      replicaLagMs = 1000,
+      warn = msg => console.warn(msg),
+      outbox,
+    } = {},
+  ) {
     super();
     this.warn = warn;
-    this.pool = pool; // primary (writes + fallback reads)
-    this.replicaPool = replicaPool; // read replica (reads)
+    this.pool = pool ?? null; // primary (writes + fallback reads)
+    this.replicaPool = replicaPool ?? null; // read replica (reads)
+    this.replicaUrl = replicaUrl ?? null; // read-replica connection string (#121)
     this.replicaLagMs = replicaLagMs;
     this.degraded = false;
     this.outbox = outbox ?? null;
+    this.ready = null;
+    this._readyReplica = Promise.resolve();
 
+    // Primary pool: use an injected one when provided, otherwise build it
+    // lazily from the connection string. When neither is available the store
+    // degrades to process-local memory (see _degrade).
     if (this.pool) {
-      this.ready = this._ensureTable();
-      this._readyReplica = Promise.resolve();
+      // The transactional outbox shares the primary pool (created here when
+      // not injected) so settleAndEnqueue's state change + notification
+      // insert commit atomically (#123).
+      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
+      this.ready = this._ensureSchema();
     } else {
       import('pg')
         .then(({ default: pg }) => {
@@ -113,24 +132,22 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         );
     }
 
-    // A replica is optional. When one is configured we lazy-init its pool and
-    // surface a `ready` promise the caller can await before routing reads.
-    if (replicaPool) {
-      this.replicaPool = replicaPool;
+    // A read replica is optional. An injected pool is ready immediately; a
+    // connection string is turned into a pool lazily. When neither is given,
+    // `usesReplica` stays false and all reads go to the primary — the
+    // pre-#121 single-pool behaviour, and the zero-config default.
+    if (this.replicaPool) {
       this._readyReplica = Promise.resolve();
-    } else if (replicaUrl) {
-      import('pg')
-        .then(({ default: pg }) => {
-          this.replicaPool = new pg.Pool({ connectionString: replicaUrl, max: 20 });
-          this.replicaPool.on('error', err =>
-            this.warn(`[SettlementStore] replica pool error: ${err.message}`),
-          );
-          this._readyReplica = Promise.resolve();
-        })
-        .catch(err => this.warn(`[SettlementStore] pg unavailable for replica (${err.message})`));
-    } else {
-      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
-      this.ready = this._ensureSchema();
+    } else if (this.replicaUrl) {
+      this._readyReplica = import('pg').then(({ default: pg }) => {
+        this.replicaPool = new pg.Pool({ connectionString: this.replicaUrl, max: 20 });
+        this.replicaPool.on('error', err =>
+          this.warn(`[SettlementStore] replica pool error: ${err.message}`),
+        );
+      });
+      this._readyReplica.catch(err =>
+        this.warn(`[SettlementStore] pg unavailable for replica (${err.message})`),
+      );
     }
   }
 
@@ -198,20 +215,15 @@ export class PostgresSettlementStore extends MemorySettlementStore {
   }
 
   async get(idempotencyKey) {
-    // The in-memory copy is kept in sync by every successful write (see the
-    // `super.*` calls below) and double-checks the very rows this process wrote.
-    // A replica read of our own just-submitted write could otherwise lag.
-    const local = await super.get(idempotencyKey);
-    if (local) return local;
-
-    if (this.degraded || !this.pool) return null;
+    // Platform read: always hit the database (the read pool when a replica is
+    // configured). Read-after-write for the status endpoint is served by
+    // `getConsistent`, which layers this process's own-writes-from-memory on
+    // top — plain `get` must reflect durable state, so the #130 repair path
+    // (delete the projection, rebuild it from the event log) stays observable.
+    if (this.degraded || !this.pool) return super.get(idempotencyKey);
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
-        `SELECT ${PROJECTION_COLUMNS} FROM settlement_projections WHERE idempotency_key = $1`,
-        [idempotencyKey],
-      );
-      return rows.length ? mapProjectionRow(rows[0]) : null;
+      return await this._queryGet(this._readPool(), idempotencyKey);
     } catch (err) {
       this._degrade(`get failed: ${err.message}`);
       return super.get(idempotencyKey);
@@ -223,11 +235,42 @@ export class PostgresSettlementStore extends MemorySettlementStore {
    */
   async _queryGet(pool, idempotencyKey) {
     const { rows } = await pool.query(
-      'SELECT idempotency_key, network, scheme, payer, pay_to, asset, amount, state, tx_hash, error_reason, error_message, response, key_id, created_at, updated_at FROM settlements WHERE idempotency_key = $1',
+      `SELECT ${PROJECTION_COLUMNS} FROM settlement_projections WHERE idempotency_key = $1`,
       [idempotencyKey],
     );
     if (rows.length === 0) return null;
-    return this._toRecord(rows[0]);
+    return mapProjectionRow(rows[0]);
+  }
+
+  /**
+   * Consistency-aware status read (#121): serves "settle, then immediately
+   * GET" correctly under asynchronous replication.
+   *
+   * Layers, in order:
+   *   1. This process's own writes, kept in the in-memory copy by every
+   *      successful write, always served immediately (a replica read never
+   *      touches our own fresh write).
+   *   2. The replica, retried up to `replicaLagMs` for a row that hasn't
+   *      propagated yet.
+   *   3. The primary, so a genuine miss is still a miss and a recent write by
+   *      another pod is surfaced — a 404 is only returned once replication is
+   *      confirmed to have drained.
+   *
+   * This is the read `/settlements/:key` uses (see app.js).
+   */
+  async getConsistent(idempotencyKey) {
+    const local = await super.get(idempotencyKey);
+    if (local) return local;
+
+    if (this.degraded || !this.pool) return this.get(idempotencyKey);
+    try {
+      await this.ready;
+      await this._readyReplica;
+      return await this._queryGetWithLag(idempotencyKey);
+    } catch (err) {
+      this._degrade(`getConsistent failed: ${err.message}`);
+      return this.get(idempotencyKey);
+    }
   }
 
   /**
@@ -250,26 +293,6 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     // Replica still can't see it. Assume recent write / replication drain and
     // confirm against the primary before returning a genuine miss.
     return this._queryGet(this.pool, idempotencyKey);
-  }
-
-  _toRecord(r) {
-    return {
-      idempotency_key: r.idempotency_key,
-      network: r.network,
-      scheme: r.scheme,
-      payer: r.payer,
-      pay_to: r.pay_to,
-      asset: r.asset,
-      amount: r.amount,
-      state: r.state,
-      tx_hash: r.tx_hash,
-      error_reason: r.error_reason,
-      error_message: r.error_message,
-      response: r.response,
-      key_id: r.key_id,
-      created_at: new Date(r.created_at).toISOString(),
-      updated_at: new Date(r.updated_at).toISOString(),
-    };
   }
 
   async save(record) {
@@ -516,7 +539,7 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     if (this.degraded || !pool) return super.listUnknown();
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
+      const { rows } = await pool.query(
         `SELECT ${PROJECTION_COLUMNS} FROM settlement_projections WHERE state = $1`,
         ['unknown'],
       );

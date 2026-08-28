@@ -234,6 +234,22 @@ export function resolveConfig(env = process.env) {
     /** Optional shared stores. Unset means in-memory, single-instance. */
     redisUrl: env.REDIS_URL || null,
     databaseUrl: env.DATABASE_URL || null,
+
+    /**
+     * CQRS read replica (#121): when DATABASE_URL_REPLICA is set, settlement
+     * status reads and the reconciliation sweep are routed to a read replica
+     * instead of the primary, so history queries stop contending with writes.
+     * Unset means single-pool (reads and writes on the primary).
+     */
+    databaseReplicaUrl: env.DATABASE_URL_REPLICA || null,
+
+    /**
+     * CQRS read-after-write tolerance (#121): how long a status read retries a
+     * replica that hasn't propagated a recent write before falling back to the
+     * primary (default 1000 ms). Only meaningful when DATABASE_URL_REPLICA is
+     * set.
+     */
+    settlementReplicaLagMs: Number(env.SETTLEMENT_REPLICA_LAG_MS ?? 1000),
     rateLimitStore: env.RATE_LIMIT_STORE || 'memory',
 
     /**
