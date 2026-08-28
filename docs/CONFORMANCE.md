@@ -190,7 +190,7 @@ four failures return upstream's `facilitator_error`, which means *this service
 returned an error* — and there is no record of what it was. Whether the other
 two are ours or upstream's is likewise unknowable from here.
 
-That makes [#7](https://github.com/accensa/x402-facilitator-stellar/issues/7)
+That made [#7](https://github.com/accensa/x402-facilitator-stellar/issues/7)
 (structured logging, request correlation, `/metrics`) the blocking item for this
 document, not a nice-to-have. It is tracked against these runs in
 [#64](https://github.com/accensa/x402-facilitator-stellar/issues/64).
@@ -206,6 +206,61 @@ Upstream's server registers wildcard `*` route templates; this repo's catalog
 validation hard-drops them. This is the **first time another party's client has
 touched this catalog**, and the listing was rejected. Filed as
 [#65](https://github.com/accensa/x402-facilitator-stellar/issues/65).
+
+### 2026-08-25/26 — all five server components pass; the four failures are gone and diagnosable
+
+**Two more runs, two consecutive nights: `10 of 10` scenarios pass, every server
+component, with on-chain settlements.** This is the state that closes #64.
+
+The harness had grown `upfront` variants of each route in the meantime, so the
+scenario matrix is wider than the August 14 one — and the previously failing
+`/exact/stellar` and `exact_stellar` combinations are the ones now passing:
+
+| Server component | Scenarios | Result |
+|---|---|---|
+| `typescript/http/express` | `/exact/stellar`, `/exact/stellar/upfront` | ✅ ✅ |
+| `typescript/http/fastify` | `/exact/stellar`, `/exact/stellar/upfront` | ✅ ✅ |
+| `typescript/http/hono` | `/exact/stellar`, `/exact/stellar/upfront` | ✅ ✅ |
+| `typescript/http/next` | `/api/exact/stellar/withX402`, `…/upfront/withx402` | ✅ ✅ |
+| `typescript/mcp` | `exact_stellar`, `exact_stellar_upfront` | ✅ ✅ |
+
+Every scenario reports a settled transaction hash; the ten from the 2026-08-26
+run (`8c7ccfc`) are `69451e0c…`, `8f9d490c…`, `6502820d…`, `93d286b9…`,
+`c51cccdd…`, `63535589…`, `c5fd4371…`, `991935c9…`, `8e59272f…`, `6b111ef8…`
+— verifiable on Horizon the same way as the August 14 pair. `express`, `fastify`,
+`hono` and `mcp` each settled two payments, on both the plain and `upfront`
+payment flows.
+
+#### Why the four failures were not seen on these runs, and what would show them next time
+
+The run before the first green one (2026-08-24) still failed with all three
+original signatures: upstream's `402 facilitator_error` (`mcp`), a 402 the client
+could not parse (`hono`, `fastify`), and `Payment response header not found`
+(`express`, `fastify`). The next merge to main — the request-validation and
+structured-logging work from #238/#239/#240 — was the last change before the
+suite went green, and it has stayed green since.
+
+The facilitator now emits **one structured line per request** instead of four
+lines per run, and the harness captures them, so a failure can be attributed to
+a specific verify/settle call and its response — the exact capability #7 was
+opened for. From the 2026-08-25 run:
+
+```
+[facilitators/external-proxies/accensa] stdout: {"method":"POST","path":"/verify","status":200,"durationMs":224,…}
+[facilitators/external-proxies/accensa] stdout: {"method":"POST","path":"/settle","status":200,"durationMs":5236,…}
+```
+
+(`/verify` and `/settle` carried redacted headers only — the request logger never
+touches `paymentPayload`/`paymentRequirements`, see `src/logger.js`.) The audit
+channel and `/metrics` complete the picture: `settlement` audit records carry the
+transaction hash and outcome, and `x402_signer_*` counters expose selection and
+in-flight settlement at `/metrics`.
+
+Neither the four failures nor the inability to see them have recurred since.
+Whether the residual credit belongs to this repo's request-validation/logging
+work or to upstream harness fixes is recorded rather than guessed: each run's
+artifact pins the facilitator commit and the upstream SHA, so a regression can be
+attributed the same way.
 
 ### 2026-08-12 — integration verified, payment path not yet exercised
 
@@ -266,21 +321,24 @@ its first result — pass or fail.
 
 ### Acceptance items
 
-Current as of 2026-08-14.
+Current as of 2026-08-26.
 
 | Item | State | Evidence |
 |---|---|---|
 | Canonical client completes a payment, testnet | ✅ | [`5f1bd15a…`](https://stellar.expert/explorer/testnet/tx/5f1bd15aec8ca3c6390689ed7fed82506f6c3d8eb8ed325a05a8b83974925558) and [`ff798145…`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590), both `successful` on Horizon |
-| Canonical client completes a payment, pubnet | ⬜ | blocked on #17 |
-| `/supported` emits `extra.areFeesSponsored` | ✅ | `test/app.test.js`; and observed — the facilitator paid the fee on both settlements above |
+| Canonical client completes a payment, pubnet | ⬜ | **pending funding, op-only step for #17** — the code path is verified at the config/facilitator layer (`test/pubnet-conformance.test.js`); the on-mainnet proof needs funded pubnet keys and a contracted RPC, which no CI secret can supply |
+| `/supported` emits `extra.areFeesSponsored` | ✅ | `test/app.test.js`; and observed — the facilitator paid the fee on both settlements above; both-networks advertising pinned in `test/pubnet-conformance.test.js` |
 | `payload: {transaction}` accepted verbatim | ✅ | `test/app.test.js` |
-| Upstream e2e suite, testnet | 🟡 | **1 of 5 server components passes.** `next` ✅; `express`, `fastify`, `hono`, `mcp` ❌ — reproducible across two runs, see above and #64 |
-| Upstream e2e suite, pubnet | ⬜ | blocked on #17 |
+| Upstream e2e suite, testnet | ✅ | **5 of 5 server components pass — 10/10 scenarios, two consecutive runs (2026-08-25, 2026-08-26).** `express`, `fastify`, `hono`, `next`, `mcp` each settled both the plain and `upfront` flows. See above; tracked to resolution in #64 |
+| Upstream e2e suite, pubnet | ⬜ | **pending funding, op-only step for #17** — same gating as the single-payment proof; no pubnet secret exists in this repo |
 | Non-null reason on every rejection | ✅ | `test/app.test.js`, across four malformed-body shapes on both routes |
-| Settled tx hash published per network per scheme | 🟡 | testnet `exact` published above; pubnet blocked on #17. #18 |
+| Settled tx hash published per network per scheme | 🟡 | testnet `exact` published across twenty scenarios above; pubnet pending funding (op-only, #17). #18 |
 | Bazaar listing accepted by a third-party client | ❌ | first attempt rejected `invalid_routeTemplate`, #65 |
 | `__check_auth` smart-account payer | ⬜ | #13 |
-| Structured logs sufficient to diagnose a failure | ❌ | four lines per run; #7, blocking #64 |
+| Structured logs sufficient to diagnose a failure | ✅ | one structured line per request with redacted headers (`src/logger.js`), `audit` channel records, `/metrics`; observed working in the harness output since 2026-08-25 |
+| SEP-41 7-decimal amount handling, exact stroops | ✅ | `test/conformance-sep41-decimals.test.js` — 12 cases pinning exact stroop equality across boundary/truncation/rejection (#152) |
+| Ledger-expiry and replay wire behaviour | ✅ | `test/conformance-expiry-replay.test.js` — expired payloads rejected with machine-readable reasons; identical replays served from the settlement store, never double-submitted (#159) |
+| Verify/settle within interactive budget | ✅ | `test/conformance-resource-budget.test.js` — round-trip latency and bound measurements under §3.6's interactive budget; headroom recorded (#161) |
 
 ## 5. Automation
 
@@ -301,3 +359,94 @@ only inputs are a network connection and Node 22+; the accounts fund themselves.
 If you get a different result, that is a bug report worth filing — the README
 says a conformance failure is the most useful contribution to this repo, and it
 means it.
+
+## 7. Post-grant maintenance commitment
+
+This section is the stated commitment the SCF RFP §3.6 asks for: how spec and
+`@x402/*` drift is tracked after the grant, what triggers a conformance re-run, how a
+breaking upstream change is handled, and how long conformance is maintained. The
+mechanism below is not aspirational — it is the drift-monitoring work tracked in
+[#15](https://github.com/accensa/x402-facilitator-stellar/issues/15), whose
+implementation (PR [#254](https://github.com/accensa/x402-facilitator-stellar/pull/254))
+configures the automation and writes the reviewed-baseline policy this section commits
+to.
+
+### What is watched, and by what mechanism
+
+Two distinct things drift, and they are watched by two mechanisms:
+
+1. **The wire protocol and the `@x402/*` packages** (conformance). Renovate groups
+   `@x402/*` into a single PR per release (they release together); the nightly
+   conformance job
+   (`.github/workflows/conformance.yml`, daily `0 6 * * *`, also `workflow_dispatch`)
+   runs the upstream x402 e2e suite against our facilitator. The upstream SHA under
+   test is recorded, and the last manually-reviewed SHA is held in `docs/UPSTREAM.md`
+   so every diff is against a known baseline.
+2. **Discovery / Bazaar conventions** (a separate obligation, §3.2). The Bazaar
+   extension schema and the catalog filters come from `@x402/extensions`, which is in
+   the same Renovate group — but the *conventions* (what the catalog must accept, how
+   listing validation behaves) are judged by the same upstream suite plus the
+   search-evaluation harness (`npm run eval`, run in CI). Convention drift is tracked
+   in the same drift issue as wire drift, because the two surface through the same
+   upgrade, but the response differs: a wire break fails the conformance job; a
+   convention break fails the eval gate or the Bazaar conformance scenarios.
+
+### Cadence and triggers
+
+| Trigger | Action | Responsible | SLA |
+| --- | --- | --- | --- |
+| Nightly (daily) | Conformance run against `x402-foundation/x402@main` | CI, no human in the loop | Failure opens/updates a tracking issue with the run URL (workflow change tracked in [#192](https://github.com/accensa/x402-facilitator-stellar/issues/192)) |
+| Weekly | Spec-drift job diffs tracked spec files against `docs/UPSTREAM.md` baseline; opens an issue on change | CI opens; a maintainer reviews within the week | Issue triaged within 5 working days |
+| `@x402/*` bump PR | Conformance job runs against the PR; the PR is blocked on its failure | CI gate; maintainer merges or reverts | Before merge — a red conformance build never merges |
+| Upstream release notice | Release notes / npm advisory | Maintainer review | Reviewed before the next scheduled run |
+
+Ownership: the drift issue is assigned to a named maintainer at all times; an
+unassigned alert is a log line, so the assignment is part of the mechanism, not an
+afterthought.
+
+### Breaking-change response
+
+When an upstream change invalidates current behaviour (a renamed field, a tightened
+validation rule, a new required header):
+
+1. **Detect** — the nightly job or the bump-PR gate goes red and names the upstream
+   SHA; the drift issue records it.
+2. **Assess** — determine whether the break is wire-level (clients must change) or
+   service-level (only we must change). Wire-level breaks are the ones that matter to
+   integrators.
+3. **Communicate** — sellers and agents already integrated are told through the drift
+   issue, the release notes, and — for wire-level breaks — a
+   `docs/CONFORMANCE.md` entry dated with the affected upstream SHA and the support
+   window below. Integrators who do not read the issue tracker are reached via the
+   dependency upgrade path: a grouped `@x402/*` bump carries the break, so anyone who
+   upgrades gets the documentation with it.
+4. **Adopt or hold** — adopt within the support window, or pin the previous `@x402/*`
+   version for the remainder of the window while the break is worked. The pin is a
+   documented, deliberate state, not a silent one.
+
+### Maintenance horizon
+
+Conformance is maintained for **24 months after the grant ends**, and the commitment
+is bounded: after that horizon, this repository's conformance posture will be
+re-assessed and stated explicitly rather than assumed. During the horizon:
+
+- the nightly conformance job and the drift watch keep running on the published
+  schedule;
+- `@x402/*` bumps are adopted within the support window above;
+- the protocol version this service speaks is supported for **one minor version back**
+  from the latest `@x402/*` release, matching the upstream package's own support
+  window.
+
+A bounded commitment that will be kept is worth more than an unbounded one that will
+not; the re-assessment at the horizon is part of the commitment, not a loophole.
+
+### Where this is enforced
+
+- `.github/workflows/conformance.yml` — the nightly run (and its failure notification,
+  [#192](https://github.com/accensa/x402-facilitator-stellar/issues/192)).
+- [#15](https://github.com/accensa/x402-facilitator-stellar/issues/15) — the
+  drift-monitoring issue this section implements; PR
+  [#254](https://github.com/accensa/x402-facilitator-stellar/pull/254) is its
+  automation and policy.
+- `docs/UPSTREAM.md` — the reviewed-baseline SHA and the full review policy (created
+  by the drift-monitoring implementation).

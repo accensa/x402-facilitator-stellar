@@ -38,7 +38,8 @@ describe('audit records', () => {
       assert.equal(res.status, 200);
       const settlement = audit.records.find(r => r.event === 'settlement');
       assert.ok(settlement, 'settlement must be audited');
-      assert.equal(settlement.fields.actor, 'admin');
+      // Key ids are normalized to uppercase at auth.
+      assert.equal(settlement.fields.actor, 'ADMIN');
       assert.equal(settlement.fields.outcome, 'settled');
       assert.equal(settlement.fields.transaction, 'abc123');
     } finally {
@@ -56,7 +57,7 @@ describe('audit records', () => {
       await app.post('/verify', VALID_BODY, AUTH);
       const v = audit.records.find(r => r.event === 'verification');
       assert.ok(v);
-      assert.equal(v.fields.actor, 'admin');
+      assert.equal(v.fields.actor, 'ADMIN');
       assert.equal(v.fields.outcome, 'valid');
     } finally {
       await app.close();
@@ -126,7 +127,7 @@ describe('audit records', () => {
       if (res.status === 200) {
         const write = audit.records.find(r => r.event === 'catalog_write');
         assert.ok(write, 'a successful catalog write must be audited');
-        assert.equal(write.fields.actor, 'admin');
+        assert.equal(write.fields.actor, 'ADMIN');
         assert.equal(write.fields.source, 'manual');
       }
       // A 400 from validation means this harness's body does not satisfy

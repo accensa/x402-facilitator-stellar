@@ -71,3 +71,24 @@ test('resolveConfig: pubnet sets per-network values correctly', () => {
   assert.strictEqual(config.perNetwork[PUBNET].rpcUrl, 'https://pubnet.local');
   assert.strictEqual(config.perNetwork[PUBNET].maxTransactionFeeStroops, 20000);
 });
+
+test('resolves custom rate limits from RATE_LIMIT_GLOBAL and RATE_LIMIT_<key>', () => {
+  const env = {
+    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_API_KEYS: 'admin:secret123, user:secret456',
+    RATE_LIMIT_GLOBAL:
+      'verify_rpm=100,settle_rpm=10,settle_rph=50,settle_rpd=500,fee_spd=1000,catalog_rpm=5',
+    RATE_LIMIT_admin: 'verify_rpm=1000,fee_spd=2000,catalog_rpm=50',
+  };
+  const config = resolveConfig(env);
+  assert.equal(config.rateLimits.global.verifyRpm, 100);
+  assert.equal(config.rateLimits.global.settleRph, 50);
+  assert.equal(config.rateLimits.global.catalogRpm, 5);
+
+  // Key ids are normalized to uppercase (the auth layer uppercases req.keyId,
+  // so per-key limits are keyed by the normalized id).
+  assert.equal(config.rateLimits.keys.ADMIN.verifyRpm, 1000);
+  assert.equal(config.rateLimits.keys.ADMIN.catalogRpm, 50);
+  // Unspecified per-key limits fall back to global
+  assert.equal(config.rateLimits.keys.ADMIN.settleRph, 100);
+});

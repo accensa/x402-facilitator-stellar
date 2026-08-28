@@ -1,0 +1,186 @@
+version: '3.8'
+
+# Multi-region failover test environment (#126).
+#
+# Spins up two facilitator instances (us-east-1 and eu-west-1) backed by a
+# shared Postgres (standing in for CockroachDB in local tests). Each region
+# has its own Redis for rate limiting. The CRDT rate limit store merges state
+# via the shared database.
+#
+# Usage:
+#   docker compose -f docker-compose.multi-region.yml up --build
+#   curl http://localhost:3402/health/ready | jq .failover
+#   curl http://localhost:3403/health/ready | jq .failover
+#
+# To simulate a regional outage:
+#   docker compose -f docker-compose.multi-region.yml stop facilitator-us-east-1
+#   # eu-west-1 reports failoverActive: true in /health/ready
+
+services:
+  # ─── Region: us-east-1 ──────────────────────────────────────────────────────
+  facilitator-us-east-1:
+    build: .
+    ports:
+      - '3402:3402'
+    environment:
+      - FACILITATOR_SECRET=${FACILITATOR_SECRET}
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/x402_facilitator
+      - RATE_LIMIT_STORE=crdt
+      - REGION=us-east-1
+      - REGIONS=us-east-1:1,eu-west-1:2
+      - REDIS_URL=redis://redis-us-east:6379
+      - REDIS_NODES=redis-node-us-east-1:6379,redis-node-us-east-2:6379,redis-node-us-east-3:6379
+      - PORT=3402
+      - AUDIT_LOG_FILE=${AUDIT_LOG_FILE:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-us-east:
+        condition: service_healthy
+      redis-node-us-east-1:
+        condition: service_healthy
+      redis-node-us-east-2:
+        condition: service_healthy
+      redis-node-us-east-3:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3402/healthz']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Region: eu-west-1 ──────────────────────────────────────────────────────
+  facilitator-eu-west-1:
+    build: .
+    ports:
+      - '3403:3402'
+    environment:
+      - FACILITATOR_SECRET=${FACILITATOR_SECRET}
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/x402_facilitator
+      - RATE_LIMIT_STORE=crdt
+      - REGION=eu-west-1
+      - REGIONS=us-east-1:1,eu-west-1:2
+      - REDIS_URL=redis://redis-eu-west:6379
+      - REDIS_NODES=redis-node-eu-west-1:6379,redis-node-eu-west-2:6379,redis-node-eu-west-3:6379
+      - PORT=3402
+      - AUDIT_LOG_FILE=${AUDIT_LOG_FILE:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-eu-west:
+        condition: service_healthy
+      redis-node-eu-west-1:
+        condition: service_healthy
+      redis-node-eu-west-2:
+        condition: service_healthy
+      redis-node-eu-west-3:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3402/healthz']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Shared Postgres (stands in for CockroachDB locally) ────────────────────
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=x402_facilitator
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_multi_region:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis: us-east-1 ──────────────────────────────────────────────────────
+  redis-us-east:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-node-us-east-1:
+    image: redis:7-alpine
+    ports:
+      - '6381:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-node-us-east-2:
+    image: redis:7-alpine
+    ports:
+      - '6382:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-node-us-east-3:
+    image: redis:7-alpine
+    ports:
+      - '6383:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis: eu-west-1 ──────────────────────────────────────────────────────
+  redis-eu-west:
+    image: redis:7-alpine
+    ports:
+      - '6389:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-node-eu-west-1:
+    image: redis:7-alpine
+    ports:
+      - '6391:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-node-eu-west-2:
+    image: redis:7-alpine
+    ports:
+      - '6392:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-node-eu-west-3:
+    image: redis:7-alpine
+    ports:
+      - '6393:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_multi_region:

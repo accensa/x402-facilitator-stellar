@@ -100,7 +100,9 @@ export function createReadinessChecker(
       if (entries.length === 0) {
         return { ok: false, address, error: `signer account ${address} does not exist (unfunded)` };
       }
-      const entryData = xdr.LedgerEntryData.fromXDR(entries[0].val, 'base64');
+      // Soroban RPC's getLedgerEntries returns each entry's ledger data under
+      // the `xdr` field (key/xdr/lastModifiedLedgerSeq/extXdr), not `val`.
+      const entryData = xdr.LedgerEntryData.fromXDR(entries[0].xdr, 'base64');
       const balance = Number(entryData.account().balance());
       if (balance < minBalanceStroops) {
         return {

@@ -111,6 +111,9 @@ function isSendTransaction(input, init) {
  *   letting a single probe through (half-open)
  * @param {(msg: string) => void} [options.log]
  * @param {(msg: string) => void} [options.onStateChange]
+ * @param {(info: { code: string|undefined, attempt: number, host: string, url: string }) => void} [options.onRetry]
+ *   structured hook for observability — feeds x402_rpc_retries_total from the
+ *   metrics layer rather than parsing a log string.
  * @returns {{ getBreakerStates: Function }} readable breaker state, surfaced
  *   on the readiness endpoint (issue #100)
  */
@@ -121,6 +124,7 @@ export function installRpcRetry({
   cooldownMs = Number(process.env.RPC_BREAKER_COOLDOWN_MS ?? 30_000),
   log = () => {},
   onStateChange = () => {},
+  onRetry = () => {},
   forceIpv4 = process.env.RPC_FORCE_IPV4 !== 'false',
 } = {}) {
   const builtinFetch = globalThis.fetch;
@@ -230,6 +234,7 @@ export function installRpcRetry({
         recordFailure(b, host);
         const url = typeof input === 'string' ? input : (input?.url ?? '');
         log(`rpc ${code} on ${url} — retry ${attempt}/${attempts - 1}`);
+        onRetry({ code, attempt, host, url });
         await new Promise(r => setTimeout(r, baseDelayMs * attempt));
       }
     }

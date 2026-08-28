@@ -1,0 +1,42 @@
+# Docker Compose for chaos integration tests using Toxiproxy.
+#
+# Toxiproxy sits between the facilitator and its dependencies (Redis, Postgres),
+# enabling real network-level fault injection: latency, connection resets,
+# bandwidth throttling, and timeouts.
+#
+# Usage:
+#   docker compose -f docker-compose.toxiproxy.yml up -d
+#   REDIS_URL=redis://toxiproxy:6321 DATABASE_URL=postgres://postgres:postgres@toxiproxy:5432/x402_facilitator node --test test/integration/chaos/
+#   docker compose -f docker-compose.toxiproxy.yml down -v
+version: '3.8'
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - '8474:8474' # Toxiproxy API
+      - '6321:6321' # Proxied Redis
+      - '5432:5432' # Proxied Postgres
+    depends_on:
+      - redis
+      - db
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: x402_facilitator
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 5

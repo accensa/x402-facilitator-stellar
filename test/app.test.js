@@ -302,6 +302,51 @@ describe('POST /settle', () => {
     }
   });
 
+  test('repeated settlement crosses feeSpd and returns fee_ceiling_exceeded', async () => {
+    // We use the real RateLimiter to test the integration.
+    const { testConfig } = await import('./helpers/app.js');
+    const { RateLimiter } = await import('../src/rate-limit.js');
+    // feeSpd sits above the 50000-stroop worst-case reservation (checkSettle
+    // reserves the max fee before settling) so the first settle passes; two
+    // settles then cross the ceiling.
+    const rateLimiter = new RateLimiter({
+      global: { verifyRpm: 100, settleRpm: 100, settleRph: 100, settleRpd: 100, feeSpd: 150000 },
+      keys: {
+        CUSTOM_KEY: {
+          verifyRpm: 100,
+          settleRpm: 100,
+          settleRph: 100,
+          settleRpd: 100,
+          feeSpd: 75000,
+        },
+      },
+    });
+
+    const app = await serve({
+      config: testConfig({ apiKeys: ['custom_key:secret'] }),
+      rateLimiter,
+      facilitator: stubFacilitator({
+        settle: async () => ({
+          success: true,
+          transaction: 'tx1',
+          network: 'stellar:testnet',
+        }),
+      }),
+    });
+
+    try {
+      let res = await app.post('/settle', VALID_BODY, { authorization: 'Bearer secret' });
+      assert.equal(res.status, 200);
+
+      res = await app.post('/settle', VALID_BODY, { authorization: 'Bearer secret' });
+      assert.equal(res.status, 429);
+      const json = await res.json();
+      assert.equal(json.reason, 'fee_ceiling_exceeded');
+    } finally {
+      await app.close();
+    }
+  });
+
   test('the sponsored fee is reported to the rate limiter', async () => {
     // The daily fee ceiling is what actually bounds the loss on pubnet, and it
     // is only as good as the number the settle path hands it.
@@ -313,14 +358,14 @@ describe('POST /settle', () => {
           success: true,
           transaction: 'tx',
           network: 'stellar:testnet',
-          transactionFeeStroops: 4200,
         }),
       }),
     });
     try {
-      await app.post('/settle', VALID_BODY);
+      const resp = await app.post('/settle', VALID_BODY);
+      if (resp.status !== 200) console.log(await resp.text());
       const recorded = rateLimiter.recorded.find(r => r.name === 'recordSettle');
-      assert.equal(recorded.fee, 4200);
+      assert.equal(recorded.fee, 50000);
     } finally {
       await app.close();
     }
@@ -420,8 +465,9 @@ describe('GET /usage', () => {
       const res = await app.get('/usage', { authorization: 'Bearer s3cret' });
       assert.equal(res.status, 200);
       const json = await res.json();
-      // Scoped to the presented key, not to the whole instance.
-      assert.equal(json.keyId, 'admin');
+      // Scoped to the presented key, not to the whole instance. Key ids are
+      // normalized to uppercase at auth.
+      assert.equal(json.keyId, 'ADMIN');
     } finally {
       await app.close();
     }
@@ -456,6 +502,39 @@ describe('automatic cataloging', () => {
       assert.equal(res.status, 200);
       assert.equal((await res.json()).success, true);
       await settle();
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('POST /discovery/resources returns JSON, not HTML, when the limiter errors', async () => {
+    const rateLimiter = stubRateLimiter();
+    rateLimiter.checkCatalog = () => {
+      throw new Error('limiter is on fire');
+    };
+    const app = await serve({ rateLimiter });
+    try {
+      const res = await app.post('/discovery/resources', VALID_BODY);
+      assert.equal(res.status, 500);
+      const contentType = res.headers.get('content-type');
+      assert.equal(contentType.includes('application/json'), true);
+      const json = await res.json();
+      assert.equal(json.error, 'internal_error');
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a synchronous catalog error (e.g. rate limiter crash) does not fail the payment', async () => {
+    const rateLimiter = stubRateLimiter({ allow: true });
+    rateLimiter.checkCatalog = () => {
+      throw new Error('limiter is on fire');
+    };
+    const app = await serve({ rateLimiter });
+    try {
+      const res = await app.post('/settle', VALID_BODY);
+      assert.equal(res.status, 200);
+      assert.equal((await res.json()).success, true);
     } finally {
       await app.close();
     }

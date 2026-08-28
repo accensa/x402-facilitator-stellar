@@ -126,7 +126,9 @@ describe('Multi-Signer Pool & Fee-Bump Signer (#9)', () => {
         const entry = xdr.LedgerEntryData.account(acct);
         return {
           result: {
-            entries: [{ val: entry.toXDR('base64') }],
+            // Soroban RPC's getLedgerEntries returns the ledger data under
+            // `xdr`, matching src/readiness.js — see test/readiness.test.js.
+            entries: [{ xdr: entry.toXDR('base64') }],
           },
         };
       }

@@ -26,10 +26,10 @@
 > [!WARNING]
 > **This is a conformance spike, not a production facilitator.** It exists to answer one
 > question: can an unmodified canonical x402 client complete a payment against a
-> facilitator we operate on Stellar testnet? **As of 2026-08-14 the answer is yes, twice,
-> with settled transactions anyone can verify** — and **four of the five upstream server
-> components still fail**. See [Conformance](#conformance) for both halves. It makes no
-> availability claim and is not deployed anywhere you can reach.
+> facilitator we operate on Stellar testnet? **As of 2026-08-26 the answer is yes across
+> all five upstream server components** — 10 of 10 scenarios in the upstream e2e suite,
+> with settled transactions anyone can verify. See [Conformance](#conformance). It makes
+> no availability claim and is not deployed anywhere you can reach.
 
 ## The Problem
 
@@ -80,8 +80,9 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Bazaar discovery](docs/BAZAAR.md) · [MCP server](docs/MCP.md) ·
 [Conformance](docs/CONFORMANCE.md) · [Deployment](docs/DEPLOYMENT.md) ·
 [Operations](docs/OPERATIONS.md) · [Authentication](docs/AUTHENTICATION.md) ·
-[Threat model](docs/THREAT-MODEL.md) · [Audit readiness](docs/AUDIT.md) ·
-[Privacy](docs/PRIVACY.md) · [Glossary](docs/GLOSSARY.md)
+[Business model](docs/BUSINESS-MODEL.md) · [Threat model](docs/THREAT-MODEL.md) ·
+[Audit readiness](docs/AUDIT.md) · [Privacy](docs/PRIVACY.md) ·
+[Glossary](docs/GLOSSARY.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
 [`accensa-app`](https://github.com/accensa/accensa-app) (merchant dashboard, indexer,
@@ -107,6 +108,35 @@ curl localhost:3402/readyz
 
 `FACILITATOR_SECRET` is a signing key. `.env` is gitignored — never commit it.
 
+### Testnet Setup
+
+Payments on Stellar need funded accounts, and USDC-priced payments additionally need
+**trustlines** — an account cannot hold or spend an issued asset until it has
+authorized the issuer. This is the most common way a first x402 payment fails, so
+it is documented (and scripted) rather than left to a deep stack trace. Two helpers
+in `scripts/` handle the testnet side, wired to npm:
+
+```bash
+npm run fund:testnet        # scripts/fund-testnet-accounts.mjs
+npm run prepare:testnet-usdc  # scripts/prepare-testnet-usdc.mjs
+```
+
+- `npm run fund:testnet` creates three fresh accounts (client, server/payee,
+  facilitator), funds them via Friendbot, **opens a USDC trustline on each**, and
+  prints the credentials as env assignments (`--json` / `--github-env` for other
+  formats).
+- `npm run prepare:testnet-usdc` puts existing payer/payee accounts into a
+  pay-ready state: USDC trustlines on both, and a small USDC balance on the payer
+  drawn from `TESTNET_USDC_TREASURY_SECRET` (testnet-only; reports
+  `usdc_ready=false` honestly when the treasury is absent).
+
+What trustlines are, who needs which, and the mainnet path (same `changeTrust`
+mechanism, no Friendbot) are in the [Seller Guide](docs/SELLER.md#trustlines) and
+[Buyer / Agent Guide](docs/BUYER.md#trustlines); both examples
+([`examples/http-seller`](examples/http-seller/README.md),
+[`examples/mcp-agent`](examples/mcp-agent/README.md)) state their prerequisite
+up front.
+
 ### Tests
 
 ```bash
@@ -131,6 +161,14 @@ ALICE_SECRET=$(stellar keys show alice) npm run e2e
 The X402 Facilitator handles sensitive transaction and search query data. Our approach is to collect only what is necessary, and to aggressively purge it according to strict retention policies.
 For detailed information, see our [Privacy Policy](docs/PRIVACY.md).
 
+### Observability
+
+The transport emits one structured JSON line per request to stdout and exposes
+Prometheus metrics on `GET /metrics`. Configure `LOG_LEVEL` (verbosity) and
+`METRICS_PORT` (bind metrics to a separate, unauthenticated port) via the
+environment — see `.env.example` and [Operations](docs/OPERATIONS.md)
+for the log fields and the alert to set on each metric.
+
 ## Conformance
 
 Acceptance is tested at the wire level with stock SDK code, not by reading a claim. What
@@ -141,9 +179,10 @@ holds today on testnet:
       unregistered scheme/network pairs, and scheme-level failures
 - [x] The spec's `payload: {transaction}` shape is accepted verbatim
 - [x] **An unmodified canonical client completes a payment end-to-end**
-- [x] **Settled transaction hash published** — two, below
-- [ ] The x402 repository's e2e suite — **1 of 5 server components passes**
-- [ ] `stellar:pubnet`
+- [x] **Settled transaction hash published** — see the conformance table below
+- [x] **The x402 repository's e2e suite — 5 of 5 server components pass** (10/10
+      scenarios across `express`, `fastify`, `hono`, `next`, `mcp`, 2026-08-25/26)
+- [ ] `stellar:pubnet` (code-path verified; on-mainnet proof pending funded keys [#17])
 
 ### Settled on Stellar testnet, 2026-08-14
 
@@ -163,23 +202,26 @@ curl -s https://horizon-testnet.stellar.org/transactions/5f1bd15aec8ca3c6390689e
   | jq '{successful, ledger, created_at}'
 ```
 
-### Four of five scenarios still fail
+### The full matrix passes — 2026-08-25/26
 
-`typescript/http/next` passes. `express`, `fastify`, `hono` and `mcp` do not — two with
-`Payment response header not found`, two with upstream's `402 facilitator_error`. This
-reproduced identically across two runs in which the harness ordered the combinations
-differently, so it is **structural rather than flaky**. Exactly one settlement occurs per
-run; the four failures never reach the chain.
+The August 14 run was the first with a real USDC treasury: one payment settled and four
+scenarios failed — `express`, `fastify`, `hono` and `mcp` — with `Payment response header
+not found` or upstream's `402 facilitator_error`, and the facilitator's four lines of
+output made the failures undiagnosable. That was tracked in
+[#64](https://github.com/accensa/x402-facilitator-stellar/issues/64) and blocked on
+[#7](https://github.com/accensa/x402-facilitator-stellar/issues/7), request-scoped
+structured logging, request correlation and `/metrics`.
 
-**It cannot currently be diagnosed**, because this facilitator emits four lines of output
-across an entire run — three startup banners and an exit code. Two of the failures mean
-*this service returned an error*, and there is no record of what it was. That makes
-[#7](https://github.com/accensa/x402-facilitator-stellar/issues/7) the blocking item
-rather than a nice-to-have; the investigation is
-[#64](https://github.com/accensa/x402-facilitator-stellar/issues/64).
+Both are done. The daily upstream suite has passed **10 of 10 scenarios on two
+consecutive nights** (2026-08-25, 2026-08-26): all five server components (`express`,
+`fastify`, `hono`, `next`, `mcp`) × the plain and `upfront` payment flows, each with a
+settled transaction hash on testnet. The facilitator now logs one structured line per
+request with redacted headers — a verify/settle outcome and rejection reason on every
+call — plus an `audit` channel and `/metrics`, so a future failure is attributable to a
+specific request instead of a four-line mystery.
 
 The full record, including the treasury prerequisite that had to be solved first and how
-to reproduce both results, is in [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+to reproduce the runs, is in [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
 
 Responses use the canonical field names — `VerifyResponse` carries `invalidReason` and
 `invalidMessage`; `SettleResponse` carries `errorReason`, `errorMessage`, `transaction`
@@ -204,9 +246,20 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
   [#19](https://github.com/accensa/x402-facilitator-stellar/issues/19).
 - **No persistence by default.** The catalog has a PostgreSQL schema in `migrations/` and
   uses it when `DATABASE_URL` is set; the settlement path holds nothing durable, tracked
-  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10).
+  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10). When
+  `DATABASE_URL` is set you can also add `DATABASE_URL_REPLICA` to offload settlement
+  status reads and the reconciliation sweep onto a read replica (CQRS fallback to primary
+  on replication lag) — see `docs/DEPLOYMENT.md` (#121).
 - **`exact` only.** The `upto` scheme has no Stellar specification yet; design notes in
   [`accensa-contracts/docs/ADR-002`](https://github.com/accensa/accensa-contracts/blob/main/docs/ADR-002-upto-scheme.md).
+- **Pubnet is code-served but unproven on mainnet (#17).** `stellar:pubnet` is served with
+  its own signer pool, RPC provider and fee ceiling, none shared with testnet, and that
+  isolation plus both-networks `/supported` advertising and 7-decimal amounts are pinned by
+  `test/pubnet-conformance.test.js`. What remains is operational, not code: a canonical
+  client completing a real USDC payment on mainnet with the settled hash published needs
+  funded pubnet keys and a contracted RPC, which no CI secret can supply. State and the
+  key-custody/rotation posture are in `docs/DEPLOYMENT.md`; the checkbox above stays
+  unchecked until that proof lands.
 
 ## Contributing
 
@@ -223,3 +276,4 @@ a conformance failure: point a canonical client at it and report what breaks.
 
 Apache-2.0 — see [LICENSE](LICENSE). Chosen to match upstream `@x402/*` so work here can
 be contributed back.
+// fix

@@ -82,9 +82,11 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
     };
 
     const dummySecret = Keypair.random().secret();
+    // Key ids must be alphanumeric + underscore to be usable in RATE_LIMIT_
+    // env var names, so the id carries an underscore rather than a hyphen.
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
-      FACILITATOR_API_KEYS: 'test-key:sec123',
+      FACILITATOR_API_KEYS: 'test_key:sec123',
     });
     const mockRateLimiter = {
       checkSettle: async () => ({ allowed: true }),
@@ -187,9 +189,11 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       idempotency_key: 'unresolved-1',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
-      state: 'unknown',
-      tx_hash: 'tx_confirmed_123',
     });
+    // Realistic path to 'unknown': submitted, then the outcome couldn't be
+    // confirmed (see app.js's timeout-after-submission handling) — a
+    // settlement never starts life already 'unknown' (#130).
+    await store.updateState('unresolved-1', 'unknown', { tx_hash: 'tx_confirmed_123' });
 
     const mockRpc = async (_url, body) => {
       if (body.method === 'getTransaction' && body.params.hash === 'tx_confirmed_123') {
