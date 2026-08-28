@@ -24,6 +24,8 @@ Welcome to the X402 Facilitator documentation. Choose the path that best matches
 - [MCP](./MCP.md): The standalone MCP server for agent runtimes
 - [Reasons](./REASONS.md): The exhaustive rejection-reason taxonomy
 - [Conformance](./CONFORMANCE.md): Wire-level conformance evidence and the maintenance commitment
+- [Onboarding Timing](./ONBOARDING_TIMING.md): The measurement instrument for the RFP's
+  "under an hour to a paid, discoverable endpoint" claim (#155)
 
 ## Contributing these guides to Stellar Developer Docs
 

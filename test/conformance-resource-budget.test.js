@@ -27,12 +27,12 @@ describe('Verify/settle resource-budget & latency measurement (#161)', () => {
           calls.verify++;
           // Simulate a meaningful amount of work so the measured cost is not
           // trivially zero, in a loose proxy for scheme-side budget burn.
-          await new Promise((r) => setTimeout(r, 1));
+          await new Promise(r => setTimeout(r, 1));
           return { isValid: true };
         },
         settle: async () => {
           calls.settle++;
-          await new Promise((r) => setTimeout(r, 1));
+          await new Promise(r => setTimeout(r, 1));
           return {
             success: true,
             transaction: 'MEASURE_TX',
@@ -88,7 +88,7 @@ describe('Verify/settle resource-budget & latency measurement (#161)', () => {
       ),
     );
     const elapsed = Date.now() - start;
-    assert.ok(results.every((r) => r.status === 200));
+    assert.ok(results.every(r => r.status === 200));
     const avg = elapsed / N;
     assert.ok(
       avg < INTERACTIVE_MS_BUDGET,
@@ -117,7 +117,7 @@ describe('Worst-case payload spread vs. resource bound (#161)', () => {
         // multiple auth entries should still settle within budget.
         settle: async () => {
           calls.settle++;
-          await new Promise((r) => setTimeout(r, 2)); // richer __check_auth proxy
+          await new Promise(r => setTimeout(r, 2)); // richer __check_auth proxy
           return { success: true, transaction: 'WORST_CASE_TX', network: 'stellar:testnet' };
         },
       }),

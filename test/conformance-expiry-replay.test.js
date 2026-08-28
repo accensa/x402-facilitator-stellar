@@ -26,7 +26,7 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
     app = await serve({
       config: testConfig({ apiKeys: ['admin:s3cret'] }),
       facilitator: stubFacilitator({
-        verify: async (payload) => {
+        verify: async payload => {
           capture.verifyCalls.push({ payload });
           const tx = payload?.payload?.transaction ?? '';
           if (typeof tx === 'string' && tx === 'EXPIRED_SENTINEL') {
@@ -37,7 +37,7 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
           }
           return { isValid: true };
         },
-        settle: async (payload) => {
+        settle: async payload => {
           capture.calls++;
           const tx = payload?.payload?.transaction ?? '';
           if (typeof tx === 'string' && tx === 'EXPIRED_SENTINEL') {
@@ -67,7 +67,8 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
       paymentPayload: {
         ...VALID_BODY.paymentPayload,
         payload: {
-          transaction: ledger === 'expired' ? 'EXPIRED_SENTINEL' : `TX_LEDGER_${ledger}`,},
+          transaction: ledger === 'expired' ? 'EXPIRED_SENTINEL' : `TX_LEDGER_${ledger}`,
+        },
       },
     };
   }
