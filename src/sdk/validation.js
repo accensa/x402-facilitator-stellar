@@ -1,6 +1,9 @@
 /**
  * Stellar amounts are 7-decimal fixed point (stroops). Shared by the validator
  * and by toStroops so the two can never disagree on what an amount is.
+ *
+ * A fractional part longer than STELLAR_DECIMALS is truncated, not rounded —
+ * rounding would invent stroops that never existed. (See toStroops.)
  */
 export const STELLAR_DECIMALS = 7;
 
@@ -19,8 +22,8 @@ const DECIMAL_AMOUNT_RE = /^[+-]?\d+(?:\.\d+)?$/;
  * discovery catalog to list. A number is not a valid input shape — the caller
  * has almost certainly already lost precision before this function sees it
  * (Number('123456789012345678.9') rounds), so only decimal strings and BigInt
- * (an exact stroop count) are accepted. Anything finer than a stroop cannot
- * be represented exactly and is rejected rather than silently truncated.
+ * (an exact stroop count) are accepted. A fraction longer than a stroop is
+ * truncated on conversion (in toStroops), never rounded.
  */
 export function validateAmount(amount) {
   if (amount === undefined || amount === null || amount === '') {
@@ -37,12 +40,6 @@ export function validateAmount(amount) {
   }
   if (amount.startsWith('-')) {
     return [`pricing.amount must not be negative (got "${amount}")`];
-  }
-  const frac = amount.split('.')[1] || '';
-  if (frac.length > STELLAR_DECIMALS) {
-    return [
-      `pricing.amount "${amount}" has more than ${STELLAR_DECIMALS} decimal places and cannot be represented exactly in stroops`,
-    ];
   }
   return [];
 }

@@ -76,22 +76,50 @@ function mapEventRow(r) {
  */
 export class PostgresSettlementStore extends MemorySettlementStore {
   /**
-   * @param {string} databaseUrl - postgres connection string
+   * @param {string} databaseUrl - primary postgres connection string
    * @param {object} [options]
-   * @param {object} [options.pool] - injected pg Pool (for testing)
+   * @param {string} [options.replicaUrl] - read-replica postgres connection string (#121)
+   * @param {object} [options.pool] - injected primary pg Pool (for testing)
+   * @param {object} [options.replicaPool] - injected replica pg Pool (for testing)
+   * @param {number} [options.replicaLagMs] - max acceptable replica lag (ms) before
+   *   falling back to the primary for a missing row (#121)
    * @param {Function} [options.warn] - logger sink
    * @param {object} [options.outbox] - OutboxStore sharing this pool (default:
    *   created lazily from the pool; the transactional outbox is how settlement
    *   notifications survive crashes, #123)
    */
-  constructor(databaseUrl, { pool, warn = msg => console.warn(msg), outbox } = {}) {
+  constructor(
+    databaseUrl,
+    {
+      pool,
+      replicaPool,
+      replicaUrl,
+      replicaLagMs = 1000,
+      warn = msg => console.warn(msg),
+      outbox,
+    } = {},
+  ) {
     super();
     this.warn = warn;
-    this.pool = pool;
+    this.pool = pool ?? null; // primary (writes + fallback reads)
+    this.replicaPool = replicaPool ?? null; // read replica (reads)
+    this.replicaUrl = replicaUrl ?? null; // read-replica connection string (#121)
+    this.replicaLagMs = replicaLagMs;
     this.degraded = false;
     this.outbox = outbox ?? null;
+    this.ready = null;
+    this._readyReplica = Promise.resolve();
 
-    if (!this.pool) {
+    // Primary pool: use an injected one when provided, otherwise build it
+    // lazily from the connection string. When neither is available the store
+    // degrades to process-local memory (see _degrade).
+    if (this.pool) {
+      // The transactional outbox shares the primary pool (created here when
+      // not injected) so settleAndEnqueue's state change + notification
+      // insert commit atomically (#123).
+      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
+      this.ready = this._ensureSchema();
+    } else {
       import('pg')
         .then(({ default: pg }) => {
           this.pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
@@ -102,10 +130,30 @@ export class PostgresSettlementStore extends MemorySettlementStore {
         .catch(err =>
           this._degrade(`pg unavailable (${err.message}); using memory settlement store`),
         );
-    } else {
-      this.outbox ??= new OutboxStore(this.pool, { warn: this.warn });
-      this.ready = this._ensureSchema();
     }
+
+    // A read replica is optional. An injected pool is ready immediately; a
+    // connection string is turned into a pool lazily. When neither is given,
+    // `usesReplica` stays false and all reads go to the primary — the
+    // pre-#121 single-pool behaviour, and the zero-config default.
+    if (this.replicaPool) {
+      this._readyReplica = Promise.resolve();
+    } else if (this.replicaUrl) {
+      this._readyReplica = import('pg').then(({ default: pg }) => {
+        this.replicaPool = new pg.Pool({ connectionString: this.replicaUrl, max: 20 });
+        this.replicaPool.on('error', err =>
+          this.warn(`[SettlementStore] replica pool error: ${err.message}`),
+        );
+      });
+      this._readyReplica.catch(err =>
+        this.warn(`[SettlementStore] pg unavailable for replica (${err.message})`),
+      );
+    }
+  }
+
+  /** True when reads should target the replica (a replica is wired up). */
+  get usesReplica() {
+    return Boolean(this.replicaPool) && !this.degraded;
   }
 
   _degrade(message) {
@@ -161,19 +209,90 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     }
   }
 
+  /** @returns {object} the live read pool (replica when CQRS is configured). */
+  _readPool() {
+    return this.usesReplica ? this.replicaPool : this.pool;
+  }
+
   async get(idempotencyKey) {
+    // Platform read: always hit the database (the read pool when a replica is
+    // configured). Read-after-write for the status endpoint is served by
+    // `getConsistent`, which layers this process's own-writes-from-memory on
+    // top — plain `get` must reflect durable state, so the #130 repair path
+    // (delete the projection, rebuild it from the event log) stays observable.
     if (this.degraded || !this.pool) return super.get(idempotencyKey);
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
-        `SELECT ${PROJECTION_COLUMNS} FROM settlement_projections WHERE idempotency_key = $1`,
-        [idempotencyKey],
-      );
-      return rows.length ? mapProjectionRow(rows[0]) : null;
+      return await this._queryGet(this._readPool(), idempotencyKey);
     } catch (err) {
       this._degrade(`get failed: ${err.message}`);
       return super.get(idempotencyKey);
     }
+  }
+
+  /**
+   * Performs a single get against the given pool, returning the row or null.
+   */
+  async _queryGet(pool, idempotencyKey) {
+    const { rows } = await pool.query(
+      `SELECT ${PROJECTION_COLUMNS} FROM settlement_projections WHERE idempotency_key = $1`,
+      [idempotencyKey],
+    );
+    if (rows.length === 0) return null;
+    return mapProjectionRow(rows[0]);
+  }
+
+  /**
+   * Consistency-aware status read (#121): serves "settle, then immediately
+   * GET" correctly under asynchronous replication.
+   *
+   * Layers, in order:
+   *   1. This process's own writes, kept in the in-memory copy by every
+   *      successful write, always served immediately (a replica read never
+   *      touches our own fresh write).
+   *   2. The replica, retried up to `replicaLagMs` for a row that hasn't
+   *      propagated yet.
+   *   3. The primary, so a genuine miss is still a miss and a recent write by
+   *      another pod is surfaced — a 404 is only returned once replication is
+   *      confirmed to have drained.
+   *
+   * This is the read `/settlements/:key` uses (see app.js).
+   */
+  async getConsistent(idempotencyKey) {
+    const local = await super.get(idempotencyKey);
+    if (local) return local;
+
+    if (this.degraded || !this.pool) return this.get(idempotencyKey);
+    try {
+      await this.ready;
+      await this._readyReplica;
+      return await this._queryGetWithLag(idempotencyKey);
+    } catch (err) {
+      this._degrade(`getConsistent failed: ${err.message}`);
+      return this.get(idempotencyKey);
+    }
+  }
+
+  /**
+   * Read with a replica-lag tolerance (#121): when a replica is configured,
+   * a row that the replica hasn't propagated yet is retried until `replicaLagMs`
+   * elapses, then checked against the primary so a genuine miss is still a miss
+   * and a recent write is surfaced. This is what makes "settle, then immediately
+   * GET" consistent despite asynchronous replication.
+   */
+  async _queryGetWithLag(idempotencyKey) {
+    if (!this.usesReplica) return this._queryGet(this.pool, idempotencyKey);
+
+    const started = Date.now();
+    for (;;) {
+      const row = await this._queryGet(this.replicaPool, idempotencyKey);
+      if (row) return row;
+      if (Date.now() - started >= this.replicaLagMs) break;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    // Replica still can't see it. Assume recent write / replication drain and
+    // confirm against the primary before returning a genuine miss.
+    return this._queryGet(this.pool, idempotencyKey);
   }
 
   async save(record) {
@@ -412,10 +531,15 @@ export class PostgresSettlementStore extends MemorySettlementStore {
   }
 
   async listUnknown() {
-    if (this.degraded || !this.pool) return super.listUnknown();
+    // The reconciliation sweep is a read of historical state — route it to the
+    // replica too. Replayed writes are applied to the primary, so listing
+    // unknown records from a replica is safe: any row the replica sees is either
+    // already resolved on the primary or legitimately still unknown.
+    const pool = this._readPool();
+    if (this.degraded || !pool) return super.listUnknown();
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
+      const { rows } = await pool.query(
         `SELECT ${PROJECTION_COLUMNS} FROM settlement_projections WHERE state = $1`,
         ['unknown'],
       );

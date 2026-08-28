@@ -7,10 +7,13 @@
  * this file is only the wiring a test has no use for.
  */
 import dotenv from 'dotenv';
+import http from 'node:http';
 import { resolveConfig } from './config.js';
 import { buildFacilitator } from './facilitator.js';
 import { installHorizonClient } from './horizon-client.js';
 import { installRpcRetry } from './rpc-retry.js';
+import { createRequestLog } from './log.js';
+import { createMetrics } from './metrics.js';
 import { RateLimiter } from './rate-limit.js';
 import { createRateLimitStore, MemoryStore } from './rate-limit-store.js';
 import { RedisRateLimiter } from './redis-rate-limit.js';
@@ -40,10 +43,12 @@ const horizon = installHorizonClient({ log: msg => console.log(`  ${msg}`) });
 
 // Retries connection-level failures only; see rpc-retry.js for what that
 // deliberately excludes. The returned handle exposes circuit-breaker state
-// for the readiness probe (#100).
+// for the readiness probe (#100). onRetry feeds x402_rpc_retries_total.
+const metrics = createMetrics();
 const rpc = installRpcRetry({
   log: msg => console.warn(`  ${msg}`),
   onStateChange: msg => console.warn(`  [Breaker] ${msg}`),
+  onRetry: ({ code }) => metrics.incRpcRetry({ code }),
 });
 
 const config = resolveConfig();
@@ -162,9 +167,19 @@ const app = createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
   distributedLock,
   webhooks,
+  logger: createRequestLog({ level: config.logLevel }),
+  metrics,
+  signers,
+  // When METRICS_PORT is set the metrics listener below owns /metrics; keep it
+  // off the public listener so it cannot be scraped by untrusted callers.
+  serveMetrics: config.metricsPort == null,
+
   failoverHealth,
   settlementStore,
 });
+
+// Set by the METRICS_PORT branch below; closed on shutdown when present.
+let metricsServerRef = null;
 
 app.listen({ port: config.port, host: '0.0.0.0' }, () => {
   console.log(`x402 Stellar facilitator listening on :${config.port}`);
@@ -220,6 +235,29 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
   webhooks.start().catch(err => {
     console.warn(`webhooks: consumer failed to start (${err.message}); events still publish`);
   });
+
+  // Optional separate metrics listener. Off the public port by design: an
+  // operator binds METRICS_PORT to an internal interface and scrapes it from
+  // there, so the payment surface never serves /metrics. When unset, /metrics
+  // is served on the main listener instead (see createApp's serveMetrics).
+  if (config.metricsPort != null) {
+    const metricsServer = http.createServer((req, res) => {
+      if (req.url === '/metrics') {
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+        });
+        res.end(metrics.render());
+      } else {
+        res.writeHead(404);
+        res.end('not found');
+      }
+    });
+    metricsServer.listen(config.metricsPort, '0.0.0.0', () => {
+      console.log(`metrics listening on :${config.metricsPort} (METRICS_PORT)`);
+    });
+    // Track for graceful shutdown.
+    metricsServerRef = metricsServer;
+  }
 });
 
 /**
@@ -241,10 +279,15 @@ async function shutdown(signal) {
       await outboxWorker?.stop();
       await vaultDatabase?.stop();
       await app.close();
+      await new Promise(resolve =>
+        metricsServerRef ? metricsServerRef.close(resolve) : resolve(),
+      );
       await webhooks.stop().catch(() => {});
       await distributedLock?.quit()?.catch(() => {});
       await crdtStore?.close().catch(() => {});
+
       failoverHealth?.stop();
+
       await rateLimiter?.close?.().catch(() => {});
       horizon.restore();
     } catch (err) {

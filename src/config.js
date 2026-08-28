@@ -236,6 +236,19 @@ export function resolveConfig(env = process.env) {
     port: parsePositiveInt(env.PORT, { name: 'PORT', defaultValue: 3402, min: 1, max: 65535 }),
 
     /**
+     * Diagnostic log verbosity. Parsed leniently by src/log.js — an unknown
+     * value falls back to 'info' so a typo never silently hides an outage.
+     */
+    logLevel: env.LOG_LEVEL ?? 'info',
+
+    /**
+     * When set, Prometheus metrics are served on this port (unauthenticated)
+     * instead of on the public listener, so they need not be exposed publicly.
+     * Unset means GET /metrics is served on PORT. See docs/OPERATIONS.md.
+     */
+    metricsPort: env.METRICS_PORT ? Number(env.METRICS_PORT) : null,
+
+    /**
      * Deployment environment. Unset in the Docker image by default; only used
      * here to decide whether a local .env file is loaded and whether HSTS is
      * sent. Never gate error-detail behaviour on it — see app.js.
@@ -249,6 +262,22 @@ export function resolveConfig(env = process.env) {
     /** Optional shared stores. Unset means in-memory, single-instance. */
     redisUrl: env.REDIS_URL || null,
     databaseUrl: env.DATABASE_URL || null,
+
+    /**
+     * CQRS read replica (#121): when DATABASE_URL_REPLICA is set, settlement
+     * status reads and the reconciliation sweep are routed to a read replica
+     * instead of the primary, so history queries stop contending with writes.
+     * Unset means single-pool (reads and writes on the primary).
+     */
+    databaseReplicaUrl: env.DATABASE_URL_REPLICA || null,
+
+    /**
+     * CQRS read-after-write tolerance (#121): how long a status read retries a
+     * replica that hasn't propagated a recent write before falling back to the
+     * primary (default 1000 ms). Only meaningful when DATABASE_URL_REPLICA is
+     * set.
+     */
+    settlementReplicaLagMs: Number(env.SETTLEMENT_REPLICA_LAG_MS ?? 1000),
     rateLimitStore: env.RATE_LIMIT_STORE || 'memory',
 
     /**
