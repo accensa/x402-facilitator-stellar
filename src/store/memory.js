@@ -103,6 +103,25 @@ export class MemorySettlementStore {
     return results;
   }
 
+  /**
+   * Settlement state change + notification enqueue in one step (#123).
+   *
+   * The in-memory store has no transaction to share, so this performs the
+   * state change and reports `atomicallyEnqueued: false`; the caller then
+   * falls back to the direct webhook publish — exactly the behaviour when
+   * there is no Postgres. PostgresSettlementStore overrides this with a
+   * real single transaction (see src/store/postgres.js).
+   *
+   * @param {string} idempotencyKey
+   * @param {object} details - updateState details (tx_hash, response, ...)
+   * @param {object|null} event - notification event to enqueue; null = none
+   * @returns {Promise<{atomicallyEnqueued: boolean, record: object|null, event: object|null}>}
+   */
+  async settleAndEnqueue(idempotencyKey, details, event) {
+    const record = await this.updateState(idempotencyKey, 'settled', details);
+    return { atomicallyEnqueued: false, record, event };
+  }
+
   /** Full, ordered event history for one settlement — the audit trail (#130). */
   async getEventLog(idempotencyKey) {
     return (this.events.get(idempotencyKey) ?? []).map(e => ({ ...e }));

@@ -326,16 +326,19 @@ Current as of 2026-08-26.
 | Item | State | Evidence |
 |---|---|---|
 | Canonical client completes a payment, testnet | ✅ | [`5f1bd15a…`](https://stellar.expert/explorer/testnet/tx/5f1bd15aec8ca3c6390689ed7fed82506f6c3d8eb8ed325a05a8b83974925558) and [`ff798145…`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590), both `successful` on Horizon |
-| Canonical client completes a payment, pubnet | ⬜ | blocked on #17 |
-| `/supported` emits `extra.areFeesSponsored` | ✅ | `test/app.test.js`; and observed — the facilitator paid the fee on both settlements above |
+| Canonical client completes a payment, pubnet | ⬜ | **pending funding, op-only step for #17** — the code path is verified at the config/facilitator layer (`test/pubnet-conformance.test.js`); the on-mainnet proof needs funded pubnet keys and a contracted RPC, which no CI secret can supply |
+| `/supported` emits `extra.areFeesSponsored` | ✅ | `test/app.test.js`; and observed — the facilitator paid the fee on both settlements above; both-networks advertising pinned in `test/pubnet-conformance.test.js` |
 | `payload: {transaction}` accepted verbatim | ✅ | `test/app.test.js` |
 | Upstream e2e suite, testnet | ✅ | **5 of 5 server components pass — 10/10 scenarios, two consecutive runs (2026-08-25, 2026-08-26).** `express`, `fastify`, `hono`, `next`, `mcp` each settled both the plain and `upfront` flows. See above; tracked to resolution in #64 |
-| Upstream e2e suite, pubnet | ⬜ | blocked on #17 |
+| Upstream e2e suite, pubnet | ⬜ | **pending funding, op-only step for #17** — same gating as the single-payment proof; no pubnet secret exists in this repo |
 | Non-null reason on every rejection | ✅ | `test/app.test.js`, across four malformed-body shapes on both routes |
-| Settled tx hash published per network per scheme | 🟡 | testnet `exact` published across twenty scenarios above; pubnet blocked on #17. #18 |
+| Settled tx hash published per network per scheme | 🟡 | testnet `exact` published across twenty scenarios above; pubnet pending funding (op-only, #17). #18 |
 | Bazaar listing accepted by a third-party client | ❌ | first attempt rejected `invalid_routeTemplate`, #65 |
 | `__check_auth` smart-account payer | ⬜ | #13 |
 | Structured logs sufficient to diagnose a failure | ✅ | one structured line per request with redacted headers (`src/logger.js`), `audit` channel records, `/metrics`; observed working in the harness output since 2026-08-25 |
+| SEP-41 7-decimal amount handling, exact stroops | ✅ | `test/conformance-sep41-decimals.test.js` — 12 cases pinning exact stroop equality across boundary/truncation/rejection (#152) |
+| Ledger-expiry and replay wire behaviour | ✅ | `test/conformance-expiry-replay.test.js` — expired payloads rejected with machine-readable reasons; identical replays served from the settlement store, never double-submitted (#159) |
+| Verify/settle within interactive budget | ✅ | `test/conformance-resource-budget.test.js` — round-trip latency and bound measurements under §3.6's interactive budget; headroom recorded (#161) |
 
 ## 5. Automation
 

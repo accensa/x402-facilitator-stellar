@@ -48,11 +48,24 @@ export async function reconcileUnknownSettlements(store, config = {}, { rpcCall 
 
       const status = res?.result?.status;
       if (status === 'SUCCESS') {
-        await store.updateState(record.idempotency_key, 'settled', {
-          tx_hash: record.tx_hash,
-          error_reason: null,
-          error_message: null,
-        });
+        // This settlement was settled on-chain without a completed /settle
+        // response, so no notification was ever emitted — enqueue one through
+        // the same transactional outbox as the primary settle path (#123).
+        // Without an outbox (in-memory store) this is a no-op, matching the
+        // pre-outbox behaviour where reconciliation never notified.
+        await store.settleAndEnqueue(
+          record.idempotency_key,
+          { tx_hash: record.tx_hash, error_reason: null, error_message: null },
+          {
+            type: 'settlement.completed',
+            transaction: record.tx_hash,
+            network: record.network,
+            payer: record.payer,
+            payTo: record.pay_to,
+            amount: record.amount,
+            asset: record.asset,
+          },
+        );
         count++;
       } else if (status === 'FAILED') {
         await store.updateState(record.idempotency_key, 'failed', {

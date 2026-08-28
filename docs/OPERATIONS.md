@@ -105,6 +105,46 @@ Example Response:
 
 If `FACILITATOR_API_KEYS` is omitted, the service runs in open mode. In this mode, limits from `RATE_LIMIT_GLOBAL` are enforced per source IP address rather than per API key. This prevents a single abusive client from draining a testnet faucet while still keeping onboarding frictionless.
 
+## Observability
+
+The transport emits **one structured JSON line per request** to stdout (one object per line, no framework). The shape is fixed and whitelisted — it never contains the auth entry, the raw `payload.transaction`, API keys, or the facilitator secret:
+
+| Field | Meaning |
+|---|---|
+| `ts` | ISO-8601 timestamp |
+| `level` | `info` or `error` (derived from outcome) |
+| `event` | always `"request"` |
+| `requestId` | inbound `X-Request-Id`, or a generated `crypto.randomUUID()` echoed on the response |
+| `route` | matched route, e.g. `/verify` |
+| `network` | CAIP-2 network from the request body |
+| `scheme` | scheme from the request body |
+| `keyId` | caller API key id (from #5), or `null` in open mode |
+| `durationMs` | request duration |
+| `outcome` | `ok` \| `rejected` \| `error` |
+| `reason` | reason code (from #6); `none` when there is nothing to report |
+| `txHash` | settlement transaction hash, or `null` |
+
+`LOG_LEVEL` (default `info`) filters at the line level; `debug` is not currently noisier than `info` because the structured line is the only diagnostic stream.
+
+### Correlation
+
+A resource server debugging a failed payment hands us a single `X-Request-Id` rather than a timestamp range. We honour an inbound one and always echo ours on the response header `X-Request-Id`.
+
+### Metrics (`GET /metrics`)
+
+Prometheus text format, unauthenticated. By default it is served on `PORT`; set `METRICS_PORT` to bind it to a separate listener (typically an internal interface) so it is not on the public surface. Series:
+
+| Metric | Type | Labels | What it tells you | Alert |
+|---|---|---|---|---|
+| `x402_requests_total` | counter | `route`, `network`, `outcome`, `reason` | every request, by result | page if `outcome="error"` rate spikes (a dependency or code bug); investigate `reason` labels |
+| `x402_request_duration_seconds` | histogram | `route`, `network` | verify/settle latency — the interactive-agent target | alert if p95 > 2s on `/verify` or `/settle` (SLO breach for agent use) |
+| `x402_settlements_total` | counter | `network`, `outcome` (`settled`/`failed`) | settlement success rate | alert if `outcome="failed"` rate > 1% over 10m |
+| `x402_settlement_fee_stroops` | histogram | `network` | **actual fee paid** — the number that shows whether `MAX_TX_FEE_STROOPS` is sane | alert if p95 fee approaches `MAX_TX_FEE_STROOPS` (fee ceiling about to throttle settlements) |
+| `x402_rpc_retries_total` | counter | `code` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
+| `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert if it sits at ≥ 1 persistently or climbs (signer pool needed before bursty traffic) |
+
+Operational endpoints (`/metrics`, `/healthz`, `/health/ready`) are logged but excluded from `x402_requests_total` so the payment counters stay semantically about payments.
+
 ## Multi-Signer Pool Management (#9)
 
 Agent payment traffic is naturally bursty. When multiple settlement requests arrive concurrently, submitting them using a single Stellar account causes sequence-number contention and transaction serialization. To achieve higher throughput, configure a multi-signer pool.

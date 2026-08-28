@@ -173,8 +173,15 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
   }
 }
 
-/** Builds the store from resolved config; null means no idempotency wiring. */
-export function buildIdempotencyStore(config) {
-  if (config.databaseUrl) return new PostgresIdempotencyStore(config.databaseUrl);
+/**
+ * Builds the store from resolved config; null means no idempotency wiring.
+ *
+ * @param {object} config
+ * @param {object} [options]
+ * @param {object} [options.pool] - shared pg Pool to use (a Vault-managed pool,
+ *   #127); absent means the store builds its own from databaseUrl
+ */
+export function buildIdempotencyStore(config, { pool } = {}) {
+  if (config.databaseUrl) return new PostgresIdempotencyStore(config.databaseUrl, { pool });
   return new MemoryIdempotencyStore();
 }
