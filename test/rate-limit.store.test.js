@@ -236,7 +236,9 @@ test('GET /usage over HTTP reads the fee counter that survived a restart', async
     global: { verifyRpm: 10, settleRpm: 10, settleRph: 100, settleRpd: 1000, feeSpd: 5000 },
     keys: {},
   };
-  await new RateLimiter(limits, store).recordSettle({ keyId: 'admin' }, 1234);
+  // Key ids are normalized to uppercase at auth, so the record must be
+  // written under the same normalized id the /usage handler looks up.
+  await new RateLimiter(limits, store).recordSettle({ keyId: 'ADMIN' }, 1234);
 
   const app = await serve({
     config: testConfig({ apiKeys: ['admin:s3cret'] }),

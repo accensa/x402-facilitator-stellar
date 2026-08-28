@@ -80,8 +80,9 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Bazaar discovery](docs/BAZAAR.md) · [MCP server](docs/MCP.md) ·
 [Conformance](docs/CONFORMANCE.md) · [Deployment](docs/DEPLOYMENT.md) ·
 [Operations](docs/OPERATIONS.md) · [Authentication](docs/AUTHENTICATION.md) ·
-[Threat model](docs/THREAT-MODEL.md) · [Audit readiness](docs/AUDIT.md) ·
-[Privacy](docs/PRIVACY.md) · [Glossary](docs/GLOSSARY.md)
+[Business model](docs/BUSINESS-MODEL.md) · [Threat model](docs/THREAT-MODEL.md) ·
+[Audit readiness](docs/AUDIT.md) · [Privacy](docs/PRIVACY.md) ·
+[Glossary](docs/GLOSSARY.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
 [`accensa-app`](https://github.com/accensa/accensa-app) (merchant dashboard, indexer,
@@ -106,6 +107,35 @@ curl localhost:3402/readyz
 ```
 
 `FACILITATOR_SECRET` is a signing key. `.env` is gitignored — never commit it.
+
+### Testnet Setup
+
+Payments on Stellar need funded accounts, and USDC-priced payments additionally need
+**trustlines** — an account cannot hold or spend an issued asset until it has
+authorized the issuer. This is the most common way a first x402 payment fails, so
+it is documented (and scripted) rather than left to a deep stack trace. Two helpers
+in `scripts/` handle the testnet side, wired to npm:
+
+```bash
+npm run fund:testnet        # scripts/fund-testnet-accounts.mjs
+npm run prepare:testnet-usdc  # scripts/prepare-testnet-usdc.mjs
+```
+
+- `npm run fund:testnet` creates three fresh accounts (client, server/payee,
+  facilitator), funds them via Friendbot, **opens a USDC trustline on each**, and
+  prints the credentials as env assignments (`--json` / `--github-env` for other
+  formats).
+- `npm run prepare:testnet-usdc` puts existing payer/payee accounts into a
+  pay-ready state: USDC trustlines on both, and a small USDC balance on the payer
+  drawn from `TESTNET_USDC_TREASURY_SECRET` (testnet-only; reports
+  `usdc_ready=false` honestly when the treasury is absent).
+
+What trustlines are, who needs which, and the mainnet path (same `changeTrust`
+mechanism, no Friendbot) are in the [Seller Guide](docs/SELLER.md#trustlines) and
+[Buyer / Agent Guide](docs/BUYER.md#trustlines); both examples
+([`examples/http-seller`](examples/http-seller/README.md),
+[`examples/mcp-agent`](examples/mcp-agent/README.md)) state their prerequisite
+up front.
 
 ### Tests
 
@@ -235,3 +265,4 @@ a conformance failure: point a canonical client at it and report what breaks.
 
 Apache-2.0 — see [LICENSE](LICENSE). Chosen to match upstream `@x402/*` so work here can
 be contributed back.
+// fix

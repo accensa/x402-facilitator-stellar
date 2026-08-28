@@ -48,6 +48,23 @@ const rpc = installRpcRetry({
 
 const config = resolveConfig();
 
+// Vault-managed database pool (#127): when VAULT_ADDR is set, Postgres
+// credentials come from Vault's database secrets engine (AppRole login, lease
+// rotation) instead of a long-lived password in DATABASE_URL, which then
+// carries host/port/database only. The one pool is shared by every
+// database-backed store. If Vault is unreachable at boot there is no cached
+// lease yet, so this is null and each store falls back to its degrade path.
+// Must be created before any store below that may use it.
+const vaultDatabase =
+  config.vault && config.databaseUrl
+    ? await createVaultManagedDatabase({
+        vault: config.vault,
+        databaseUrl: config.databaseUrl,
+        warn: msg => console.warn(msg),
+        log: msg => console.log(msg),
+      })
+    : null;
+
 // Issue #94: limiter state lives behind a store interface. RATE_LIMIT_STORE is
 // unset by default -> in-memory Map, exactly the pre-#94 behaviour. Set it to
 // 'postgres' (with DATABASE_URL) to share counters across replicas and keep the
@@ -71,19 +88,26 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
   crdtStore = new CrdtRateLimitStore({
     region: config.region || 'default',
     databaseUrl: config.databaseUrl,
+    maxSize: 10000,
   });
+  // RateLimiter expects the { global, keys, perNetwork } limits shape, which
+  // lives at config.rateLimits — passing the whole config would leave
+  // `global` undefined and crash every rate-limited route.
   rateLimiter = new RateLimiter(config.rateLimits, crdtStore);
 } else if (config.redisUrl) {
   rateLimiter = new RedisRateLimiter(config.rateLimits, { redisUrl: config.redisUrl });
 } else {
-  rateLimitStore = createRateLimitStore();
+  rateLimitStore = createRateLimitStore(process.env, {
+    maxSize: 10000,
+    pool: vaultDatabase?.pool,
+  });
   rateLimitStore.ready?.catch(err => {
     console.error(`[RateLimit] shared store failed to initialise: ${err.message}`);
   });
   rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
 }
 const catalog = new MemoryCatalogStore(config);
-const idempotency = buildIdempotencyStore(config);
+const idempotency = buildIdempotencyStore(config, { pool: vaultDatabase?.pool });
 
 // Cross-process serialization for state transitions (#116). Absent config
 // means single-instance in-process locking.
@@ -111,9 +135,28 @@ const failoverHealth = config.region
   : null;
 import { buildSettlementStore } from './store/index.js';
 import { startReconciliationLoop } from './store/reconciliation.js';
-
-const settlementStore = buildSettlementStore(config);
+import { startOutboxWorker } from './outbox/index.js';
+import { createVaultManagedDatabase } from './vault/index.js';
+const settlementStore = buildSettlementStore(config, { pool: vaultDatabase?.pool });
 const reconciliation = startReconciliationLoop(settlementStore, config);
+
+// Transactional outbox (#123): the settle path writes the notification in the
+// same transaction as the 'settled' state change (see app.js); this worker
+// polls those rows and publishes them through the webhook dispatcher. It runs
+// only when there is something durable to poll (Postgres) and something to
+// publish to; otherwise the app falls back to the fire-and-forget webhook
+// path, which is the pre-outbox behaviour.
+const outbox = settlementStore.outbox ?? null;
+const outboxWorker =
+  outbox && typeof webhooks.publish === 'function'
+    ? startOutboxWorker({
+        outbox,
+        publish: record => webhooks.publish(record),
+        intervalMs: config.outboxPollIntervalMs,
+        log: msg => console.warn(msg),
+      })
+    : null;
+outboxWorker?.start();
 
 const app = createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
@@ -195,11 +238,14 @@ async function shutdown(signal) {
   const shutdownPromise = (async () => {
     try {
       reconciliation?.stop();
+      await outboxWorker?.stop();
+      await vaultDatabase?.stop();
       await app.close();
       await webhooks.stop().catch(() => {});
-      await distributedLock?.quit().catch(() => {});
+      await distributedLock?.quit()?.catch(() => {});
       await crdtStore?.close().catch(() => {});
       failoverHealth?.stop();
+      await rateLimiter?.close?.().catch(() => {});
       horizon.restore();
     } catch (err) {
       console.error(`Error during shutdown: ${err.message}`);

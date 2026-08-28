@@ -1,13 +1,27 @@
-import { validateDiscoveryDeclaration } from './validation.js';
+import { validateDiscoveryDeclaration, validateAmount, STELLAR_DECIMALS } from './validation.js';
 export { validateDiscoveryDeclaration };
 
-const STELLAR_DECIMALS = 7;
-
+/**
+ * Converts a human-readable amount to stroops (1e-7 fixed point).
+ *
+ * Accepted input shapes: a decimal numeric string ('2.5', '+0.5', '0') or a
+ * BigInt stroop count. Anything else is rejected rather than coerced — a
+ * JavaScript number has usually already lost precision before this function
+ * sees it, and an amount finer than a stroop cannot be represented exactly, so
+ * silently truncating it would mint a price the seller did not type.
+ *
+ * Throws (never truncates) on more than 7 decimal places, non-numeric input,
+ * negatives, and number inputs. Zero is a valid amount — see validateAmount.
+ */
 export function toStroops(amount) {
-  if (!amount) return '0';
-  const [intPart = '0', fracPart = ''] = String(amount).split('.');
-  const paddedFrac = fracPart.padEnd(STELLAR_DECIMALS, '0').slice(0, STELLAR_DECIMALS);
-  return BigInt(intPart + paddedFrac).toString();
+  const errors = validateAmount(amount);
+  if (errors.length > 0) {
+    throw new Error(errors[0]);
+  }
+  if (typeof amount === 'bigint') return amount.toString();
+  const [intPart, fracPart = ''] = amount.split('.');
+  const paddedFrac = fracPart.padEnd(STELLAR_DECIMALS, '0');
+  return BigInt(intPart.replace(/^\+/, '') + paddedFrac).toString();
 }
 
 /**

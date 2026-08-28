@@ -26,7 +26,7 @@ This table is the authoritative answer to "what is authenticated here". It is au
 | `POST /verify` | API key | yes (verify bucket) | open | Sponsors verification work; consumes resources, so it is metered. |
 | `POST /settle` | API key | yes (settle bucket) | open | Sponsors transaction fees; the expensive, money-moving route, so it is metered and audited. |
 | `GET /settlements/:idempotencyKey` | API key | no | open | Settlement status read, scoped to the caller's `keyId`. |
-| `GET /settlements/:idempotencyKey/events` | API key | no | open | Settlement event history (the ordered record behind the status read), scoped identically to the settlement. |
+| `GET /settlements/:idempotencyKey/events` | API key | no | open | Ordered event history for one settlement (#130) — the audit trail behind the status read, scoped to the caller's `keyId`. |
 | `GET /usage` | API key — **strict** | n/a (reads the meter) | **refused** | The one route that refuses open mode: it exists to meter authenticated callers, and with no keys there is nothing to meter. Returns `401` with reason `open_mode_usage_forbidden`. |
 | `OPTIONS <cors-enabled route>` | none | no | open | CORS preflight; cannot carry an API key, so it is answered before credentials matter. |
 | anything else | n/a | n/a | n/a | `404` with reason `route_not_found`. |

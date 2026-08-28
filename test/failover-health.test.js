@@ -253,10 +253,7 @@ describe('failover timing (acceptance criterion: < 30s)', () => {
     const recoveryThreshold = 2;
     const totalMs = detectIntervalMs * (failureThreshold + recoveryThreshold);
 
-    assert.ok(
-      totalMs < 30_000,
-      `total failover + failback ${totalMs}ms exceeds 30s`,
-    );
+    assert.ok(totalMs < 30_000, `total failover + failback ${totalMs}ms exceeds 30s`);
   });
 });
 
@@ -328,9 +325,7 @@ describe('split-brain prevention', () => {
     // All healthy — only us-east-1 is preferred.
     const state1 = checker.getState();
     assert.equal(state1.preferredRegion, 'us-east-1');
-    const preferredCount = Object.values(state1.remoteRegions).filter(
-      r => r.priority === 1,
-    ).length;
+    const preferredCount = Object.values(state1.remoteRegions).filter(r => r.priority === 1).length;
     // Only one region has priority 1.
     assert.equal(preferredCount, 0); // remote regions don't have priority 1
 
