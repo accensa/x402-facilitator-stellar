@@ -7,11 +7,14 @@ export { validateDiscoveryDeclaration };
  * Accepted input shapes: a decimal numeric string ('2.5', '+0.5', '0') or a
  * BigInt stroop count. Anything else is rejected rather than coerced — a
  * JavaScript number has usually already lost precision before this function
- * sees it, and an amount finer than a stroop cannot be represented exactly, so
- * silently truncating it would mint a price the seller did not type.
+ * sees it.
  *
- * Throws (never truncates) on more than 7 decimal places, non-numeric input,
- * negatives, and number inputs. Zero is a valid amount — see validateAmount.
+ * A fractional part longer than 7 decimals is truncated, not rounded: rounding
+ * would invent stroops the seller never typed. Stellar's asset precision is 7
+ * decimals, so the 8th digit and beyond are simply dropped.
+ *
+ * Throws (never coerces) on non-numeric input, negatives, and number inputs.
+ * Zero is a valid amount — see validateAmount.
  */
 export function toStroops(amount) {
   const errors = validateAmount(amount);
@@ -20,7 +23,8 @@ export function toStroops(amount) {
   }
   if (typeof amount === 'bigint') return amount.toString();
   const [intPart, fracPart = ''] = amount.split('.');
-  const paddedFrac = fracPart.padEnd(STELLAR_DECIMALS, '0');
+  const truncatedFrac = fracPart.slice(0, STELLAR_DECIMALS);
+  const paddedFrac = truncatedFrac.padEnd(STELLAR_DECIMALS, '0');
   return BigInt(intPart.replace(/^\+/, '') + paddedFrac).toString();
 }
 
