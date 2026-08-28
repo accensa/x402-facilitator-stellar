@@ -1,7 +1,6 @@
 {
-  "name": "x402-facilitator-stellar",
+  "name": "@accensa/x402-facilitator-stellar",
   "version": "0.0.1",
-  "private": true,
   "description": "Conformance spike: a minimal x402 facilitator for Stellar built on @x402/stellar",
   "keywords": [
     "x402",
@@ -30,7 +29,14 @@
     "validate-discovery": "./src/sdk/cli.js",
     "x402-mcp": "./src/mcp/cli.js"
   },
+  "files": [
+    "src/sdk",
+    "src/mcp",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "prepublishOnly": "npm test",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test",

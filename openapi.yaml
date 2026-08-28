@@ -375,6 +375,13 @@ paths:
       responses:
         '200':
           description: A page of cataloged resources, newest first.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
           content:
             application/json:
               schema:
@@ -398,6 +405,10 @@ paths:
                         type: integer
                       total:
                         type: integer
+        '304':
+          description: |
+            The client's `If-None-Match` validator still matches — the page is
+            unchanged, and the response carries no body (#200).
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -433,6 +444,13 @@ paths:
       responses:
         '200':
           description: Ranked search results.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
           content:
             application/json:
               schema:
@@ -463,6 +481,10 @@ paths:
                       cursor:
                         type: [string, 'null']
                         description: Opaque cursor for the next page, or null if there is none.
+        '304':
+          description: |
+            The client's `If-None-Match` validator still matches — the result
+            page is unchanged, and the response carries no body (#200).
         '400':
           description: '`query` was omitted.'
           content:
@@ -523,6 +545,34 @@ components:
       schema:
         type: integer
     RetryAfter:
+    RetryAfter:
+      description: Seconds to wait before retrying. Present only on 429 responses.
+      schema:
+        type: integer
+    CacheControl:
+      description: |
+        Client-side caching policy for the discovery reads (#200):
+        `public, max-age=<DISCOVERY_CACHE_MAX_AGE_SECONDS>,
+        stale-while-revalidate=<DISCOVERY_CACHE_STALE_SECONDS>`. A client within
+        `max-age` reuses its copy without asking; past that it may serve stale
+        while revalidating in the background.
+      schema:
+        type: string
+    ETag:
+      description: |
+        Weak validator for this representation (#200): `W/"<catalogVersion>-<hash>"`.
+        The catalog version is a monotonic counter bumped on every catalog write,
+        so any write invalidates every cached variant at once; the hash covers the
+        full query-parameter set, so different filters never share a validator.
+        Send it back as `If-None-Match` to get an empty 304 when unchanged.
+      schema:
+        type: string
+    LastModified:
+      description: |
+        RFC 1123 timestamp of the most recent catalog write (#200). Informational;
+        revalidate with `If-None-Match` (the ETag), not `If-Modified-Since`.
+      schema:
+        type: string
       description: Seconds to wait before retrying. Present only on 429 responses.
       schema:
         type: integer

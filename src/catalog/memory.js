@@ -23,6 +23,21 @@ export class MemoryCatalogStore {
     // Track in-flight background embedding promises so callers can await
     // all of them via flush() instead of relying on a hardcoded sleep.
     this._pendingEmbeddings = new Set();
+    // Monotonic catalog version, bumped on every write (#200). It backs the
+    // weak ETag discovery responses emit, so a write invalidates every cached
+    // listing/search in one move. Starts at 0 (an untouched catalog).
+    this._version = 0;
+    this._lastModified = new Date(0);
+  }
+
+  /** Monotonic write counter — see #200. */
+  getVersion() {
+    return this._version;
+  }
+
+  /** Timestamp of the most recent write, for Last-Modified (#200). */
+  getLastModified() {
+    return this._lastModified;
   }
 
   _key(resource) {
@@ -62,6 +77,12 @@ export class MemoryCatalogStore {
     };
 
     this.resources.set(key, entry);
+
+    // A write is a write, overwrite or not: bump the monotonic version so every
+    // cached discovery response is invalidated (its weak ETag changes) in one
+    // move rather than being served stale until a TTL expires.
+    this._version += 1;
+    this._lastModified = now;
 
     // Re-embed asynchronously without blocking the upsert (or the payment path)
     if (this.embeddingClient.url) {

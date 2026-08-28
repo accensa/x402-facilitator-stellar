@@ -49,6 +49,36 @@ import { buildSettlementStore } from './store/index.js';
 const BODY_LIMIT_BYTES = 256 * 1024;
 
 /**
+ * Stable, dependency-free serialization of the params that shape a discovery
+ * response, so the ETag is stable across request encodings of the same filter.
+ * Keys are sorted, arrays are sorted, and undefined/null are dropped.
+ */
+function canonicalizeDiscoveryParams(params) {
+  const out = {};
+  for (const key of Object.keys(params || {}).sort()) {
+    const v = params[key];
+    if (v === undefined || v === null) continue;
+    out[key] = Array.isArray(v) ? v.slice().sort() : String(v);
+  }
+  return JSON.stringify(out);
+}
+
+/**
+ * Weak ETag for a discovery response (#200). Keyed on BOTH the monotonic
+ * catalog version (any write changes it, so it invalidates every cached
+ * variant at once) AND the full parameter set (different filters are different
+ * representations and must never share a validator).
+ */
+function discoveryETag(catalogVersion, params) {
+  const hash = crypto
+    .createHash('sha1')
+    .update(canonicalizeDiscoveryParams(params))
+    .digest('base64url')
+    .replace(/=+$/, '');
+  return `W/"${catalogVersion}-${hash}"`;
+}
+
+/**
  * AJV schema for both payment routes. Deliberately loose: it asserts only the
  * structure the transport itself branches on — the same contract as
  * request-validation.js, expressed declaratively. The transaction XDR,
@@ -101,11 +131,7 @@ const PAYMENT_BODY_SCHEMA = {
  */
 export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
   const { distributedLock = null, webhooks = null, failoverHealth = null } = extras;
-  const {
-    distributedLock = null,
-    webhooks = null,
-    settlementStore = extras.settlementStore ?? buildSettlementStore(config),
-  } = extras;
+  const { settlementStore = extras.settlementStore ?? buildSettlementStore(config) } = extras;
   const app = Fastify({
     // Client IP resolution. Unset leaves Fastify's default (off), correct where
     // the port is published directly — local development and docker-compose.
@@ -311,76 +337,76 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
    */
   async function processCataloging(req, body, reply, source = 'payment') {
     try {
-    const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
-    const outcome = {};
+      const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
+      const outcome = {};
 
-    if (validation.hardDrop) {
-      if (validation.reason === 'missing_or_invalid_discovery_extension') {
-        outcome.status = 'not attempted';
-      } else {
-        outcome.status = 'rejected';
-        outcome.code = validation.reason;
-        console.warn(`[Catalog] Hard drop: ${validation.reason}`);
-      }
-    } else {
-      const checkResult = await rateLimiter.checkCatalog(req);
-      if (!checkResult.allowed) {
-        outcome.status = 'rejected';
-        outcome.code = 'catalog_rate_limited';
-        outcome.reason = checkResult.reason;
-        console.warn(`[Catalog] Rate limit exceeded for IP ${req.ip}`);
-        // Audited as a rejection but never allowed to shape the payment
-        // response: the 429/headers belong to the payment limiter, not here.
-        audit('rate_limit_rejected', {
-          actor: req.keyId ?? `ip:${req.ip}`,
-          route: 'catalog',
-          reason: checkResult.reason,
-          outcome_override: outcome.code,
-        });
-      } else {
-        if (validation.softDrops.length > 0) {
-          outcome.status = 'partially landed';
-          outcome.code = 'catalog_partial';
-          outcome.reason = `Dropped fields: ${validation.softDrops.join(', ')}`;
-          console.warn(
-            `[Catalog] Soft drops for ${validation.resource.url}: ${validation.softDrops.join(', ')}`,
-          );
+      if (validation.hardDrop) {
+        if (validation.reason === 'missing_or_invalid_discovery_extension') {
+          outcome.status = 'not attempted';
         } else {
-          outcome.status = 'landed';
-          outcome.code = 'catalog_success';
+          outcome.status = 'rejected';
+          outcome.code = validation.reason;
+          console.warn(`[Catalog] Hard drop: ${validation.reason}`);
         }
-
-        await rateLimiter.recordCatalog(req);
-
-        // Off the hot path. Cataloging must never delay or fail a payment.
-        Promise.resolve().then(async () => {
-          try {
-            const existing = await catalog.getResource?.(
-              validation.resource.url,
-              validation.resource.toolName ?? null,
+      } else {
+        const checkResult = await rateLimiter.checkCatalog(req);
+        if (!checkResult.allowed) {
+          outcome.status = 'rejected';
+          outcome.code = 'catalog_rate_limited';
+          outcome.reason = checkResult.reason;
+          console.warn(`[Catalog] Rate limit exceeded for IP ${req.ip}`);
+          // Audited as a rejection but never allowed to shape the payment
+          // response: the 429/headers belong to the payment limiter, not here.
+          audit('rate_limit_rejected', {
+            actor: req.keyId ?? `ip:${req.ip}`,
+            route: 'catalog',
+            reason: checkResult.reason,
+            outcome_override: outcome.code,
+          });
+        } else {
+          if (validation.softDrops.length > 0) {
+            outcome.status = 'partially landed';
+            outcome.code = 'catalog_partial';
+            outcome.reason = `Dropped fields: ${validation.softDrops.join(', ')}`;
+            console.warn(
+              `[Catalog] Soft drops for ${validation.resource.url}: ${validation.softDrops.join(', ')}`,
             );
-            await catalog.upsertResource(validation.resource, source);
-            // A public listing being created or overwritten is public state
-            // changing — recorded so a spoofed listing can be investigated
-            // after the fact.
-            audit('catalog_write', {
-              actor: req.keyId ?? `ip:${req.ip}`,
-              source,
-              url: validation.resource.url,
-              tool_name: validation.resource.toolName ?? null,
-              overwritten: Boolean(existing),
-            });
-          } catch (err) {
-            console.warn(`[Catalog] Async cataloging failed: ${err.message}`);
+          } else {
+            outcome.status = 'landed';
+            outcome.code = 'catalog_success';
           }
-        });
-      }
-    }
 
-    reply.header(
-      'EXTENSION-RESPONSES',
-      Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
-    );
+          await rateLimiter.recordCatalog(req);
+
+          // Off the hot path. Cataloging must never delay or fail a payment.
+          Promise.resolve().then(async () => {
+            try {
+              const existing = await catalog.getResource?.(
+                validation.resource.url,
+                validation.resource.toolName ?? null,
+              );
+              await catalog.upsertResource(validation.resource, source);
+              // A public listing being created or overwritten is public state
+              // changing — recorded so a spoofed listing can be investigated
+              // after the fact.
+              audit('catalog_write', {
+                actor: req.keyId ?? `ip:${req.ip}`,
+                source,
+                url: validation.resource.url,
+                tool_name: validation.resource.toolName ?? null,
+                overwritten: Boolean(existing),
+              });
+            } catch (err) {
+              console.warn(`[Catalog] Async cataloging failed: ${err.message}`);
+            }
+          });
+        }
+      }
+
+      reply.header(
+        'EXTENSION-RESPONSES',
+        Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
+      );
     } catch (err) {
       console.error('[Catalog] Unhandled error during processCataloging:', err);
     }
@@ -1002,6 +1028,49 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
     },
   );
 
+  /**
+   * Discovery caching (#200).
+   *
+   * GET /discovery/resources and /discovery/search are the read-heavy half of
+   * the service and the half most likely to be polled, yet they carried no
+   * cache headers — so every agent query re-ran the ranking/embedding path over
+   * data the client already held. Both routes now emit:
+   *
+   *   - Cache-Control: configurable `public, max-age=…, stale-while-revalidate=…`
+   *   - a weak ETag derived from BOTH the monotonic catalog version (any write
+   *     changes it) AND the full query-parameter set (different filters get
+   *     different validators, so a cache can never satisfy one filter with
+   *     another's body), and
+   *   - Last-Modified (from the catalog store's write timestamp) when available.
+   *
+   * If-None-Match is honoured with an empty 304 BEFORE the expensive work runs,
+   * so a polling client that already holds the data never re-embeds the query
+   * or re-scores the catalog.
+   */
+  function applyDiscoveryCache(req, reply, catalog, params) {
+    const policy = config.discoveryCache ?? { maxAgeSeconds: 60, staleWhileRevalidateSeconds: 300 };
+    const cc = `public, max-age=${policy.maxAgeSeconds}, stale-while-revalidate=${policy.staleWhileRevalidateSeconds}`;
+    reply.header('cache-control', cc);
+
+    const version = typeof catalog.getVersion === 'function' ? catalog.getVersion() : 0;
+    const etag = discoveryETag(version, params);
+    reply.header('etag', etag);
+
+    if (typeof catalog.getLastModified === 'function') {
+      const lm = catalog.getLastModified();
+      if (lm) reply.header('last-modified', new Date(lm).toUTCString());
+    }
+
+    const inm = req.headers['if-none-match'];
+    const notModified = inm
+      ? inm
+          .split(',')
+          .map(s => s.trim())
+          .includes(etag)
+      : false;
+    return { etag, notModified };
+  }
+
   app.get('/discovery/resources', { onRequest: cors('public') }, async (req, reply) => {
     let extensions;
     if (req.query.extensions) {
@@ -1019,6 +1088,12 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
       limit: req.query.limit,
       offset: req.query.offset,
     };
+
+    // #200: validators are computed and matched BEFORE the expensive work, so
+    // a polling client that already holds this representation gets an empty
+    // 304 instead of a re-run of the listing path.
+    const cache = applyDiscoveryCache(req, reply, catalog, params);
+    if (cache.notModified) return reply.code(304).send();
 
     try {
       const result = await catalog.listResources(params);
@@ -1064,6 +1139,11 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
       limit: req.query.limit,
       cursor: req.query.cursor,
     };
+
+    // #200: same contract as the listing route — validators before the
+    // expensive work (here: embedding the query and scoring the catalog).
+    const cache = applyDiscoveryCache(req, reply, catalog, params);
+    if (cache.notModified) return reply.code(304).send();
 
     try {
       const result = await catalog.search(params);

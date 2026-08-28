@@ -2,6 +2,9 @@
 
 <!-- One or two sentences. What does this do that the tree did not do before? -->
 
+<!-- Follow the repo's conventions in CONTRIBUTING.md, including the Node
+     version, the full local check sequence, and the licence policy. -->
+
 ## Why
 
 <!-- The problem, not the patch. If it fixes an issue, link it: Closes #N -->

@@ -106,6 +106,7 @@ checklist. The groups:
 | **Resilience** | `BREAKER_TIMEOUT_MS`, `BREAKER_ERROR_THRESHOLD_PERCENTAGE`, `BREAKER_RESET_TIMEOUT_MS`, `RPC_BREAKER_THRESHOLD`, `RPC_BREAKER_COOLDOWN_MS`, `RPC_FORCE_IPV4`, `HORIZON_MAX_SOCKETS`, `HORIZON_KEEP_ALIVE_TIMEOUT_MS`, `HORIZON_KEEP_ALIVE_MAX_TIMEOUT_MS`, `HORIZON_HEADERS_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, `SHUTDOWN_GRACE_MS` |
 | **Readiness** | `READINESS_TIMEOUT_MS`, `READINESS_CACHE_TTL_MS`, `READINESS_FUNDING_FLOOR_STROOPS` |
 | **Audit / Bazaar** | `AUDIT_LOG_FILE`, `EMBEDDINGS_URL`, `ENABLE_RERANKING` |
+| **Discovery caching** | `DISCOVERY_CACHE_MAX_AGE_SECONDS`, `DISCOVERY_CACHE_STALE_SECONDS` |
 
 **House rule:** a variable the code reads and `.env.example` does not document is a bug
 — if you find one, fix `.env.example` in the same PR that touches the code.
@@ -207,6 +208,34 @@ counters) or `RATE_LIMIT_STORE=postgres` with `DATABASE_URL` (fails closed with 
 `RateLimit-Remaining` / `RateLimit-Reset` / `Retry-After` headers. `GET /usage` (API
 key required — the one route that refuses open mode) shows a caller their own meters.
 Full detail: [`docs/OPERATIONS.md`](./OPERATIONS.md).
+
+### Discovery caching
+
+`GET /discovery/resources` and `GET /discovery/search` are the polled half of the
+service — agents, Bazaar crawlers and dashboards hit them in loops, and every
+`/discovery/search` miss re-embeds the query and re-scores the catalog. Both routes
+therefore send caching validators so an unchanged poll costs a header comparison
+instead of the ranking path (#200):
+
+- `Cache-Control: public, max-age=<n>, stale-while-revalidate=<m>` — configured via
+  `DISCOVERY_CACHE_MAX_AGE_SECONDS` (default 60) and
+  `DISCOVERY_CACHE_STALE_SECONDS` (default 300). Tune to how fast your catalog moves:
+  a static demo can cache for minutes, a fast-moving market wants seconds.
+  `DISCOVERY_CACHE_MAX_AGE_SECONDS=0` disables client-side caching entirely —
+  revalidation still works, it just costs a round trip per request.
+- `ETag: W/"<catalogVersion>-<paramHash>"` — a weak validator keyed on a monotonic
+  catalog version (bumped on **every** catalog write: a settled payment, a manual
+  registration, anything) plus a hash of the full query-parameter set. Different
+  filters are different representations and never share a validator.
+- `Last-Modified` — RFC 1123 timestamp of the last catalog write. Informational;
+  clients should revalidate with `If-None-Match`.
+
+A client that sends its ETag back as `If-None-Match` gets an empty `304` when the
+catalog has not changed since that representation was generated — which, because
+the version is bumped on every write, is exactly "no write happened since". Because
+the validators are computed before the listing/search work runs, a `304` short-circuits
+the expensive path entirely; nothing bounds the requests themselves like rate limiting
+above, but each one becomes cheap.
 
 ---
 
