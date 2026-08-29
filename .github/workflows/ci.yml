@@ -59,6 +59,33 @@ jobs:
       # needs testnet and lives in its own workflow.
       - run: npm test
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Run tests with coverage collection
+      - name: Run tests with coverage
+        run: |
+          node --test --experimental-test-coverage --test-reporter=tap 2>&1 | tee coverage-output.txt
+      # Parse and report coverage
+      - name: Parse and report coverage
+        run: |
+          node scripts/parse-coverage.mjs < coverage-output.txt
+      # Store the coverage output as an artifact
+      - name: Upload coverage output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage-output.txt
+          retention-days: 7
+
   audit:
     name: audit
     runs-on: ubuntu-latest
