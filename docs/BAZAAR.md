@@ -125,7 +125,118 @@ The validation rules for resources submitted to the catalog are as follows:
 - **Resource Cap:** A single `payTo` address can have a maximum of 50 resources in the catalog. New inserts beyond this limit are rejected.
 - **PayTo changes:** If a resource is already cataloged and a subsequent payment reports a different `payTo`, a warning is logged.
 
-## Search Quality & Evaluation
+## The `EXTENSION-RESPONSES` Header
+
+Every successful `/verify` (valid payment) and `/settle` (settled payment)
+response tells the seller what the Bazaar did with the resource declared in
+the payment:
+
+```
+EXTENSION-RESPONSES: <base64>
+```
+
+The value is the base64 encoding of a JSON object with a single `bazaar`
+key — the **envelope**:
+
+```json
+{
+  "bazaar": {
+    "status": "<status>",
+    "code": "<code>",
+    "reason": "<explanation>"
+  }
+}
+```
+
+`code` and `reason` are present only for the statuses that carry them. Decode
+it from a shell with a one-liner:
+
+```bash
+curl -si <paid-request> | grep -i extension-responses | cut -d' ' -f2 | base64 -d | jq
+```
+
+or in Node:
+
+```js
+const header = response.headers.get('extension-responses');
+const outcome = JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+```
+
+### Worked example
+
+A listing that landed:
+
+```
+EXTENSION-RESPONSES: eyJiYXphYXIiOnsic3RhdHVzIjoibGFuZGVkIiwiY29kZSI6ImNhdGFsb2dfc3VjY2VzcyJ9fQ==
+```
+
+decodes to:
+
+```json
+{
+  "bazaar": {
+    "status": "landed",
+    "code": "catalog_success"
+  }
+}
+```
+
+And one that was rejected because the route template was hostile:
+
+```
+EXTENSION-RESPONSES: eyJiYXphYXIiOnsic3RhdHVzIjoicmVqZWN0ZWQiLCJjb2RlIjoiaW52YWxpZF9yb3V0ZVRlbXBsYXRlIn19
+```
+
+decodes to:
+
+```json
+{
+  "bazaar": {
+    "status": "rejected",
+    "code": "invalid_routeTemplate"
+  }
+}
+```
+
+### Outcomes
+
+| `status` | Meaning | `code` | `reason` |
+|---|---|---|---|
+| `not attempted` | The payment carried no usable Bazaar discovery extension, so nothing was cataloged. Not an error — the seller simply did not declare discovery metadata. | — | — |
+| `landed` | The resource was cataloged and is discoverable. | `catalog_success` | — |
+| `partially landed` | The resource was cataloged, but one or more fields were dropped for quality. | `catalog_partial` | `Dropped fields: <field, ...>` |
+| `rejected` | The resource was **not** cataloged. | one of the codes below | Set for rate-limit rejections |
+
+### Every code a seller can receive
+
+| `code` | Status | What it means | What to do |
+|---|---|---|---|
+| `catalog_success` | `landed` | The listing is live. | Nothing. |
+| `catalog_partial` | `partially landed` | The listing is live but fields were dropped; `reason` names them. | Fix the named fields (table below) and make a fresh payment — cataloging runs off the payment path and will upsert the corrected listing. |
+| `catalog_rate_limited` | `rejected` | Cataloging is metered per caller (default 10/min, `catalog_rpm` via `RATE_LIMIT_GLOBAL`). The payment itself still succeeded — only the cataloging was skipped. | Wait a minute, or raise `catalog_rpm` in the operator's config. |
+| `invalid_extension_schema` | `rejected` | The `bazaar` extension in the payment payload does not conform to the upstream spec. | Validate offline with `npx validate-discovery metadata.json` and fix the extension shape, then pay again. |
+| `invalid_routeTemplate` | `rejected` | The `routeTemplate` is hostile: path traversal (`..`), protocol smuggling (`://`), or unparseable percent-encoding. This is a security boundary, not a quality nit. | Use a plain path template such as `/api/resource/{id}` and pay again. |
+| `missing_or_invalid_discovery_extension` | `not attempted` | No Bazaar discovery extension could be found or extracted from the payment. | If you want to be listed, declare discovery metadata (see the [Seller Guide](SELLER.md)); otherwise nothing to fix. |
+
+### Soft-dropped fields (`catalog_partial`)
+
+When the status is `partially landed`, the `reason` reads
+`Dropped fields: <field, ...>`; each named field was removed from an otherwise
+live listing:
+
+| Field in `reason` | What was dropped | Fix |
+|---|---|---|
+| `routeTemplate` | A wildcard or malformed-but-not-hostile template (e.g. the bare `*` the stock SDK registers by default). | Provide a concrete template with named parameters. |
+| `serviceName` | Invalid or oversized service name. | A short, plain-text name. |
+| `iconUrl` | Invalid or private-IP URL. | A public HTTPS icon URL. |
+| `description_truncated` | Description contained HTML or exceeded 200 characters. | Short, plain text. |
+| `tags_filtered` | Invalid or oversized tags were dropped. | Fewer, well-formed tags. |
+
+The codes above are extracted from `src/catalog/validation.js` and
+`src/app.js`, and `test/extension-responses-doc.test.js` fails if a code is
+added to the cataloging path without being documented here.
+
+## Search Quality & Evaluation History
 
 ### What `eval/` measures
 
