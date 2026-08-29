@@ -1,0 +1,52 @@
+name: Conformance on @x402/* bump
+
+# When Renovate opens a PR that bumps a @x402/* package, run the upstream
+# conformance suite (conformance.yml) against the PR head. A bump that breaks
+# conformance must fail this PR, not appear a month later in production.
+#
+# We use Renovate (not Dependabot) so the bump PR is an ordinary in-repo branch
+# and CI can read repo secrets (the testnet treasury key) — see docs/UPSTREAM.md.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: ['renovate/**']
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect-x402-bump:
+    name: detect @x402/* change
+    runs-on: ubuntu-latest
+    outputs:
+      is-x402: ${{ steps.detect.outputs.is-x402 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          git fetch origin "$BASE" "$HEAD" >/dev/null 2>&1 || true
+          # Did any @x402/* dependency version move in this PR?
+          if git diff "$BASE" "$HEAD" -- package.json | grep -E '^[+-][^+-].*("@x402/' >/dev/null; then
+            echo "is-x402=true" >> "$GITHUB_OUTPUT"
+            echo "This PR bumps a @x402/* package — conformance run required."
+          else
+            echo "is-x402=false" >> "$GITHUB_OUTPUT"
+            echo "No @x402/* bump detected — skipping conformance run."
+          fi
+
+  conformance:
+    name: upstream e2e (stellar, testnet)
+    needs: detect-x402-bump
+    if: needs.detect-x402-bump.outputs.is-x402 == 'true'
+    uses: ./.github/workflows/conformance.yml
+    with:
+      x402_ref: 'main'
+    secrets: inherit

@@ -1,0 +1,114 @@
+name: Upstream spec drift watch
+
+# Watches x402-foundation/x402 for changes to the spec files we depend on
+# (see docs/UPSTREAM.md) and opens an issue when any of them change since the
+# last reviewed baseline SHA. The baseline is only advanced by a human review,
+# so a green run means "nothing we depend on changed since we last looked."
+on:
+  schedule:
+    # Weekly, Monday 06:17 UTC — slower than any spec moves, fast enough that
+    # a drift is found within a week of landing, not a quarter later.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+  # Re-check when the policy / tracked-file list itself changes.
+  pull_request:
+    paths:
+      - 'docs/UPSTREAM.md'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read baseline SHA and tracked files from docs/UPSTREAM.md
+        id: config
+        run: |
+          BASE=$(grep -oE 'upstream-baseline-sha: [0-9a-f]+' docs/UPSTREAM.md | head -1 | awk '{print $2}')
+          if [ -z "$BASE" ]; then
+            echo "::error::Could not find upstream-baseline-sha marker in docs/UPSTREAM.md"
+            exit 1
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          # Tracked files live between the markers; one path per line.
+          awk '/upstream:tracked-files:start -->/{f=1;next} /upstream:tracked-files:end -->/{f=0} f' docs/UPSTREAM.md \
+            | sed '/^[[:space:]]*$/d' > /tmp/tracked.txt
+          echo "Baseline: $BASE"
+          echo "Tracked files:"
+          cat /tmp/tracked.txt
+
+      - name: Detect changes to each tracked file since baseline
+        id: drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE="${{ steps.config.outputs.base }}"
+          MAIN_SHA=$(gh api repos/x402-foundation/x402/commits?sha=main\&per_page=1 --jq '.[0].sha')
+          echo "main=$MAIN_SHA" >> "$GITHUB_OUTPUT"
+          BODY=$(mktemp)
+          CHANGED=0
+          {
+            echo "The following upstream spec files this facilitator depends on changed since the last reviewed baseline \`$BASE\`:"
+            echo
+          } > "$BODY"
+
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            HEAD_BLOB=$(gh api "repos/x402-foundation/x402/contents/$f?ref=main" --jq '.sha' 2>/dev/null || true)
+            BASE_BLOB=$(gh api "repos/x402-foundation/x402/contents/$f?ref=$BASE" --jq '.sha' 2>/dev/null || true)
+            if [ -n "$HEAD_BLOB" ] && [ -n "$BASE_BLOB" ] && [ "$HEAD_BLOB" != "$BASE_BLOB" ]; then
+              COMMIT=$(gh api "repos/x402-foundation/x402/commits?sha=main&path=$f&per_page=1" --jq '.[0].sha')
+              TITLE=$(gh api "repos/x402-foundation/x402/commits/$COMMIT" --jq '.commit.message' | head -1)
+              URL="https://github.com/x402-foundation/x402/commit/$COMMIT"
+              FILE_URL="https://github.com/x402-foundation/x402/blob/main/$f"
+              {
+                echo "### \`$f\`"
+                echo
+                echo "- baseline blob: \`${BASE_BLOB:0:10}\`"
+                echo "- current (main) blob: \`${HEAD_BLOB:0:10}\`"
+                echo "- last change: [\`${COMMIT:0:10}\`]($URL) — $TITLE"
+                echo "- view file: $FILE_URL"
+                echo
+              } >> "$BODY"
+              CHANGED=1
+            fi
+          done < /tmp/tracked.txt
+
+          if [ "$CHANGED" = "1" ]; then
+            {
+              echo
+              echo "---"
+              echo
+              echo "**Action required:** review the upstream change(s) above, then advance the baseline in \`docs/UPSTREAM.md\` to \`$MAIN_SHA\` (and update the tracked-file list if a new spec file is now depended on). See the review policy in that file."
+              echo
+              echo "Suggested new baseline SHA: \`$MAIN_SHA\`"
+            } >> "$BODY"
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            echo "No tracked spec file changed since $BASE."
+          fi
+          cp "$BODY" /tmp/drift-body.md
+
+      - name: Open or update the drift issue
+        if: steps.drift.outputs.changed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(cat /tmp/drift-body.md)
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --label upstream-spec-drift --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+            echo "Updated existing drift issue #$EXISTING"
+          else
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Upstream x402 spec drift detected" \
+              --label upstream-spec-drift \
+              --body "$BODY"
+            echo "Opened new drift issue"
+          fi

@@ -13,6 +13,16 @@ By the end you will have:
 
 ---
 
+
+## Trustlines
+
+On Stellar an account can only hold — and therefore only spend — an issued asset (USDC, any SEP-41 token) once it has authorized the issuer with a **trustline** (`changeTrust`). Native XLM needs no trustline. The facilitator sponsors the network fee, so the buyer needs **only the payment asset**: the XLM for transaction fees is paid by the facilitator, but the payment asset itself must be trusted *and funded* on your account.
+
+- **Testnet:** `npm run fund:testnet` funds a fresh account and opens the USDC trustline on it in one step. If the seller prices in a different asset, add a trustline for that asset the same way (a `changeTrust` for that issuer).
+- **Mainnet:** the same `changeTrust` operation, with the mainnet network passphrase and the issuer of the asset the listing actually prices in. Friendbot does not exist on pubnet — funding comes from an exchange withdrawal or an account that already holds the asset.
+
+The most common first-payment failure on Stellar is a missing trustline on either side of the transfer. When you hit it, the transaction dies in simulation and reads as a generic failure; checking the listing's `asset` and confirming both accounts trust it is the fix.
+
 ## 0. Prerequisites
 
 - **Node.js ≥ 20**.

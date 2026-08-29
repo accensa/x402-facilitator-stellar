@@ -29,13 +29,14 @@ function invalid(field, reason, message) {
 }
 
 /**
+ * Validates that a body contains the required payment fields.
+ * This is shared validation logic used by both payment routes and discovery routes.
+ *
  * @param {unknown} body - the parsed JSON request body (req.body)
- * @param {{networks: string[]}} config - resolved config; networks is the
- *   allowlist of CAIP-2 network identifiers this instance serves
  * @returns {{valid: true, paymentPayload: object, paymentRequirements: object}
  *   | {valid: false, field: string, reason: string, message: string}}
  */
-export function validatePaymentBody(body, config) {
+export function validatePaymentFields(body) {
   const { paymentPayload, paymentRequirements } = body ?? {};
 
   if (!isPlainObject(paymentPayload)) {
@@ -62,19 +63,36 @@ export function validatePaymentBody(body, config) {
       'paymentRequirements.network must be a non-empty string',
     );
   }
+
+  return { valid: true, paymentPayload, paymentRequirements };
+}
+
+/**
+ * @param {unknown} body - the parsed JSON request body (req.body)
+ * @param {{networks: string[]}} config - resolved config; networks is the
+ *   allowlist of CAIP-2 network identifiers this instance serves
+ * @returns {{valid: true, paymentPayload: object, paymentRequirements: object}
+ *   | {valid: false, field: string, reason: string, message: string}}
+ */
+export function validatePaymentBody(body, config) {
+  const fieldValidation = validatePaymentFields(body);
+  if (!fieldValidation.valid) {
+    return fieldValidation;
+  }
+
   // A distinct code from invalid_request: the body is well-formed, it just
   // names a network this instance does not serve. A client should be able to
   // branch on that rather than parse invalidMessage prose. Rejecting it here,
   // before the scheme sees it, matters because config.js keeps testnet and
   // pubnet signers rigidly separate — the failure mode of getting network
   // handling wrong on a pubnet instance is losing real money.
-  if (!config.networks.includes(paymentRequirements.network)) {
+  if (!config.networks.includes(fieldValidation.paymentRequirements.network)) {
     return invalid(
       'paymentRequirements.network',
       'unsupported_network',
-      `network "${paymentRequirements.network}" is not served by this instance (serves: ${config.networks.join(', ')})`,
+      `network "${fieldValidation.paymentRequirements.network}" is not served by this instance (serves: ${config.networks.join(', ')})`,
     );
   }
 
-  return { valid: true, paymentPayload, paymentRequirements };
+  return fieldValidation;
 }

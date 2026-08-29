@@ -32,8 +32,9 @@ const require = createRequire(import.meta.url);
  * and it is byte-for-byte the behaviour the service had before #94.
  */
 export class MemoryStore {
-  constructor() {
+  constructor(maxSize = 10000) {
     this.map = new Map();
+    this.maxSize = maxSize;
   }
 
   async get(bucketId, nowSec) {
@@ -54,12 +55,28 @@ export class MemoryStore {
       this.map.set(bucketId, bucket);
     }
     bucket.count += amount;
+
+    // Cap the store size by shedding oldest buckets when limit is hit
+    if (this.map.size > this.maxSize) {
+      const entries = Array.from(this.map.entries());
+      // Sort by resetAt ascending (oldest first)
+      entries.sort((a, b) => a[1].resetAt - b[1].resetAt);
+      // Remove the oldest entries to get back under the limit
+      const toRemove = entries.slice(0, this.map.size - this.maxSize);
+      for (const [id] of toRemove) {
+        this.map.delete(id);
+      }
+    }
+
     return { count: bucket.count, resetAt: bucket.resetAt };
   }
 
   async sweep(nowSec) {
     for (const [id, bucket] of this.map.entries()) {
-      if (bucket.resetAt <= nowSec) this.map.delete(id);
+      // Defensive: evict buckets without finite resetAt (malformed entries)
+      if (!Number.isFinite(bucket.resetAt) || bucket.resetAt <= nowSec) {
+        this.map.delete(id);
+      }
     }
   }
 }
@@ -138,7 +155,11 @@ export class PostgresStore {
   /** Expired windows are dead weight; called opportunistically by the limiter. */
   async sweep(nowSec) {
     await this._awaitReady();
-    await this.pool.query('DELETE FROM rate_limit_buckets WHERE reset_at <= $1', [nowSec]);
+    // Defensive: also delete rows with NULL or non-finite reset_at
+    await this.pool.query(
+      'DELETE FROM rate_limit_buckets WHERE reset_at IS NULL OR reset_at <= $1',
+      [nowSec],
+    );
   }
 
   async close() {
@@ -158,9 +179,12 @@ export class PostgresStore {
  * error and the caller should refuse to start rather than silently shard the
  * counters per process again.
  */
-export function createRateLimitStore(env = process.env) {
+export function createRateLimitStore(env = process.env, opts = {}) {
+  // Accept either the legacy numeric maxSize (memory-store sizing) or an
+  // options object carrying a shared (Vault-managed) pool (#127).
+  const { maxSize = 10000, pool } = typeof opts === 'number' ? { maxSize: opts } : opts;
   const kind = env.RATE_LIMIT_STORE || 'memory';
-  if (kind === 'memory') return new MemoryStore();
+  if (kind === 'memory') return new MemoryStore(maxSize);
   if (kind === 'postgres') {
     if (!env.DATABASE_URL) {
       throw new Error(
@@ -168,7 +192,9 @@ export function createRateLimitStore(env = process.env) {
           'Refusing to fall back to per-process memory: that would silently double every limit at 2 replicas.',
       );
     }
-    return new PostgresStore({ connectionString: env.DATABASE_URL });
+    // pool is a shared (Vault-managed) pool when #127 is configured; absent
+    // means build one from the connection string as before.
+    return new PostgresStore({ connectionString: env.DATABASE_URL, pool });
   }
   throw new Error(`Unknown RATE_LIMIT_STORE '${kind}' (expected 'memory' or 'postgres').`);
 }

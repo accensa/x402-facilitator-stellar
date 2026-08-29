@@ -80,8 +80,14 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Bazaar discovery](docs/BAZAAR.md) · [MCP server](docs/MCP.md) ·
 [Conformance](docs/CONFORMANCE.md) · [Deployment](docs/DEPLOYMENT.md) ·
 [Operations](docs/OPERATIONS.md) · [Authentication](docs/AUTHENTICATION.md) ·
+ feat/upstream-drift-watch
 [Threat model](docs/THREAT-MODEL.md) · [Audit readiness](docs/AUDIT.md) ·
-[Privacy](docs/PRIVACY.md) · [Glossary](docs/GLOSSARY.md)
+[Privacy](docs/PRIVACY.md) · [Upstream tracking](docs/UPSTREAM.md) ·
+
+[Business model](docs/BUSINESS-MODEL.md) · [Threat model](docs/THREAT-MODEL.md) ·
+[Audit readiness](docs/AUDIT.md) · [Privacy](docs/PRIVACY.md) ·
+ main
+[Glossary](docs/GLOSSARY.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
 [`accensa-app`](https://github.com/accensa/accensa-app) (merchant dashboard, indexer,
@@ -113,6 +119,34 @@ seller-facing `validate-discovery` tool — ship on npm as
 (`npm install -g @accensa/x402-facilitator-stellar` then `x402-mcp`; see
 [`docs/MCP.md`](docs/MCP.md)). The facilitator service itself runs from this
 checkout, as above.
+### Testnet Setup
+
+Payments on Stellar need funded accounts, and USDC-priced payments additionally need
+**trustlines** — an account cannot hold or spend an issued asset until it has
+authorized the issuer. This is the most common way a first x402 payment fails, so
+it is documented (and scripted) rather than left to a deep stack trace. Two helpers
+in `scripts/` handle the testnet side, wired to npm:
+
+```bash
+npm run testnet:fund        # scripts/fund-testnet-accounts.mjs
+npm run testnet:usdc  # scripts/prepare-testnet-usdc.mjs
+```
+
+- `npm run testnet:fund` creates three fresh accounts (client, server/payee,
+  facilitator), funds them via Friendbot, **opens a USDC trustline on each**, and
+  prints the credentials as env assignments (`--json` / `--github-env` for other
+  formats).
+- `npm run testnet:usdc` puts existing payer/payee accounts into a
+  pay-ready state: USDC trustlines on both, and a small USDC balance on the payer
+  drawn from `TESTNET_USDC_TREASURY_SECRET` (testnet-only; reports
+  `usdc_ready=false` honestly when the treasury is absent).
+
+What trustlines are, who needs which, and the mainnet path (same `changeTrust`
+mechanism, no Friendbot) are in the [Seller Guide](docs/SELLER.md#trustlines) and
+[Buyer / Agent Guide](docs/BUYER.md#trustlines); both examples
+([`examples/http-seller`](examples/http-seller/README.md),
+[`examples/mcp-agent`](examples/mcp-agent/README.md)) state their prerequisite
+up front.
 
 ### Tests
 
@@ -133,10 +167,44 @@ FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
 ALICE_SECRET=$(stellar keys show alice) npm run e2e
 ```
 
+#### Testnet setup scripts
+
+The accounts that end-to-end run needs are a chore on day one, and the scripts
+for it exist: `npm run testnet:fund` generates and friendbot-funds the three
+testnet accounts the suite needs (client, server payee, facilitator) and prints
+them as env assignments, and `npm run testnet:usdc` gives the payer and payee
+USDC trustlines plus a funded balance from a treasury account
+(`TESTNET_USDC_TREASURY_SECRET`). Both are exactly what the conformance
+workflow does before each run — see docs/CONFORMANCE.md.
+
+### Operator tooling
+
+Everything in `scripts/`, and where it is documented:
+
+| Script | npm script | Purpose |
+|---|---|---|
+| `check-licenses.mjs` | `npm run licenses` | Fails on any non-permissive (AGPL) dependency in the tree. |
+| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`. |
+| `smoke-examples.mjs` | `npm run smoke:examples` | Starts both examples and asserts real behaviour (402 challenge; MCP `initialize`/`tools/list`); the CI examples gate. |
+| `e2e.mjs` | `npm run e2e` | End-to-end x402 payment against a running facilitator on testnet. |
+| `fund-testnet-accounts.mjs` | `npm run testnet:fund` | Generates and friendbot-funds the three testnet accounts the suite needs. |
+| `prepare-testnet-usdc.mjs` | `npm run testnet:usdc` | Gives the payer and payee USDC trustlines and a funded balance. |
+| `select-conformance-components.mjs` | (CI, `conformance.yml`) | Decides which upstream e2e components a run exercises; documented in docs/CONFORMANCE.md. |
+| `bench-http.mjs` | `npm run bench` | Local throughput benchmark of the HTTP surface with stubbed collaborators. |
+| `data_retention_job.js` | — | **Not implemented.** Exits non-zero on purpose: it is scheduled to enforce the docs/PRIVACY.md retention periods once a datastore exists, and nothing is purged until then. Tracked in [Issue #50](https://github.com/accensa/x402-facilitator-stellar/issues/50). |
+
 ### Privacy and Data Minimisation
 
 The X402 Facilitator handles sensitive transaction and search query data. Our approach is to collect only what is necessary, and to aggressively purge it according to strict retention policies.
 For detailed information, see our [Privacy Policy](docs/PRIVACY.md).
+
+### Observability
+
+The transport emits one structured JSON line per request to stdout and exposes
+Prometheus metrics on `GET /metrics`. Configure `LOG_LEVEL` (verbosity) and
+`METRICS_PORT` (bind metrics to a separate, unauthenticated port) via the
+environment — see `.env.example` and [Operations](docs/OPERATIONS.md)
+for the log fields and the alert to set on each metric.
 
 ## Conformance
 
@@ -151,7 +219,7 @@ holds today on testnet:
 - [x] **Settled transaction hash published** — see the conformance table below
 - [x] **The x402 repository's e2e suite — 5 of 5 server components pass** (10/10
       scenarios across `express`, `fastify`, `hono`, `next`, `mcp`, 2026-08-25/26)
-- [ ] `stellar:pubnet`
+- [ ] `stellar:pubnet` (code-path verified; on-mainnet proof pending funded keys [#17])
 
 ### Settled on Stellar testnet, 2026-08-14
 
@@ -215,9 +283,20 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
   [#19](https://github.com/accensa/x402-facilitator-stellar/issues/19).
 - **No persistence by default.** The catalog has a PostgreSQL schema in `migrations/` and
   uses it when `DATABASE_URL` is set; the settlement path holds nothing durable, tracked
-  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10).
+  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10). When
+  `DATABASE_URL` is set you can also add `DATABASE_URL_REPLICA` to offload settlement
+  status reads and the reconciliation sweep onto a read replica (CQRS fallback to primary
+  on replication lag) — see `docs/DEPLOYMENT.md` (#121).
 - **`exact` only.** The `upto` scheme has no Stellar specification yet; design notes in
   [`accensa-contracts/docs/ADR-002`](https://github.com/accensa/accensa-contracts/blob/main/docs/ADR-002-upto-scheme.md).
+- **Pubnet is code-served but unproven on mainnet (#17).** `stellar:pubnet` is served with
+  its own signer pool, RPC provider and fee ceiling, none shared with testnet, and that
+  isolation plus both-networks `/supported` advertising and 7-decimal amounts are pinned by
+  `test/pubnet-conformance.test.js`. What remains is operational, not code: a canonical
+  client completing a real USDC payment on mainnet with the settled hash published needs
+  funded pubnet keys and a contracted RPC, which no CI secret can supply. State and the
+  key-custody/rotation posture are in `docs/DEPLOYMENT.md`; the checkbox above stays
+  unchecked until that proof lands.
 
 ## Contributing
 
@@ -238,3 +317,4 @@ and how to run conformance against a branch.
 
 Apache-2.0 — see [LICENSE](LICENSE). Chosen to match upstream `@x402/*` so work here can
 be contributed back.
+// fix

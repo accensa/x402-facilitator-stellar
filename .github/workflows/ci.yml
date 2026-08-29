@@ -86,6 +86,22 @@ jobs:
       # in a README.
       - run: node scripts/check-licenses.mjs --list
 
+  env-doc:
+    name: env-doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Issue #144: .env.example is the operator's setup reference; a variable
+      # read in src/ that is not documented there is an invisible default, and
+      # for the spend-limit variables a money question. The check fails the
+      # build instead of drifting.
+      - run: npm run env:check
+
   migration:
     name: migration compat
     runs-on: ubuntu-latest
@@ -114,9 +130,18 @@ jobs:
       # Search evaluation gate
       - run: npm run eval
 
+  # Issue #190: this job used to start each example with `&`, sleep, and kill
+  # %1 — so a broken example still produced a green check. Now each example is
+  # installed (a genuine dependency check) and then exercised by
+  # scripts/smoke-examples.mjs, which starts it, polls until it is actually
+  # serving, asserts real behaviour (a 402 PAYMENT-REQUIRED challenge for the
+  # seller, an MCP initialize/tools-list for the agent) and fails the run on
+  # any broken assertion. timeout-minutes so a hang fails the job instead of
+  # running to the runner ceiling.
   examples:
     name: examples
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -124,15 +149,17 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: |
+      - name: Install the HTTP seller example
+        run: |
+          set -euo pipefail
           cd examples/http-seller
           npm ci
-          node -e "import('./index.js').catch(e => { console.error(e); process.exit(1); })" &
-          sleep 5
-          kill %1
-      - run: |
+      - name: Install the MCP agent example
+        run: |
+          set -euo pipefail
           cd examples/mcp-agent
           npm ci
-          node -e "import('./index.js').catch(e => { console.error(e); process.exit(1); })" &
-          sleep 5
-          kill %1
+      - name: Smoke-test both examples
+        run: |
+          set -euo pipefail
+          node scripts/smoke-examples.mjs

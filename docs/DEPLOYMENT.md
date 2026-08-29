@@ -139,7 +139,11 @@ keeps open-mode callers out of each other's buckets.
 | `FACILITATOR_SECRET_PUBNET`| Yes (if pubnet) | `S…` secret for the pubnet signer. |
 | `TRUST_PROXY` | No | Express trust proxy setting: hop count or proxy list (see topology above). Never `true`. |
 | `REDIS_URL` | No | Shared rate-limit buckets across instances, e.g. `redis://redis:6379`. Unset = in-memory (or `RATE_LIMIT_STORE`). Takes precedence over `RATE_LIMIT_STORE`. |
-| `DATABASE_URL` | No | Connection string for PostgreSQL (e.g., `postgres://user:pass@host:5432/db`). Enables persistent idempotency keys; required when `RATE_LIMIT_STORE=postgres`; unset otherwise = in-memory. |
+| `DATABASE_URL` | No | Connection string for PostgreSQL (e.g., `postgres://user:pass@host:5432/db`). Enables persistent idempotency keys; required when `RATE_LIMIT_STORE=postgres`; unset otherwise = in-memory. With `VAULT_ADDR` set, must carry host/port/database **only** (no userinfo) — Vault supplies the credentials. |
+| `VAULT_ADDR` | No | Enable HashiCorp Vault integration: Postgres credentials are fetched dynamically from Vault's database secrets engine instead of a long-lived password in `DATABASE_URL`. See below. |
+| `VAULT_APPROLE_ROLE_ID` / `VAULT_APPROLE_SECRET_ID` | If `VAULT_ADDR` | The AppRole machine identity used to authenticate. The generated database credentials are short-lived and never appear in the environment or the logs. |
+| `VAULT_DB_MOUNT` / `VAULT_DB_ROLE` | No | Database secrets engine mount (default `database`) and role (default `facilitator`) to read `creds` from. |
+| `VAULT_POLL_INTERVAL_MS` | No | How often the lease-refresh loop checks whether credentials need rotating (default `10000`). |
 | `RATE_LIMIT_STORE` | No | `memory` (default) or `postgres`. Postgres-backed shared rate-limit state across replicas — see below. Ignored when `REDIS_URL` is set. |
 | `RPC_BREAKER_THRESHOLD` | No | Consecutive connection failures that open the RPC circuit breaker (default `10`). |
 | `RPC_BREAKER_COOLDOWN_MS` | No | How long an open breaker waits before a half-open probe (default `30000`). |
@@ -185,6 +189,42 @@ store fails CLOSED — checks refuse with reason `rate_limit_store_unavailable`
 ceiling is spent, and answering "allowed" would mean unlimited sponsored spend
 during an outage.
 
+## CQRS Read Replica (Issue #121)
+
+Settlement status reads and new settlement submissions currently share one
+Postgres pool. Historical status queries (`GET /settlements/:key`) can block the
+primary event loop and add latency to the write path that actually moves funds.
+#121 separates the two concerns:
+
+- **Writes stay on the primary.** `save`, `updateState`, and the idempotent
+  upsert that backs `/settle` hit the `DATABASE_URL` pool only.
+- **Reads go to the replica.** Status reads and the background reconciliation
+  sweep hit the `DATABASE_URL_REPLICA` pool. Reads no longer contend with
+  writes, so read throughput scales independently (replica pools open more
+  connections: `max: 20` vs `max: 5` on the primary).
+
+To enable it, provision a streaming replica of the primary (PostgreSQL native
+replication via `pg_basebackup` + WAL follow — `docker-compose.yml` ships a
+single-node `db-replica` that is the correct shape for local composition; run
+≥ 2 nodes across failure domains in production), then set
+`DATABASE_URL_REPLICA`. The primary's schema propagates to the replica via
+replication; no separate migration is needed on the replica.
+
+**Read-after-write consistency** (acceptance criterion: settle then immediately
+GET the status): Postgres streaming replication is asynchronous, so a row can
+be briefly invisible to the replica. The store handles this in three layers:
+
+1. A row this process just wrote is always served from that process's in-memory
+   copy — a replica read never touches our own fresh write.
+2. A status read that the replica hasn't propagated yet retries (up to
+   `SETTLEMENT_REPLICA_LAG_MS`, default `1000` ms).
+3. If the replica still can't see the row, the read falls back to the primary
+   before deciding it's a genuine miss — so a `404` is only returned once
+   replication is confirmed to have drained.
+
+Unset `DATABASE_URL_REPLICA` for the pre-#121 behaviour (single pool, reads and
+writes on the primary) — this is the zero-config default and always correct.
+
 ## Health Endpoints and Probes
 
 - `GET /healthz` — liveness. Always `{ ok: true }` while the process runs; no
@@ -195,6 +235,32 @@ during an outage.
   (`READINESS_CACHE_TTL_MS`) and each check runs under its own timeout
   (`READINESS_TIMEOUT_MS`), independent of the ~12s retry budget in the payment
   path. Point load-balancer **traffic gating** here.
+
+## Vault Integration (Dynamic Database Credentials)
+
+For deployments that cannot keep a long-lived database password in
+`DATABASE_URL`, the facilitator can source credentials from HashiCorp Vault:
+
+- **AppRole authentication** — the process logs in with
+  `VAULT_APPROLE_ROLE_ID`/`VAULT_APPROLE_SECRET_ID` and gets a short-lived
+  client token, re-authenticated before the token lease lapses.
+- **Dynamic credentials** — database credentials are read from
+  `VAULT_DB_MOUNT/creds/VAULT_DB_ROLE` (the database secrets engine). The
+  username/password pair lives in memory only: it is never logged, never
+  written to the environment, and never part of any diagnostic output.
+- **Lease rotation** — a background loop refreshes the credentials as the
+  lease approaches expiry (30% of the lease, bounded), and the Postgres pool
+  starts using them for new connections immediately; existing connections are
+  unaffected.
+- **Graceful outage handling** — while a cached lease is still valid, a Vault
+  outage is logged and the cached credentials keep working. Only a boot-time
+  failure with no cached lease degrades further: the service starts without a
+  database-backed pool and each store follows its documented degrade path
+  (in-memory, or fail-closed for the shared rate limiter).
+
+When Vault is enabled, `DATABASE_URL` must not embed credentials — a URL with
+userinfo is refused at boot, because silently falling back to a static
+password would defeat the entire point.
 
 ## Audit Log
 
@@ -234,6 +300,58 @@ Supply secrets via a secure secrets manager (like AWS Secrets Manager, HashiCorp
 
 The default `@x402/stellar` package relies on the public Stellar testnet RPC. This is fine for testnet.
 **However, for Pubnet:** The public endpoint is explicitly not something to run an availability target against. A pubnet deployment should use a dedicated RPC provider URL (e.g., Blockdaemon, QuickNode, or a self-hosted Horizon/Soroban RPC instance) via `STELLAR_RPC_URL_PUBNET`.
+
+## Pubnet: key custody and rotation (#17)
+
+Pubnet is where the money is real, so its keys warrant their own posture. The
+`FACILITATOR_SECRET_PUBNET` (or the pool `FACILITATOR_SECRETS_PUBNET`) is the most
+privileged material this service ever holds — whoever holds it can sponsor
+settlements against real balances. Everything below follows from that.
+
+### Generation and storage
+
+- **Never reuse a testnet key on pubnet.** `config.js` refuses to boot with `ENABLE_PUBNET=true`
+  unless an *independent* pubnet secret exists, because a testnet-shaped config on mainnet
+  loses real money. The two secrets are unrelated keys.
+- **Generate off any developer laptop.** Use the `stellar keys generate --network pubnet`
+  flow (or a hardware/HSM-backed key) and store the secret in a secrets manager
+  (AWS Secrets Manager, HashiCorp Vault, Kubernetes Secrets) — never in the image, a
+  committed `.env`, or a shell history.
+- **Where the pool uses multiple keys** (`FACILITATOR_SECRETS_PUBNET`), each signer is an
+  independent Stellar account; they must each carry real pubnet balances sufficient to
+  sponsor the fee ceiling and be funded before traffic is routed (#17). `GET /readyz`
+  reports each signer's funded balance so a drained key fails readiness instead of
+  surfacing as an opaque settle error.
+
+### Rotation
+
+A funded mainnet signer key is a liability that grows with balance, so plan rotation:
+
+1. **Provision the new key** in the same secrets manager and fund it. Add it to the pool
+   (`FACILITATOR_SECRETS_PUBNET`) on a rolling deployment — round-robin selection starts
+   using it immediately without a hard cutover.
+2. **Settle in-course through the old key.** Leave the old key in the pool until its
+   sequence number is idle and no in-flight settlement references it, then remove it
+   in a follow-up deploy. Abruptly dropping it mid-flight can strand a sponsored tx.
+3. **Rotate the secrets manager entry**, deleting the old material from the manager and
+   from any environment that ever saw it.
+4. **Audit**: `AUDIT_LOG_FILE` records every settlement against the key that signed it
+   (`actor` / signer workspaces) so a rotation can be verified after the fact.
+
+### RPC provider
+
+A mainnet deployment must use a dedicated `STELLAR_RPC_URL_PUBNET` (Blockdaemon,
+QuickNode, or a self-hosted Soroban RPC instance) — the public endpoint is not an
+availability target. Contract the provider separately with an availability commitment
+before the first mainnet request; a provider blob on mainnet means sponsored
+settlements fail and the signer pool idles with real funds.
+
+### Fee ceiling and alerting
+
+The per-day sponsored-fee ceiling (`settle_spd` / `fee_spd` rate limit) is what bounds
+the loss a single compromised key can cause on pubnet. Configure `MAX_TX_FEE_STROOPS_PUBNET`
+and the rate-limit ceiling deliberately, and have `/readyz` + `/metrics` alerting live
+*before* the first mainnet request — see `docs/OPERATOR.md`.
 
 ## Database Provisioning and Migration
 
@@ -286,6 +404,27 @@ npm run check:migration
 
 See [MIGRATIONS.md](MIGRATIONS.md) for the full expand-and-contract
 migration guide and runbook.
+
+## Settlement Notifications (Transactional Outbox)
+
+Settlement notifications are written to an `outbox_events` table in the SAME
+transaction as the settlement state change (`settleAndEnqueue` in
+`src/store/postgres.js`), then a background worker (`src/outbox/`) polls and
+publishes them through the webhook dispatcher. If the process crashes after
+settlement but before the broker accepts the message, the notification is still
+in the outbox and is published on restart — at-least-once delivery, with the
+database as the durability boundary.
+
+- Enabled when `DATABASE_URL` is set (migration `004_outbox_events.sql` must
+  be applied). Without Postgres, notifications fall back to the previous
+  fire-and-forget direct publish.
+- The worker polls every `OUTBOX_POLL_INTERVAL_MS` (default `5000` ms). It
+  claims rows with `FOR UPDATE SKIP LOCKED`, so multiple replicas can run it
+  without double-publishing; a claim carries a lease, so a worker that dies
+  mid-publish is re-claimed and re-published by the next poll (duplicates are
+  possible, loss is not).
+- A row whose publish keeps failing is retried up to 10 times, then marked
+  `failed` and left for an operator (visible via the `outbox_events` table).
 
 ## Resource Sizing
 

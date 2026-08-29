@@ -82,9 +82,11 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
     };
 
     const dummySecret = Keypair.random().secret();
+    // Key ids must be alphanumeric + underscore to be usable in RATE_LIMIT_
+    // env var names, so the id carries an underscore rather than a hyphen.
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
-      FACILITATOR_API_KEYS: 'test-key:sec123',
+      FACILITATOR_API_KEYS: 'test_key:sec123',
     });
     const mockRateLimiter = {
       checkSettle: async () => ({ allowed: true }),

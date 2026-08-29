@@ -398,7 +398,9 @@ function fakePostgresPool() {
     async query(sql, params = []) {
       const norm = sql.replace(/\s+/g, ' ').trim();
 
-      if (norm.includes('CREATE TABLE IF NOT EXISTS settlement_events')) {
+      if (norm.includes('CREATE TABLE') || norm.includes('CREATE INDEX')) {
+        // settlement_events/settlement_projections from #130, plus the
+        // outbox_events table the store now creates alongside them (#123).
         return { rows: [] };
       }
 
