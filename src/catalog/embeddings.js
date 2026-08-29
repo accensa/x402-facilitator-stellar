@@ -56,12 +56,16 @@ export class EmbeddingClient {
    */
   _validateVector(embedding) {
     if (!Array.isArray(embedding) || embedding.length === 0) {
-      console.warn(`[Catalog] Embedding provider ${this.url} returned a non-array or empty embedding`);
+      console.warn(
+        `[Catalog] Embedding provider ${this.url} returned a non-array or empty embedding`,
+      );
       return null;
     }
     for (const value of embedding) {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
-        console.warn(`[Catalog] Embedding provider ${this.url} returned a non-finite vector element`);
+        console.warn(
+          `[Catalog] Embedding provider ${this.url} returned a non-finite vector element`,
+        );
         return null;
       }
     }
@@ -146,10 +150,15 @@ export class EmbeddingClient {
       return vector;
     } catch (err) {
       const timeout =
-        err && (err.name === 'TimeoutError' || err.name === 'AbortError' || err.message === 'The operation was aborted due to timeout');
+        err &&
+        (err.name === 'TimeoutError' ||
+          err.name === 'AbortError' ||
+          err.message === 'The operation was aborted due to timeout');
       this._recordFailure(timeout);
       if (timeout) {
-        console.warn(`[Catalog] Embedding provider ${this.url} timed out after ${this.timeoutMs}ms`);
+        console.warn(
+          `[Catalog] Embedding provider ${this.url} timed out after ${this.timeoutMs}ms`,
+        );
       }
       // Network failure, degrade gracefully
       return null;
@@ -201,7 +210,10 @@ export class EmbeddingClient {
       return resources;
     } catch (err) {
       const timeout =
-        err && (err.name === 'TimeoutError' || err.name === 'AbortError' || err.message === 'The operation was aborted due to timeout');
+        err &&
+        (err.name === 'TimeoutError' ||
+          err.name === 'AbortError' ||
+          err.message === 'The operation was aborted due to timeout');
       this._recordFailure(timeout);
       return resources;
     }

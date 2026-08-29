@@ -26,6 +26,7 @@ export default [
         Response: 'readonly',
         Request: 'readonly',
         AbortController: 'readonly',
+        AbortSignal: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
         Buffer: 'readonly',

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MemoryCatalogStore } from '../src/catalog/memory.js';
+import { MemoryCatalogStore, MAX_RESOURCES_PER_PAYTO_CODE } from '../src/catalog/memory.js';
 
 test('Auto Cataloging Store Limits', async t => {
   const store = new MemoryCatalogStore();
@@ -11,7 +11,7 @@ test('Auto Cataloging Store Limits', async t => {
     }
     await assert.rejects(
       store.upsertResource({ url: `http://example.com/50`, payTo: 'G123' }),
-      /maximum_resources_per_payto_exceeded/,
+      err => err?.code === MAX_RESOURCES_PER_PAYTO_CODE,
     );
   });
 

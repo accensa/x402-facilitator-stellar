@@ -99,6 +99,7 @@ const PAYMENT_BODY_SCHEMA = {
  *   - audit: audit writer override (default createAuditLogger)
  *   - readiness: readiness checker override
  *   - breakerStates: breaker-state reader for the readiness probe (#105)
+ *   - failoverHealth (#126): region-aware failover health checker
  * @returns {Promise<import('fastify').FastifyInstance>}
  */
 export async function createApp(
@@ -109,7 +110,32 @@ export async function createApp(
   idempotency,
   extras = {},
 ) {
-  const { distributedLock = null, webhooks = null } = extras;
+  const {
+    distributedLock = null,
+    webhooks = null,
+    failoverHealth = null,
+    settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+  } = extras;
+
+  // Observability collaborators. Both are injectable so tests can capture the
+  // structured log line and inspect the metrics registry without a stdout scraper
+  // or a listener; in production server.js supplies real ones (and binds the
+  // metrics port when METRICS_PORT is set).
+  const logger = extras.logger ?? createRequestLog({ level: config.logLevel ?? 'info' });
+  const metrics = extras.metrics ?? createMetrics();
+  const signers = extras.signers ?? {};
+
+  // Seed the signer-inflight series at zero for every configured signer so the
+  // gauge exists before the pool lands (#9). The settle path flips it to one
+  // while a settlement is in flight.
+  for (const [network, signer] of Object.entries(signers)) {
+    if (signer) metrics.setSignerInflight({ network, signer, value: 0 });
+  }
+
+  // Whether /metrics is served on this (public) listener. When METRICS_PORT is
+  // set, server.js runs a separate listener for it and passes serveMetrics:false.
+  const serveMetrics = extras.serveMetrics !== false;
+
   const app = Fastify({
     // Client IP resolution. Unset leaves Fastify's default (off), correct where
     // the port is published directly — local development and docker-compose.

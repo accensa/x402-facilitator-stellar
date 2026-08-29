@@ -169,7 +169,7 @@ describe('Event-sourced settlement store (#130)', () => {
 });
 
 describe('GET /settlements/:idempotencyKey/events (#130)', () => {
-  function buildApp(store) {
+  async function buildApp(store) {
     const dummySecret = Keypair.random().secret();
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
@@ -195,7 +195,7 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
     });
     await store.updateState('settlement-A', 'settled', { tx_hash: 'hashA' });
 
-    const app = buildApp(store);
+    const app = await buildApp(store);
     try {
       const res = await app.inject({
         method: 'GET',
@@ -224,7 +224,7 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
       key_id: 'callerA',
     });
 
-    const app = buildApp(store);
+    const app = await buildApp(store);
     try {
       const res = await app.inject({
         method: 'GET',
@@ -239,7 +239,7 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
 
   test('404s for an unknown settlement', async () => {
     const store = new MemorySettlementStore();
-    const app = buildApp(store);
+    const app = await buildApp(store);
     try {
       const res = await app.inject({
         method: 'GET',

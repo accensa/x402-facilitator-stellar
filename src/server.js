@@ -24,6 +24,10 @@ import { MemoryCatalogStore } from './catalog/memory.js';
 import { createWebhookDispatcher } from './webhooks/dispatcher.js';
 import { FailoverHealthChecker } from './failover-health.js';
 import { createApp } from './app.js';
+import { buildSettlementStore } from './store/index.js';
+import { startReconciliationLoop } from './store/reconciliation.js';
+import { startOutboxWorker } from './outbox/index.js';
+import { createVaultManagedDatabase } from './vault/index.js';
 
 // A .env file is a development convenience, not a deployment mechanism — in
 // production the environment comes from the orchestrator, so a stray .env left
@@ -128,6 +132,36 @@ const webhooks = await createWebhookDispatcher({
   groupId: config.kafka.groupId,
   url: config.webhookUrl,
 });
+
+// Multi-region failover health (#126).
+const failoverHealth = config.region
+  ? new FailoverHealthChecker({
+      region: config.region,
+      regions: config.regions,
+      warn: msg => console.warn(`  ${msg}`),
+      log: msg => console.log(`  ${msg}`),
+    })
+  : null;
+const settlementStore = buildSettlementStore(config, { pool: vaultDatabase?.pool });
+const reconciliation = startReconciliationLoop(settlementStore, config);
+
+// Transactional outbox (#123): the settle path writes the notification in the
+// same transaction as the 'settled' state change (see app.js); this worker
+// polls those rows and publishes them through the webhook dispatcher. It runs
+// only when there is something durable to poll (Postgres) and something to
+// publish to; otherwise the app falls back to the fire-and-forget webhook
+// path, which is the pre-outbox behaviour.
+const outbox = settlementStore.outbox ?? null;
+const outboxWorker =
+  outbox && typeof webhooks.publish === 'function'
+    ? startOutboxWorker({
+        outbox,
+        publish: record => webhooks.publish(record),
+        intervalMs: config.outboxPollIntervalMs,
+        log: msg => console.warn(msg),
+      })
+    : null;
+outboxWorker?.start();
 
 const app = await createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
