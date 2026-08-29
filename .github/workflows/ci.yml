@@ -86,6 +86,22 @@ jobs:
       # in a README.
       - run: node scripts/check-licenses.mjs --list
 
+  env-doc:
+    name: env-doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Issue #144: .env.example is the operator's setup reference; a variable
+      # read in src/ that is not documented there is an invisible default, and
+      # for the spend-limit variables a money question. The check fails the
+      # build instead of drifting.
+      - run: npm run env:check
+
   migration:
     name: migration compat
     runs-on: ubuntu-latest
@@ -114,9 +130,125 @@ jobs:
       # Search evaluation gate
       - run: npm run eval
 
+  # Coverage is intentionally off the critical path (continue-on-error) while
+  # we establish the baseline. Do not add a threshold until we know the real
+  # numbers — a number picked blind either does nothing or blocks everything.
+  # Node's built-in --experimental-test-coverage needs no new dependency.
+  # The lcov reporter writes coverage.lcov; the inline Node script turns it
+  # into a per-directory Markdown table posted to the job summary.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Pin to 22: --experimental-test-coverage and the lcov reporter are
+          # stable enough there. The test matrix already checks Node 20.
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Run tests with coverage
+        # Two reporters in parallel: spec to stdout for readable logs, lcov to
+        # file for the summary script. Node >= 22 supports multiple
+        # --test-reporter / --test-reporter-destination pairs.
+        run: |
+          node --test \
+            --experimental-test-coverage \
+            --test-reporter=spec \
+            --test-reporter-destination=stdout \
+            --test-reporter=lcov \
+            --test-reporter-destination=coverage.lcov
+      - name: Build per-directory summary
+        # Pure Node — no lcov binary, no extra packages. Parses the lcov.info
+        # format (DA: line,hit records) and groups results into four buckets
+        # that reflect the four distinct maturity levels called out in the
+        # issue: src/ (top-level files), src/catalog/, src/mcp/, src/sdk/.
+        # An "other src/" row catches any future subdirectories automatically.
+        run: |
+          node - <<'NODE_SCRIPT'
+          import { readFileSync } from 'fs';
+          import { appendFileSync } from 'fs';
+
+          const raw = readFileSync('coverage.lcov', 'utf8');
+
+          // lcov format: SF:<path> … DA:<line>,<hit> … end_of_record
+          const buckets = {
+            'src/catalog/': { found: 0, hit: 0 },
+            'src/mcp/':     { found: 0, hit: 0 },
+            'src/sdk/':     { found: 0, hit: 0 },
+            'src/ (top-level)': { found: 0, hit: 0 },
+            'other':        { found: 0, hit: 0 },
+          };
+
+          function bucketFor(sf) {
+            if (sf.includes('src/catalog/')) return 'src/catalog/';
+            if (sf.includes('src/mcp/'))     return 'src/mcp/';
+            if (sf.includes('src/sdk/'))     return 'src/sdk/';
+            // top-level src/ files: path contains /src/ but no deeper subdir
+            if (/\/src\/[^/]+$/.test(sf))    return 'src/ (top-level)';
+            return 'other';
+          }
+
+          let currentBucket = null;
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('SF:')) {
+              currentBucket = bucketFor(line.slice(3));
+            } else if (line.startsWith('DA:') && currentBucket) {
+              const [, hitStr] = line.slice(3).split(',');
+              buckets[currentBucket].found += 1;
+              if (parseInt(hitStr, 10) > 0) buckets[currentBucket].hit += 1;
+            }
+          }
+
+          const pct = (b) =>
+            b.found === 0 ? 'N/A' : ((b.hit / b.found) * 100).toFixed(1) + '%';
+
+          const total = Object.values(buckets).reduce(
+            (acc, b) => ({ found: acc.found + b.found, hit: acc.hit + b.hit }),
+            { found: 0, hit: 0 }
+          );
+
+          const rows = Object.entries(buckets)
+            .filter(([, b]) => b.found > 0)
+            .map(([name, b]) => `| \`${name}\` | ${b.hit} | ${b.found} | ${pct(b)} |`);
+
+          const md = [
+            '## Coverage by directory',
+            '',
+            '| Directory | Lines hit | Lines found | Coverage |',
+            '|-----------|----------:|------------:|----------|',
+            ...rows,
+            `| **total** | **${total.hit}** | **${total.found}** | **${pct(total)}** |`,
+            '',
+            '_Baseline — no threshold is enforced yet. File follow-ups against specific gaps._',
+          ].join('\n');
+
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
+          console.log(md);
+          NODE_SCRIPT
+      - name: Upload lcov artifact
+        # Keeps the raw lcov for tools like codecov or local genhtml runs if
+        # someone later wants to drill into line-level gaps.
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage.lcov
+          retention-days: 14
+
+  # Issue #190: this job used to start each example with `&`, sleep, and kill
+  # %1 — so a broken example still produced a green check. Now each example is
+  # installed (a genuine dependency check) and then exercised by
+  # scripts/smoke-examples.mjs, which starts it, polls until it is actually
+  # serving, asserts real behaviour (a 402 PAYMENT-REQUIRED challenge for the
+  # seller, an MCP initialize/tools-list for the agent) and fails the run on
+  # any broken assertion. timeout-minutes so a hang fails the job instead of
+  # running to the runner ceiling.
   examples:
     name: examples
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -124,15 +256,17 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: |
+      - name: Install the HTTP seller example
+        run: |
+          set -euo pipefail
           cd examples/http-seller
           npm ci
-          node -e "import('./index.js').catch(e => { console.error(e); process.exit(1); })" &
-          sleep 5
-          kill %1
-      - run: |
+      - name: Install the MCP agent example
+        run: |
+          set -euo pipefail
           cd examples/mcp-agent
           npm ci
-          node -e "import('./index.js').catch(e => { console.error(e); process.exit(1); })" &
-          sleep 5
-          kill %1
+      - name: Smoke-test both examples
+        run: |
+          set -euo pipefail
+          node scripts/smoke-examples.mjs

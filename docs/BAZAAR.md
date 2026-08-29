@@ -86,6 +86,8 @@ Why exponential rather than a step function: a step (e.g. "drop everything older
 
 When `EMBEDDINGS_URL` is set, a dense leg runs alongside the lexical one: the query and each resource are embedded, cosine similarity is computed, and the two ranked lists are fused with **Reciprocal Rank Fusion** (`k = 60`). When `ENABLE_RERANKING=true`, the fused top page is passed through a reranker. With no provider configured (the memory-backed default), the lexical leg alone decides order and `partialResults` is reported `true` — see above.
 
+**Embedding model changes:** embedding responses are validated (non-empty array of finite numbers). The dimension of the first accepted vector is recorded; a later vector with a different length is rejected with an explicit error log — it means the embedding model or provider changed and the index must be rebuilt (see the re-index procedure at the end of this file). An operator changing the model should re-index rather than letting stored vectors silently mismatch every query vector.
+
 #### Integrity caveat: the `+5` verified boost
 
 The boost is only meaningful if "verified" means something. Two properties of the current design weaken it, tracked separately:
@@ -122,7 +124,7 @@ The validation rules for resources submitted to the catalog are as follows:
 
 **Catalog limits:**
 - **Rate Limit:** Catalog operations are limited per payer IP to 10 requests per minute (`catalog_rpm` in config).
-- **Resource Cap:** A single `payTo` address can have a maximum of 50 resources in the catalog. New inserts beyond this limit are rejected.
+- **Resource Cap:** A single `payTo` address can have a maximum of 50 resources in the catalog (configurable via `CATALOG_MAX_RESOURCES_PER_PAYTO`). New inserts beyond this limit are rejected with the stable reason code `maximum_resources_per_payto_exceeded` — the same code on both the manual (`POST /discovery/resources`) and payment-cataloging paths.
 - **PayTo changes:** If a resource is already cataloged and a subsequent payment reports a different `payTo`, a warning is logged.
 
 ## The `EXTENSION-RESPONSES` Header

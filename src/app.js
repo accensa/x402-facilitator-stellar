@@ -1212,7 +1212,8 @@ export async function createApp(
         return reply.send({ ok: true, resource: entry, softDrops: validation.softDrops });
       } catch (err) {
         console.error(`[Catalog] manual upsert error: ${err.message}`);
-        return reply.code(400).send({ error: 'catalog_error', reason: 'catalog_error' });
+        const code = err && err.code ? err.code : 'catalog_error';
+        return reply.code(400).send({ error: 'catalog_error', reason: code });
       }
     },
   );

@@ -380,6 +380,8 @@ export function resolveConfig(env = process.env) {
     apiKeys,
     rateLimits,
     embeddingsUrl: env.EMBEDDINGS_URL || null,
+    embeddingsTimeoutMs: Number(env.EMBEDDINGS_TIMEOUT_MS ?? 3000),
+    catalogMaxResourcesPerPayTo: Number(env.CATALOG_MAX_RESOURCES_PER_PAYTO ?? 50),
     enableReranking: env.ENABLE_RERANKING === 'true',
     shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),
     requestTimeoutMs: Number(env.REQUEST_TIMEOUT_MS ?? 30_000),

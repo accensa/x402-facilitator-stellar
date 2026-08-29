@@ -10,6 +10,18 @@
 import { scoreResource } from './search.js';
 import { EmbeddingClient } from './embeddings.js';
 
+/** Stable reason code for the catalog-flooding guard (#186). */
+export const MAX_RESOURCES_PER_PAYTO_CODE = 'maximum_resources_per_payto_exceeded';
+
+/** Typed catalog error with a stable code, surfaced identically on every path. */
+export class CatalogError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'CatalogError';
+    this.code = code;
+  }
+}
+
 function cosineSimilarity(vecA, vecB) {
   if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
   let dotProduct = 0;
@@ -27,7 +39,14 @@ function cosineSimilarity(vecA, vecB) {
 export class MemoryCatalogStore {
   constructor(config = {}) {
     this.resources = new Map();
-    this.embeddingClient = new EmbeddingClient(config.embeddingsUrl);
+    // Per-payTo count kept in lockstep with `resources` so the cap check is
+    // O(1) instead of a full catalog scan on every insert (#186).
+    this.payToCounts = new Map();
+    this.maxResourcesPerPayTo =
+      config.maxResourcesPerPayTo ?? config.catalogMaxResourcesPerPayTo ?? 50;
+    this.embeddingClient = new EmbeddingClient(config.embeddingsUrl, {
+      timeoutMs: config.embeddingsTimeoutMs,
+    });
     this.enableReranking = config.enableReranking;
     // Track in-flight background embedding promises so callers can await
     // all of them via flush() instead of relying on a hardcoded sleep.
@@ -38,18 +57,30 @@ export class MemoryCatalogStore {
     return resource.type === 'mcp' ? `${resource.url}::${resource.toolName}` : `${resource.url}::`;
   }
 
+  _incrementPayToCount(payTo) {
+    this.payToCounts.set(payTo, (this.payToCounts.get(payTo) ?? 0) + 1);
+  }
+
+  _decrementPayToCount(payTo) {
+    const next = (this.payToCounts.get(payTo) ?? 1) - 1;
+    if (next <= 0) this.payToCounts.delete(payTo);
+    else this.payToCounts.set(payTo, next);
+  }
+
   async upsertResource(resource, source = 'manual') {
     const key = this._key(resource);
     const existing = this.resources.get(key);
 
-    // Limit resources per payTo to prevent catalog flooding (max 50)
+    // Limit resources per payTo to prevent catalog flooding (#186).
+    // O(1) via the maintained per-payTo counter; the cap is configurable via
+    // CATALOG_MAX_RESOURCES_PER_PAYTO.
     if (!existing) {
-      let payToCount = 0;
-      for (const r of this.resources.values()) {
-        if (r.payTo === resource.payTo) payToCount++;
-      }
-      if (payToCount >= 50) {
-        throw new Error('maximum_resources_per_payto_exceeded');
+      const payToCount = this.payToCounts.get(resource.payTo) ?? 0;
+      if (payToCount >= this.maxResourcesPerPayTo) {
+        throw new CatalogError(
+          MAX_RESOURCES_PER_PAYTO_CODE,
+          `maximum resources per payTo (${this.maxResourcesPerPayTo}) exceeded`,
+        );
       }
     }
 
@@ -71,6 +102,9 @@ export class MemoryCatalogStore {
     };
 
     this.resources.set(key, entry);
+    if (!existing) {
+      this._incrementPayToCount(resource.payTo);
+    }
 
     // Re-embed asynchronously without blocking the upsert (or the payment path)
     if (this.embeddingClient.url) {

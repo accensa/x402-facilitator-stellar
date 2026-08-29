@@ -22,6 +22,15 @@ on:
   # waiting for a nightly run or merging an untested workflow to main.
   push:
     branches: ['conformance/**']
+  # Reusable: a @x402/* version-bump PR calls this directly so a breaking bump
+  # fails the PR instead of surfacing a month later in production. See
+  # conformance-on-bump.yml and docs/UPSTREAM.md.
+  workflow_call:
+    inputs:
+      x402_ref:
+        description: 'Ref of x402-foundation/x402 to test against'
+        required: false
+        default: 'main'
 
 concurrency:
   group: conformance
@@ -51,7 +60,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: x402-foundation/x402
-          ref: ${{ github.event.inputs.x402_ref || 'main' }}
+          ref: ${{ inputs.x402_ref || github.event.inputs.x402_ref || 'main' }}
           path: x402
 
       # Recorded so a failure can be attributed to an upstream change rather

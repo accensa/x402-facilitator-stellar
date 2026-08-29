@@ -14,8 +14,15 @@ Welcome to the X402 Facilitator documentation. Choose the path that best matches
 
 **Reference:**
 - [Architecture](./ARCHITECTURE.md): System design, components, and the discovery path
+ feat/upstream-drift-watch
+ feat/upstream-drift-watch
+- [Upstream tracking & spec-drift policy](./UPSTREAM.md): how we watch `@x402/*` and the spec for drift
+
+
 - [Business Model](./BUSINESS-MODEL.md): who pays for what, metering, and why the rate limits sit where they do
+ main
 - [Event Sourcing](./EVENT-SOURCING.md): The append-only settlement state machine and its audit trail
+ main
 - [Glossary](./GLOSSARY.md): Terminology (Stellar, X402, and Facilitator concepts)
 - [Deployment](./DEPLOYMENT.md): Containers, topology, environment variables, shared stores
 - [Operations](./OPERATIONS.md): Rate limiting, metering, multi-signer pools, health endpoints

@@ -80,8 +80,13 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Bazaar discovery](docs/BAZAAR.md) · [MCP server](docs/MCP.md) ·
 [Conformance](docs/CONFORMANCE.md) · [Deployment](docs/DEPLOYMENT.md) ·
 [Operations](docs/OPERATIONS.md) · [Authentication](docs/AUTHENTICATION.md) ·
+ feat/upstream-drift-watch
+[Threat model](docs/THREAT-MODEL.md) · [Audit readiness](docs/AUDIT.md) ·
+[Privacy](docs/PRIVACY.md) · [Upstream tracking](docs/UPSTREAM.md) ·
+
 [Business model](docs/BUSINESS-MODEL.md) · [Threat model](docs/THREAT-MODEL.md) ·
 [Audit readiness](docs/AUDIT.md) · [Privacy](docs/PRIVACY.md) ·
+ main
 [Glossary](docs/GLOSSARY.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
@@ -117,15 +122,15 @@ it is documented (and scripted) rather than left to a deep stack trace. Two help
 in `scripts/` handle the testnet side, wired to npm:
 
 ```bash
-npm run fund:testnet        # scripts/fund-testnet-accounts.mjs
-npm run prepare:testnet-usdc  # scripts/prepare-testnet-usdc.mjs
+npm run testnet:fund        # scripts/fund-testnet-accounts.mjs
+npm run testnet:usdc  # scripts/prepare-testnet-usdc.mjs
 ```
 
-- `npm run fund:testnet` creates three fresh accounts (client, server/payee,
+- `npm run testnet:fund` creates three fresh accounts (client, server/payee,
   facilitator), funds them via Friendbot, **opens a USDC trustline on each**, and
   prints the credentials as env assignments (`--json` / `--github-env` for other
   formats).
-- `npm run prepare:testnet-usdc` puts existing payer/payee accounts into a
+- `npm run testnet:usdc` puts existing payer/payee accounts into a
   pay-ready state: USDC trustlines on both, and a small USDC balance on the payer
   drawn from `TESTNET_USDC_TREASURY_SECRET` (testnet-only; reports
   `usdc_ready=false` honestly when the treasury is absent).
@@ -155,6 +160,32 @@ funded accounts:
 FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
 ALICE_SECRET=$(stellar keys show alice) npm run e2e
 ```
+
+#### Testnet setup scripts
+
+The accounts that end-to-end run needs are a chore on day one, and the scripts
+for it exist: `npm run testnet:fund` generates and friendbot-funds the three
+testnet accounts the suite needs (client, server payee, facilitator) and prints
+them as env assignments, and `npm run testnet:usdc` gives the payer and payee
+USDC trustlines plus a funded balance from a treasury account
+(`TESTNET_USDC_TREASURY_SECRET`). Both are exactly what the conformance
+workflow does before each run — see docs/CONFORMANCE.md.
+
+### Operator tooling
+
+Everything in `scripts/`, and where it is documented:
+
+| Script | npm script | Purpose |
+|---|---|---|
+| `check-licenses.mjs` | `npm run licenses` | Fails on any non-permissive (AGPL) dependency in the tree. |
+| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`. |
+| `smoke-examples.mjs` | `npm run smoke:examples` | Starts both examples and asserts real behaviour (402 challenge; MCP `initialize`/`tools/list`); the CI examples gate. |
+| `e2e.mjs` | `npm run e2e` | End-to-end x402 payment against a running facilitator on testnet. |
+| `fund-testnet-accounts.mjs` | `npm run testnet:fund` | Generates and friendbot-funds the three testnet accounts the suite needs. |
+| `prepare-testnet-usdc.mjs` | `npm run testnet:usdc` | Gives the payer and payee USDC trustlines and a funded balance. |
+| `select-conformance-components.mjs` | (CI, `conformance.yml`) | Decides which upstream e2e components a run exercises; documented in docs/CONFORMANCE.md. |
+| `bench-http.mjs` | `npm run bench` | Local throughput benchmark of the HTTP surface with stubbed collaborators. |
+| `data_retention_job.js` | — | **Not implemented.** Exits non-zero on purpose: it is scheduled to enforce the docs/PRIVACY.md retention periods once a datastore exists, and nothing is purged until then. Tracked in [Issue #50](https://github.com/accensa/x402-facilitator-stellar/issues/50). |
 
 ### Privacy and Data Minimisation
 
