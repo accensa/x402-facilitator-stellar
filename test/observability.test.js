@@ -145,6 +145,8 @@ test('GET /metrics serves valid Prometheus text with the required series', async
     );
     const text = await res.text();
 
+    assert.match(text, /active_verifications 0/);
+
     for (const name of [
       'x402_requests_total',
       'x402_request_duration_seconds',
@@ -152,9 +154,46 @@ test('GET /metrics serves valid Prometheus text with the required series', async
       'x402_settlement_fee_stroops',
       'x402_rpc_retries_total',
       'x402_signer_inflight',
+      'active_verifications',
     ]) {
       assert.ok(text.includes(`# TYPE ${name} `), `missing series ${name}`);
     }
+  } finally {
+    await app.close();
+  }
+});
+
+test('active_verifications tracks an upstream verify while it is in flight', async () => {
+  let releaseVerify;
+  let verifyStarted;
+  const verifyStartedPromise = new Promise(resolve => {
+    verifyStarted = resolve;
+  });
+  const verifyBlocked = new Promise(resolve => {
+    releaseVerify = resolve;
+  });
+  const metrics = createMetrics();
+  const app = await serve({
+    facilitator: stubFacilitator({
+      verify: async () => {
+        verifyStarted();
+        await verifyBlocked;
+        return { isValid: true };
+      },
+    }),
+    extras: {
+      logger: createRequestLog({ sink: () => {} }),
+      metrics,
+      serveMetrics: true,
+    },
+  });
+  try {
+    const request = app.post('/verify', VALID_BODY);
+    await verifyStartedPromise;
+    assert.match(metrics.render(), /active_verifications 1/);
+    releaseVerify();
+    assert.equal((await request).status, 200);
+    assert.match(metrics.render(), /active_verifications 0/);
   } finally {
     await app.close();
   }

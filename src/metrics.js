@@ -14,6 +14,7 @@
  *   x402_settlement_fee_stroops histogram{network}
  *   x402_rpc_retries_total{code}
  *   x402_signer_inflight{network,signer}
+ *   active_verifications
  */
 
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
@@ -125,6 +126,18 @@ class Gauge {
     this.series.set(key, { labels: { ...labels }, value });
   }
 
+  inc(labels = {}, value = 1) {
+    const key = labelKey(labels);
+    const current = this.series.get(key)?.value ?? 0;
+    this.set(labels, current + value);
+  }
+
+  dec(labels = {}, value = 1) {
+    const key = labelKey(labels);
+    const current = this.series.get(key)?.value ?? 0;
+    this.set(labels, Math.max(0, current - value));
+  }
+
   render() {
     let out = `# HELP ${this.name} ${this.help}\n# TYPE ${this.name} gauge\n`;
     for (const { labels, value } of this.series.values()) {
@@ -173,6 +186,12 @@ export function createMetrics() {
     'In-flight settlements per signer — the sequence-contention signal (#9).',
     ['network', 'signer'],
   );
+  const activeVerifications = new Gauge(
+    'active_verifications',
+    'Current number of in-flight verification operations.',
+    [],
+  );
+  activeVerifications.set({}, 0);
 
   return {
     incRequests: labels => requests.inc(labels),
@@ -183,9 +202,11 @@ export function createMetrics() {
     incRpcRetry: ({ code }) => rpcRetries.inc({ code: code ?? 'unknown' }),
     setSignerInflight: ({ network, signer, value }) =>
       signerInflight.set({ network, signer }, value),
+    incActiveVerifications: () => activeVerifications.inc(),
+    decActiveVerifications: () => activeVerifications.dec(),
 
     render: () =>
-      [requests, duration, settlements, fee, rpcRetries, signerInflight]
+      [requests, duration, settlements, fee, rpcRetries, signerInflight, activeVerifications]
         .map(m => m.render())
         .join(''),
   };

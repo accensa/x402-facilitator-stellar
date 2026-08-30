@@ -769,10 +769,16 @@ export async function createApp(
           }, timeoutMs);
         });
 
-        const verifyPromise = facilitator.verify(body.paymentPayload, body.paymentRequirements);
-        const result = await Promise.race([verifyPromise, timeoutPromise]).finally(() => {
-          clearTimeout(timeoutTimer);
-        });
+        metrics.incActiveVerifications();
+        let result;
+        try {
+          const verifyPromise = facilitator.verify(body.paymentPayload, body.paymentRequirements);
+          result = await Promise.race([verifyPromise, timeoutPromise]).finally(() => {
+            clearTimeout(timeoutTimer);
+          });
+        } finally {
+          metrics.decActiveVerifications();
+        }
 
         if (req.span) {
           req.span.outcome = result.isValid ? 'ok' : 'rejected';

@@ -134,6 +134,8 @@ A resource server debugging a failed payment hands us a single `X-Request-Id` ra
 
 Prometheus text format, unauthenticated. By default it is served on `PORT`; set `METRICS_PORT` to bind it to a separate listener (typically an internal interface) so it is not on the public surface. Series:
 
+`active_verifications` is a process-wide gauge of calls currently waiting on the upstream Stellar verification operation. It is the custom metric used by the Kubernetes HPA. Apply `deploy/kubernetes/active-verifications-hpa.yaml` and install Prometheus Adapter with `deploy/kubernetes/prometheus-adapter-values.yaml` to expose it through the Kubernetes custom metrics API.
+
 | Metric | Type | Labels | What it tells you | Alert |
 |---|---|---|---|---|
 | `x402_requests_total` | counter | `route`, `network`, `outcome`, `reason` | every request, by result | page if `outcome="error"` rate spikes (a dependency or code bug); investigate `reason` labels |
@@ -142,6 +144,7 @@ Prometheus text format, unauthenticated. By default it is served on `PORT`; set 
 | `x402_settlement_fee_stroops` | histogram | `network` | **actual fee paid** — the number that shows whether `MAX_TX_FEE_STROOPS` is sane | alert if p95 fee approaches `MAX_TX_FEE_STROOPS` (fee ceiling about to throttle settlements) |
 | `x402_rpc_retries_total` | counter | `code` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
 | `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert if it sits at ≥ 1 persistently or climbs (signer pool needed before bursty traffic) |
+| `active_verifications` | gauge | none | process-wide number of verification calls waiting on Stellar Horizon | HPA target is 5 average active verifications per pod |
 
 Operational endpoints (`/metrics`, `/healthz`, `/health/ready`) are logged but excluded from `x402_requests_total` so the payment counters stay semantically about payments.
 
