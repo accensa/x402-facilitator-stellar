@@ -240,7 +240,10 @@ const app = await createApp(config, facilitator, rateLimiter, catalog, idempoten
     ? {
         store: dlqStore,
         publish: record => webhooks.publish(record),
-        retryOptions: { maxDlqAttempts: config.dlq.maxRetryAttempts, baseBackoffMs: config.dlq.baseBackoffMs },
+        retryOptions: {
+          maxDlqAttempts: config.dlq.maxRetryAttempts,
+          baseBackoffMs: config.dlq.baseBackoffMs,
+        },
       }
     : null,
 });

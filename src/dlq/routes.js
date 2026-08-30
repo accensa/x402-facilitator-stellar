@@ -65,7 +65,8 @@ export function registerDlqRoutes(
         return reply.code(400).send({ error: 'invalid_request', reason: 'invalid_id' });
       }
       const row = await dlq.get(id);
-      if (!row) return reply.code(404).send({ error: 'not_found', reason: 'dead_letter_not_found' });
+      if (!row)
+        return reply.code(404).send({ error: 'not_found', reason: 'dead_letter_not_found' });
       return reply.send({ ok: true, deadLetter: row });
     },
   );
@@ -84,7 +85,8 @@ export function registerDlqRoutes(
         return reply.code(400).send({ error: 'invalid_request', reason: 'invalid_id' });
       }
       const row = await dlq.get(id);
-      if (!row) return reply.code(404).send({ error: 'not_found', reason: 'dead_letter_not_found' });
+      if (!row)
+        return reply.code(404).send({ error: 'not_found', reason: 'dead_letter_not_found' });
       if (row.status === 'discarded') {
         return reply.code(409).send({ error: 'conflict', reason: 'already_discarded' });
       }
@@ -117,7 +119,8 @@ export function registerDlqRoutes(
         return reply.code(400).send({ error: 'invalid_request', reason: 'invalid_id' });
       }
       const row = await dlq.get(id);
-      if (!row) return reply.code(404).send({ error: 'not_found', reason: 'dead_letter_not_found' });
+      if (!row)
+        return reply.code(404).send({ error: 'not_found', reason: 'dead_letter_not_found' });
 
       await dlq.discard(id);
       audit('dlq_discard', { actor: req.keyId, dead_letter_id: id, message_id: row.message_id });

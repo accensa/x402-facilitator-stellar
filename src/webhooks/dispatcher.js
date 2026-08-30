@@ -290,7 +290,10 @@ export async function createWebhookDispatcher({
           // it, in addition to the operator-facing Postgres record below.
           if (dlqTopic) {
             await producer
-              .send({ topic: dlqTopic, messages: [{ key: record.id, value: JSON.stringify(record) }] })
+              .send({
+                topic: dlqTopic,
+                messages: [{ key: record.id, value: JSON.stringify(record) }],
+              })
               .catch(dlqErr => warn(`webhooks: DLQ topic publish failed: ${dlqErr.message}`));
           }
 
