@@ -69,10 +69,22 @@ export function stubRateLimiter({ allow = true, reason = 'verify_rpm_exceeded' }
     checkSettle: () => result(),
     checkCatalog: () => result(),
     checkCatalogRead: () => result(),
-    recordCatalog: req => recorded.push({ name: 'recordCatalog', keyId: req.keyId }),
-    recordCatalogRead: req => recorded.push({ name: 'recordCatalogRead', keyId: req.keyId }),
-    recordVerify: req => recorded.push({ name: 'recordVerify', keyId: req.keyId }),
-    recordSettle: (req, fee) => recorded.push({ name: 'recordSettle', keyId: req.keyId, fee }),
+    recordCatalog: req => {
+      recorded.push({ name: 'recordCatalog', keyId: req.keyId });
+      return result();
+    },
+    recordCatalogRead: req => {
+      recorded.push({ name: 'recordCatalogRead', keyId: req.keyId });
+      return result();
+    },
+    recordVerify: req => {
+      recorded.push({ name: 'recordVerify', keyId: req.keyId });
+      return result();
+    },
+    recordSettle: (req, fee) => {
+      recorded.push({ name: 'recordSettle', keyId: req.keyId, fee });
+      return result();
+    },
     getUsage: keyId => ({ keyId, verify: 1, settle: 2, feeStroops: 3000 }),
   };
 }

@@ -135,9 +135,36 @@ export class RateLimiter {
     return res;
   }
 
+  /**
+   * Given a post-increment bucket, derive the remaining allowance after the
+   * current request was counted. Counts are asserted finite: a lost/failed
+   * record (the transport degrades open on store failure) is treated as one
+   * consumed so the advertised remaining is never above the true headroom.
+   */
+  _postRecordRemaining(limit, bucket) {
+    const count = Number.isFinite(bucket?.count) ? bucket.count : 1;
+    return Math.max(0, limit - count);
+  }
+
+  /**
+   * Records this verify and returns the limiter state AFTER the request was
+   * counted, so the transport can advertise a remaining value that reflects
+   * what the caller truly has left (issue #141): `recordVerify` post-dates the
+   * `checkVerify` whose `remaining` is only a projection until this runs.
+   *
+   * @returns {{allowed: true, limit: number, remaining: number, resetAt: number}}
+   */
   async recordVerify(req) {
     const ownerId = req.keyId || req.ip;
-    await this._increment(ownerId, 'verify', 60, 1);
+    const limits = this._getKeyConfig(req.keyId);
+    const bucket = await this._increment(ownerId, 'verify', 60, 1);
+    const limit = limits.verifyRpm;
+    return {
+      allowed: true,
+      limit,
+      remaining: this._postRecordRemaining(limit, bucket),
+      resetAt: bucket?.resetAt,
+    };
   }
 
   async checkSettle(req, network = null) {
@@ -171,14 +198,40 @@ export class RateLimiter {
     );
   }
 
+  /**
+   * Records this settlement and returns the limiter state AFTER the request was
+   * counted (issue #141): the tightest remaining allowance across the per-minute,
+   * per-hour and per-day buckets, advertised as RateLimit-* so it reflects what
+   * the caller truly has left rather than the pre-record projection.
+   *
+   * @returns {{allowed: true, limit: number, remaining: number, resetAt: number}}
+   */
   async recordSettle(req, feeCharged) {
     const ownerId = req.keyId || req.ip;
-    await this._increment(ownerId, 'settle', 60, 1);
-    await this._increment(ownerId, 'settle', 3600, 1);
-    await this._increment(ownerId, 'settle', 86400, 1);
+    const limits = this._getKeyConfig(req.keyId);
+    const b60 = await this._increment(ownerId, 'settle', 60, 1);
+    const b3600 = await this._increment(ownerId, 'settle', 3600, 1);
+    const b86400 = await this._increment(ownerId, 'settle', 86400, 1);
     if (feeCharged > 0) {
       await this._increment(ownerId, 'fee', 86400, feeCharged);
     }
+    const tightest = [
+      { limit: limits.settleRpm, remaining: this._postRecordRemaining(limits.settleRpm, b60) },
+      {
+        limit: limits.settleRph,
+        remaining: this._postRecordRemaining(limits.settleRph, b3600),
+      },
+      {
+        limit: limits.settleRpd,
+        remaining: this._postRecordRemaining(limits.settleRpd, b86400),
+      },
+    ].sort((a, b) => a.remaining - b.remaining)[0];
+    return {
+      allowed: true,
+      limit: tightest.limit,
+      remaining: tightest.remaining,
+      resetAt: b60?.resetAt,
+    };
   }
 
   /**
