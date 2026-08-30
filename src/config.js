@@ -366,10 +366,25 @@ export function resolveConfig(env = process.env) {
       clientId: env.KAFKA_CLIENT_ID ?? 'x402-facilitator-stellar',
       topic: env.KAFKA_WEBHOOK_TOPIC ?? 'x402-webhook-delivery',
       groupId: env.KAFKA_WEBHOOK_GROUP_ID ?? 'x402-webhook-dispatchers',
+      /** Broker-level DLQ topic (#DLQ). Unset means no broker-side DLQ topic. */
+      dlqTopic: env.KAFKA_WEBHOOK_DLQ_TOPIC || null,
     },
 
     /** Default webhook receiver (#117); events may carry their own url. */
     webhookUrl: env.WEBHOOK_URL || null,
+
+    /**
+     * Dead-letter queue (#DLQ). Only relevant when DATABASE_URL is set (the
+     * dead_letters table lives in Postgres, migration 007) — without it,
+     * exhausted messages are still logged and dropped, the pre-DLQ behaviour.
+     */
+    dlq: {
+      pollIntervalMs: Number(env.DLQ_POLL_INTERVAL_MS ?? 10_000),
+      maxRetryAttempts: Number(env.DLQ_MAX_RETRY_ATTEMPTS ?? 5),
+      baseBackoffMs: Number(env.DLQ_BASE_BACKOFF_MS ?? 30_000),
+      /** pending+exhausted depth that trips the alert; 0 disables the check. */
+      alertThreshold: Number(env.DLQ_ALERT_THRESHOLD ?? 50),
+    },
 
     /**
      * Caller authentication. Unset means open, which is correct for a free

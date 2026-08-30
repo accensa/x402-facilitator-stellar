@@ -47,6 +47,7 @@ import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
 import { signerMetrics } from './metrics.js';
 import { buildSettlementStore } from './store/index.js';
+import { registerDlqRoutes } from './dlq/routes.js';
 
 /** 256kb body cap, carried over unchanged from the Express transport. */
 const BODY_LIMIT_BYTES = 256 * 1024;
@@ -115,6 +116,9 @@ export async function createApp(
     webhooks = null,
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+    // DLQ operator API (#DLQ): { store: DeadLetterStore, publish, retryOptions }.
+    // Absent (no DATABASE_URL) means the routes are simply not registered.
+    dlq = null,
   } = extras;
 
   // Observability collaborators. Both are injectable so tests can capture the
@@ -390,7 +394,7 @@ export async function createApp(
     };
   }
 
-  function preflight(policy) {
+  function preflight(policy, methods) {
     return async (req, reply) => {
       cors(policy)(req, reply);
       // Answer the preflight even when the origin is not granted: the 204
@@ -398,7 +402,7 @@ export async function createApp(
       // which is the enforcement point, not the preflight status.
       reply.header(
         'Access-Control-Allow-Methods',
-        policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS',
+        methods ?? (policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS'),
       );
       reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
       reply.header('Access-Control-Max-Age', '600');
@@ -1393,6 +1397,22 @@ export async function createApp(
       return reply.code(500).send({ error: 'internal_error', reason: 'internal_error' });
     }
   });
+
+  /**
+   * DLQ operator API (view/replay/discard poisoned webhook messages).
+   * Registered only when a DeadLetterStore is available (DATABASE_URL set).
+   */
+  if (dlq) {
+    registerDlqRoutes(app, {
+      dlq: dlq.store,
+      publish: dlq.publish,
+      requireApiKeyStrict,
+      cors,
+      preflight,
+      audit,
+      retryOptions: dlq.retryOptions,
+    });
+  }
 
   /**
    * Preflight routes (#76).

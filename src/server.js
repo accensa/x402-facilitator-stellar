@@ -28,6 +28,8 @@ import { buildSettlementStore } from './store/index.js';
 import { startReconciliationLoop } from './store/reconciliation.js';
 import { startOutboxWorker } from './outbox/index.js';
 import { createVaultManagedDatabase } from './vault/index.js';
+import { DeadLetterStore } from './dlq/store.js';
+import { startDlqWorker } from './dlq/worker.js';
 
 // A .env file is a development convenience, not a deployment mechanism — in
 // production the environment comes from the orchestrator, so a stray .env left
@@ -140,15 +142,6 @@ const distributedLock = config.redisNodes.length
   ? createDistributedLock({ nodes: config.redisNodes })
   : null;
 
-// Webhook delivery off the critical path (#117).
-const webhooks = await createWebhookDispatcher({
-  brokers: config.kafka.brokers,
-  clientId: config.kafka.clientId,
-  topic: config.kafka.topic,
-  groupId: config.kafka.groupId,
-  url: config.webhookUrl,
-});
-
 // Multi-region failover health (#126).
 const failoverHealth = config.region
   ? new FailoverHealthChecker({
@@ -160,6 +153,36 @@ const failoverHealth = config.region
   : null;
 const settlementStore = buildSettlementStore(config, { pool: vaultDatabase?.pool });
 const reconciliation = startReconciliationLoop(settlementStore, config);
+
+// Dead-letter queue (#DLQ): built ahead of the webhook dispatcher and the
+// outbox worker so both can be handed the same store — a message dead-letters
+// from whichever path exhausts its delivery budget first, and the operator
+// API (registered in createApp below) reads them all from one place. Only
+// built when there is somewhere durable to put it (Postgres). Uses the
+// Vault-managed pool when one exists; otherwise opens its own, the same
+// lazy-per-store pattern PostgresIdempotencyStore and the catalog store use
+// (rather than reaching into settlementStore's pool, which is itself built
+// asynchronously and is not guaranteed to exist yet at this point).
+const dlqPool = config.databaseUrl
+  ? (vaultDatabase?.pool ??
+    (await import('pg').then(({ default: pg }) => {
+      const p = new pg.Pool({ connectionString: config.databaseUrl, max: 5 });
+      p.on('error', err => console.warn(`[DLQ] pool error: ${err.message}`));
+      return p;
+    })))
+  : null;
+const dlqStore = dlqPool ? new DeadLetterStore(dlqPool, { warn: msg => console.warn(msg) }) : null;
+
+// Webhook delivery off the critical path (#117).
+const webhooks = await createWebhookDispatcher({
+  brokers: config.kafka.brokers,
+  clientId: config.kafka.clientId,
+  topic: config.kafka.topic,
+  groupId: config.kafka.groupId,
+  dlqTopic: config.kafka.dlqTopic,
+  dlq: dlqStore,
+  url: config.webhookUrl,
+});
 
 // Transactional outbox (#123): the settle path writes the notification in the
 // same transaction as the 'settled' state change (see app.js); this worker
@@ -174,10 +197,31 @@ const outboxWorker =
         outbox,
         publish: record => webhooks.publish(record),
         intervalMs: config.outboxPollIntervalMs,
+        dlq: dlqStore,
         log: msg => console.warn(msg),
       })
     : null;
 outboxWorker?.start();
+
+// DLQ retry worker (#DLQ): a second, slower backoff against the same
+// receiver for messages that exhausted their original delivery budget (see
+// src/dlq/worker.js). Also owns the depth-alert check and the
+// x402_dlq_depth gauge. Runs only when there is a DLQ store and something to
+// redeliver through.
+const dlqWorker =
+  dlqStore && typeof webhooks.publish === 'function'
+    ? startDlqWorker({
+        dlq: dlqStore,
+        publish: record => webhooks.publish(record),
+        intervalMs: config.dlq.pollIntervalMs,
+        maxDlqAttempts: config.dlq.maxRetryAttempts,
+        baseBackoffMs: config.dlq.baseBackoffMs,
+        alertThreshold: config.dlq.alertThreshold,
+        onDepth: ({ status, value }) => metrics.setDlqDepth({ status, value }),
+        log: msg => console.warn(msg),
+      })
+    : null;
+dlqWorker?.start();
 
 const app = await createApp(config, facilitator, rateLimiter, catalog, idempotency, {
   breakerStates: rpc?.getBreakerStates,
@@ -192,6 +236,13 @@ const app = await createApp(config, facilitator, rateLimiter, catalog, idempoten
 
   failoverHealth,
   settlementStore,
+  dlq: dlqStore
+    ? {
+        store: dlqStore,
+        publish: record => webhooks.publish(record),
+        retryOptions: { maxDlqAttempts: config.dlq.maxRetryAttempts, baseBackoffMs: config.dlq.baseBackoffMs },
+      }
+    : null,
 });
 
 // Set by the METRICS_PORT branch below; closed on shutdown when present.
@@ -234,6 +285,7 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
       webhooks.kind === 'kafka'
         ? `kafka webhooks (${config.kafka.brokers.length} broker(s))`
         : 'direct webhooks',
+      dlqStore ? 'dlq enabled' : 'dlq disabled (no DATABASE_URL)',
       config.region ? `region: ${config.region}` : null,
     ]
       .filter(Boolean)
@@ -293,6 +345,12 @@ async function shutdown(signal) {
     try {
       reconciliation?.stop();
       await outboxWorker?.stop();
+      await dlqWorker?.stop();
+      // Only end the DLQ pool if it is not the Vault-managed one — that pool
+      // is closed by vaultDatabase.stop() below, and ending it twice throws.
+      if (dlqPool && dlqPool !== vaultDatabase?.pool) {
+        await dlqPool.end().catch(() => {});
+      }
       await vaultDatabase?.stop();
       await app.close();
       await new Promise(resolve =>
