@@ -120,11 +120,14 @@ const catalog = new MemoryCatalogStore(config);
 // (verify-only) listings so they do not accumulate forever (#140).
 const catalogPruneTimer =
   config.catalogVerifyTtlMs > 0
-    ? globalThis.setInterval(() => {
-        catalog
-          .pruneExpired()
-          .catch(err => console.warn(`[Catalog] prune sweep failed: ${err.message}`));
-      }, Math.min(config.catalogVerifyTtlMs, 60_000))
+    ? globalThis.setInterval(
+        () => {
+          catalog
+            .pruneExpired()
+            .catch(err => console.warn(`[Catalog] prune sweep failed: ${err.message}`));
+        },
+        Math.min(config.catalogVerifyTtlMs, 60_000),
+      )
     : null;
 const idempotency = buildIdempotencyStore(config, { pool: vaultDatabase?.pool });
 
