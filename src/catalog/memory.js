@@ -138,25 +138,38 @@ export class MemoryCatalogStore {
     }
 
     // Re-embed asynchronously without blocking the upsert (or the payment path)
-    if (this.embeddingClient.url) {
-      const p = Promise.resolve().then(async () => {
-        try {
-          const text = this.embeddingClient.composeDocument(entry);
-          const vector = await this.embeddingClient.embed(text);
-          if (vector) {
-            entry.embedding = vector;
-          }
-        } catch (err) {
-          console.warn(`[Catalog] Failed to re-embed ${key}: ${err.message}`);
-        } finally {
-          this._pendingEmbeddings.delete(p);
-        }
-      });
-      this._pendingEmbeddings.add(p);
-    }
+    this._scheduleEmbed(entry);
 
     return entry;
   }
+
+  /**
+   * Re-embeds a resource in the background when an embedding provider is wired
+   * up, never blocking the upsert or the payment path. `_afterEmbedding` is a
+   * hook that durable stores override to persist the freshly-computed vector
+   * (#139) — the base implementation stores nothing.
+   */
+  _scheduleEmbed(entry) {
+    if (!this.embeddingClient.url) return;
+    const p = Promise.resolve().then(async () => {
+      try {
+        const text = this.embeddingClient.composeDocument(entry);
+        const vector = await this.embeddingClient.embed(text);
+        if (vector) {
+          entry.embedding = vector;
+          await this._afterEmbedding(entry);
+        }
+      } catch (err) {
+        console.warn(`[Catalog] Failed to re-embed ${this._key(entry)}: ${err.message}`);
+      } finally {
+        this._pendingEmbeddings.delete(p);
+      }
+    });
+    this._pendingEmbeddings.add(p);
+  }
+
+  /** Hook for durable stores to persist a freshly-computed embedding vector. */
+  async _afterEmbedding() {}
 
   /**
    * Await all in-flight background embedding requests.

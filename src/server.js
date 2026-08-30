@@ -20,7 +20,7 @@ import { RedisRateLimiter } from './redis-rate-limit.js';
 import { CrdtRateLimitStore } from './crdt-rate-limit-store.js';
 import { createDistributedLock } from './distributed-lock.js';
 import { buildIdempotencyStore } from './idempotency.js';
-import { MemoryCatalogStore } from './catalog/memory.js';
+import { buildCatalogStore } from './catalog/postgres.js';
 import { createWebhookDispatcher } from './webhooks/dispatcher.js';
 import { FailoverHealthChecker } from './failover-health.js';
 import { createApp } from './app.js';
@@ -115,7 +115,10 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
   });
   rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
 }
-const catalog = new MemoryCatalogStore(config);
+const catalog = buildCatalogStore(config, {
+  log: msg => console.warn(`  ${msg}`),
+  pool: vaultDatabase?.pool,
+});
 // Off the hot path: a periodic sweep physically removes expired provisional
 // (verify-only) listings so they do not accumulate forever (#140).
 const catalogPruneTimer =
