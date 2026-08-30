@@ -591,3 +591,79 @@ describe('automatic cataloging', () => {
     }
   });
 });
+
+describe('RateLimit-Remaining reflects the post-count state (issue #141)', () => {
+  test('/verify decrements to zero and refuses exactly the request after the budget runs out', async () => {
+    const { RateLimiter } = await import('../src/rate-limit.js');
+    const rateLimiter = new RateLimiter({
+      global: { verifyRpm: 3, settleRpm: 100, settleRph: 100, settleRpd: 100, feeSpd: 1000000 },
+      keys: {},
+    });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['custom_key:secret'] }),
+      rateLimiter,
+      facilitator: stubFacilitator(),
+    });
+    try {
+      const headers = { authorization: 'Bearer secret' };
+      const remaining = [];
+      for (let i = 0; i < 4; i += 1) {
+        const res = await app.post('/verify', VALID_BODY, headers);
+        remaining.push({
+          status: res.status,
+          remaining: Number(res.headers.get('ratelimit-remaining')),
+        });
+      }
+      // 3 allowances: the current request is counted before headers are emitted,
+      // so remaining drops 2 -> 1 -> 0, then the fourth is refused as a 429.
+      assert.deepEqual(remaining, [
+        { status: 200, remaining: 2 },
+        { status: 200, remaining: 1 },
+        { status: 200, remaining: 0 },
+        { status: 429, remaining: 0 },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('/settle decrements to zero and refuses exactly the request after the budget runs out', async () => {
+    const { RateLimiter } = await import('../src/rate-limit.js');
+    const rateLimiter = new RateLimiter({
+      global: { verifyRpm: 100, settleRpm: 3, settleRph: 100, settleRpd: 100, feeSpd: 1000000 },
+      keys: {},
+    });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['custom_key:secret'] }),
+      rateLimiter,
+      facilitator: stubFacilitator({
+        settle: async () => ({ success: true, transaction: 'tx', network: 'stellar:testnet' }),
+      }),
+    });
+    try {
+      const headers = { authorization: 'Bearer secret' };
+      const remaining = [];
+      for (let i = 0; i < 4; i += 1) {
+        // Distinct bodies so each call is a genuine settlement, not an
+        // idempotent replay (a replay would not consume budget).
+        const body = {
+          ...VALID_BODY,
+          paymentPayload: { ...VALID_BODY.paymentPayload, payload: { tx: `tx-${i}` } },
+        };
+        const res = await app.post('/settle', body, headers);
+        remaining.push({
+          status: res.status,
+          remaining: Number(res.headers.get('ratelimit-remaining')),
+        });
+      }
+      assert.deepEqual(remaining, [
+        { status: 200, remaining: 2 },
+        { status: 200, remaining: 1 },
+        { status: 200, remaining: 0 },
+        { status: 429, remaining: 0 },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+});

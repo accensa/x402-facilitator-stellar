@@ -593,6 +593,16 @@ export async function createApp(
   }
 
   /**
+   * Prefer the limiter state returned by a record call (which reflects the
+   * current request already being counted) for the RateLimit-* headers, falling
+   * back to the pre-record check if a limiter library does not return state.
+   */
+  function applyRateLimitHead(reply, recorded, check) {
+    if (recorded && Number.isFinite(recorded.remaining)) return handleRateLimit(reply, recorded);
+    return handleRateLimit(reply, check);
+  }
+
+  /**
    * Both /verify and /settle take {paymentPayload, paymentRequirements}.
    * Returning a non-null reason on a malformed body matters as much as on a
    * failed verification — a null reason anywhere is an acceptance failure.
@@ -757,8 +767,8 @@ export async function createApp(
         req.span.scheme = body.paymentRequirements.scheme;
       }
       try {
-        await rateLimiter.recordVerify(req);
-        handleRateLimit(reply, check);
+        const recorded = await rateLimiter.recordVerify(req);
+        applyRateLimitHead(reply, recorded, check);
         const timeoutMs = config.requestTimeoutMs ?? 30_000;
         let timeoutTimer;
         const timeoutPromise = new Promise((_, reject) => {
@@ -966,7 +976,7 @@ export async function createApp(
               : 0;
             // The metrics/audit record the fee actually paid by this settlement.
             const actualFee = result.success ? result.transactionFeeStroops || 0 : 0;
-            await rateLimiter.recordSettle(req, sponsoredFee);
+            const recorded = await rateLimiter.recordSettle(req, sponsoredFee);
             if (req.span) {
               req.span.settleOutcome = result.success ? 'settled' : 'failed';
               req.span.outcome = result.success ? 'ok' : 'rejected';
@@ -976,7 +986,7 @@ export async function createApp(
               req.span.txHash = result.transaction || null;
               req.span.feeStroops = actualFee;
             }
-            handleRateLimit(reply, check);
+            applyRateLimitHead(reply, recorded, check);
             if (result.success) {
               // Settlement notification (#123): the event is written to the
               // outbox in the SAME database transaction as the 'settled' state
