@@ -486,7 +486,21 @@ export async function createApp(
         Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
       );
     } catch (err) {
+      // Cataloging must never fail a payment, so the exception is logged but
+      // never re-thrown. It must also never leave the caller without their
+      // cataloging outcome: EXTENSION-RESPONSES is the only channel a seller
+      // has to learn what the Bazaar did, so a malformed discovery extension
+      // that throws here still surfaces an explicit `not attempted` rather
+      // than silently omitting the header entirely.
       console.error('[Catalog] Unhandled error during processCataloging:', err);
+      try {
+        reply.header(
+          'EXTENSION-RESPONSES',
+          Buffer.from(JSON.stringify({ bazaar: { status: 'not attempted' } })).toString('base64'),
+        );
+      } catch (headerErr) {
+        console.error('[Catalog] Failed to write EXTENSION-RESPONSES fallback:', headerErr);
+      }
     }
   }
 
@@ -1414,7 +1428,14 @@ export async function createApp(
 
     // Fastify's content-parser errors, mapped onto the reason codes the
     // Express transport used to emit for entity.parse.failed / entity.too.large.
-    if (err?.code === 'FST_ERR_CTP_INVALID_JSON') {
+    // Fastify 5 names the malformed-JSON error `FST_ERR_CTP_INVALID_JSON_BODY`
+    // (the pre-v5 `FST_ERR_CTP_INVALID_JSON` is matched too for back-compat so
+    // a future downgrade cannot silently regress the wire code to
+    // `internal_error`).
+    if (
+      err?.code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+      err?.code === 'FST_ERR_CTP_INVALID_JSON'
+    ) {
       status = 400;
       code = 'malformed_json';
     } else if (err?.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
