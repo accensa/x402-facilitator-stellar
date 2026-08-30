@@ -382,6 +382,12 @@ export function resolveConfig(env = process.env) {
     embeddingsUrl: env.EMBEDDINGS_URL || null,
     embeddingsTimeoutMs: Number(env.EMBEDDINGS_TIMEOUT_MS ?? 3000),
     catalogMaxResourcesPerPayTo: Number(env.CATALOG_MAX_RESOURCES_PER_PAYTO ?? 50),
+    /**
+     * How long a verify-only (provisional) catalog listing lives before it is
+     * hidden and pruned if no settlement promotes it (#140). A verify moves no
+     * money, so a listing it creates must not live forever.
+     */
+    catalogVerifyTtlMs: Number(env.CATALOG_VERIFY_TTL_MS ?? 24 * 60 * 60 * 1000),
     enableReranking: env.ENABLE_RERANKING === 'true',
     shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),
     requestTimeoutMs: Number(env.REQUEST_TIMEOUT_MS ?? 30_000),

@@ -412,8 +412,13 @@ export async function createApp(
    * Cataloging must never delay or fail a payment: the expensive work is
    * enqueued and the payment response returns immediately. A cataloging failure
    * is logged, never surfaced as a payment failure.
+   *
+   * The `source` records how the resource entered the catalog (#140): a verify
+   * ("verify") proves nothing was paid, so the store catalogs it as provisional
+   * and expiring; a real settlement ("settle") promotes it to permanent public
+   * state. A hand-entered resource is "manual".
    */
-  async function processCataloging(req, body, reply, source = 'payment') {
+  async function processCataloging(req, body, reply, source = 'verify') {
     try {
       const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
       const outcome = {};
@@ -785,7 +790,9 @@ export async function createApp(
           network: body.paymentRequirements.network,
         });
         if (result.isValid) {
-          await processCataloging(req, body, reply, 'payment');
+          // A verify moves no money, so the listing it creates is provisional
+          // and expires unless a settlement promotes it (#140).
+          await processCataloging(req, body, reply, 'verify');
         }
         return reply.send(result);
       } catch (err) {
@@ -1003,7 +1010,7 @@ export async function createApp(
                 event,
               );
 
-              await processCataloging(req, body, reply, 'payment');
+              await processCataloging(req, body, reply, 'settle');
 
               if (
                 !enqueued.atomicallyEnqueued &&

@@ -116,6 +116,16 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
   rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
 }
 const catalog = new MemoryCatalogStore(config);
+// Off the hot path: a periodic sweep physically removes expired provisional
+// (verify-only) listings so they do not accumulate forever (#140).
+const catalogPruneTimer =
+  config.catalogVerifyTtlMs > 0
+    ? globalThis.setInterval(() => {
+        catalog
+          .pruneExpired()
+          .catch(err => console.warn(`[Catalog] prune sweep failed: ${err.message}`));
+      }, Math.min(config.catalogVerifyTtlMs, 60_000))
+    : null;
 const idempotency = buildIdempotencyStore(config, { pool: vaultDatabase?.pool });
 
 // Cross-process serialization for state transitions (#116). Absent config
@@ -287,6 +297,8 @@ async function shutdown(signal) {
       await crdtStore?.close().catch(() => {});
 
       failoverHealth?.stop();
+
+      if (catalogPruneTimer) globalThis.clearInterval(catalogPruneTimer);
 
       await rateLimiter?.close?.().catch(() => {});
       horizon.restore();

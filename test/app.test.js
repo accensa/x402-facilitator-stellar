@@ -18,6 +18,7 @@ import {
   stubCatalog,
   VALID_BODY,
 } from './helpers/app.js';
+import { MemoryCatalogStore } from '../src/catalog/memory.js';
 
 describe('GET /healthz', () => {
   let app;
@@ -586,6 +587,144 @@ describe('automatic cataloging', () => {
       await app.post('/verify', VALID_BODY);
       await settle();
       assert.deepEqual(catalog.stored, []);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('catalog provenance and provisional lifecycle (issue #140)', () => {
+  // A body that actually produces a catalog entry: VALID_BODY has no discovery
+  // extension, so validateForCatalog hard-drops it. This one does.
+  const CATALOGABLE_BODY = {
+    paymentPayload: {
+      x402Version: 2,
+      scheme: 'exact',
+      network: 'stellar:testnet',
+      resource: { url: 'http://api.ex/140', serviceName: 'provenance-demo', description: 'demo' },
+      extensions: {
+        bazaar: {
+          info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+          schema: { type: 'object' },
+          routeTemplate: '/140',
+        },
+      },
+    },
+    paymentRequirements: {
+      scheme: 'exact',
+      network: 'stellar:testnet',
+      asset: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+      maxAmountRequired: '1000',
+      payTo: 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6',
+    },
+  };
+
+  test('a verify without settle catalogues a provisional, expiring listing', async () => {
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 600_000 });
+    const app = await serve({
+      catalog,
+      facilitator: stubFacilitator({
+        verify: async () => ({ isValid: true }),
+      }),
+    });
+    try {
+      const res = await app.post('/verify', CATALOGABLE_BODY);
+      assert.equal(res.status, 200);
+      await new Promise(r => setTimeout(r, 50));
+
+      const discovery = await app.get('/discovery/resources');
+      const body = await discovery.json();
+      assert.equal(body.items.length, 1);
+      const entry = body.items[0];
+      assert.equal(entry.source, 'verify');
+      assert.equal(entry.provisional, true);
+      assert.ok(entry.expires_at, 'provisional listing must carry an expiry');
+
+      const stored = await catalog.getResource(entry.url);
+      assert.equal(stored.source, 'verify');
+      assert.equal(stored.provisional, true);
+      assert.ok(stored.expires_at > Date.now());
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a settle promotes a provisional listing to permanent public state', async () => {
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 600_000 });
+    const app = await serve({
+      catalog,
+      facilitator: stubFacilitator({
+        verify: async () => ({ isValid: true }),
+        settle: async () => ({ success: true, transaction: 'tx', network: 'stellar:testnet' }),
+      }),
+    });
+    try {
+      const headers = { authorization: 'Bearer secret' };
+      // First a verify-only pass leaves a provisional listing.
+      await app.post('/verify', CATALOGABLE_BODY, headers);
+      await new Promise(r => setTimeout(r, 50));
+      const before = (await (await app.get('/discovery/resources')).json()).items[0];
+      assert.equal(before.source, 'verify');
+
+      // Then an actual settlement promotes it.
+      await app.post('/settle', CATALOGABLE_BODY, headers);
+      await new Promise(r => setTimeout(r, 50));
+      const after = (await (await app.get('/discovery/resources')).json()).items[0];
+      assert.equal(after.source, 'settle');
+      assert.equal(after.provisional, false);
+      assert.equal(after.expires_at, null);
+
+      const stored = await catalog.getResource(after.url);
+      assert.equal(stored.source, 'settle');
+      assert.equal(stored.provisional, false);
+      assert.equal(stored.expires_at, null);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a settle on its own catalogues a permanent listing', async () => {
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 600_000 });
+    const app = await serve({
+      catalog,
+      facilitator: stubFacilitator({
+        settle: async () => ({ success: true, transaction: 'tx', network: 'stellar:testnet' }),
+      }),
+    });
+    try {
+      await app.post('/settle', CATALOGABLE_BODY, { authorization: 'Bearer secret' });
+      await new Promise(r => setTimeout(r, 50));
+      const entry = (await (await app.get('/discovery/resources')).json()).items[0];
+      assert.equal(entry.source, 'settle');
+      assert.equal(entry.provisional, false);
+      assert.equal(entry.expires_at, null);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('an unsettled verify-only listing disappears from discovery once it expires', async () => {
+    // Short TTL so the test does not wait out a real window.
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 150 });
+    const app = await serve({
+      catalog,
+      facilitator: stubFacilitator({
+        verify: async () => ({ isValid: true }),
+      }),
+    });
+    try {
+      const headers = { authorization: 'Bearer secret' };
+      await app.post('/verify', CATALOGABLE_BODY, headers);
+      // Give the enqueued (off-hot-path) catalog write time to land while the
+      // 150ms window still puts the listing in the public view.
+      await new Promise(r => setTimeout(r, 60));
+      assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 1);
+
+      await new Promise(r => setTimeout(r, 180));
+      assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 0);
+
+      const pruned = await catalog.pruneExpired();
+      assert.equal(pruned, 1);
     } finally {
       await app.close();
     }
