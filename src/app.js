@@ -1432,10 +1432,7 @@ export async function createApp(
     // (the pre-v5 `FST_ERR_CTP_INVALID_JSON` is matched too for back-compat so
     // a future downgrade cannot silently regress the wire code to
     // `internal_error`).
-    if (
-      err?.code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
-      err?.code === 'FST_ERR_CTP_INVALID_JSON'
-    ) {
+    if (err?.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || err?.code === 'FST_ERR_CTP_INVALID_JSON') {
       status = 400;
       code = 'malformed_json';
     } else if (err?.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {

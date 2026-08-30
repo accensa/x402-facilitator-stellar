@@ -28,13 +28,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  serve,
-  stubRateLimiter,
-  stubCatalog,
-  testConfig,
-  VALID_BODY,
-} from './helpers/app.js';
+import { serve, stubRateLimiter, stubCatalog, testConfig, VALID_BODY } from './helpers/app.js';
 import { RateLimiter } from '../src/rate-limit.js';
 
 /** base64-decode the EXTENSION-RESPONSES envelope into a plain object. */
@@ -55,13 +49,11 @@ function discoveryBody(extension) {
       x402Version: 2,
       resource: { url: 'http://example.com' },
       extensions: {
-        bazaar:
-          extension ??
-          {
-            info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
-            schema: { type: 'object' },
-            routeTemplate: '/a',
-          },
+        bazaar: extension ?? {
+          info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+          schema: { type: 'object' },
+          routeTemplate: '/a',
+        },
       },
     },
     paymentRequirements: {
@@ -190,7 +182,13 @@ describe('HTTP surface audit: route inventory (every registered route)', () => {
   test('every payment route preflight answers 204 with CORS allow headers', async () => {
     const app = await serve();
     try {
-      for (const path of ['/verify', '/settle', '/discovery/resources', '/supported', '/discovery/search']) {
+      for (const path of [
+        '/verify',
+        '/settle',
+        '/discovery/resources',
+        '/supported',
+        '/discovery/search',
+      ]) {
         const res = await app.request(path, { method: 'OPTIONS', ...KEEP_ALIVE });
         assert.equal(res.status, 204, `${path} preflight must be 204`);
         const allow = res.headers.get('access-control-allow-headers') ?? '';
@@ -239,11 +237,7 @@ describe('HTTP surface audit: /verify', () => {
   test('an oversized body is 413 with the payload_too_large reason', async () => {
     const app = await serve();
     try {
-      const res = await app.post(
-        '/verify',
-        JSON.stringify({ pad: 'x'.repeat(300 * 1024) }),
-        AUTH,
-      );
+      const res = await app.post('/verify', JSON.stringify({ pad: 'x'.repeat(300 * 1024) }), AUTH);
       assert.equal(res.status, 413);
       const body = await res.json();
       assert.equal(body.invalidReason, 'payload_too_large');
@@ -435,7 +429,11 @@ describe('HTTP surface audit: EXTENSION-RESPONSES for all four cataloging outcom
     try {
       const res = await app.post(
         '/verify',
-        discoveryBody({ info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' }, schema: { type: 'object' }, routeTemplate: 'http://evil' }),
+        discoveryBody({
+          info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+          schema: { type: 'object' },
+          routeTemplate: 'http://evil',
+        }),
         AUTH,
       );
       await new Promise(r => setTimeout(r, 20));
@@ -452,7 +450,13 @@ describe('HTTP surface audit: EXTENSION-RESPONSES for all four cataloging outcom
     try {
       const res = await app.post(
         '/verify',
-        { ...discoveryBody(), paymentPayload: { ...discoveryBody().paymentPayload, resource: { ...discoveryBody().paymentPayload.resource, iconUrl: 'not-a-valid-url' } } },
+        {
+          ...discoveryBody(),
+          paymentPayload: {
+            ...discoveryBody().paymentPayload,
+            resource: { ...discoveryBody().paymentPayload.resource, iconUrl: 'not-a-valid-url' },
+          },
+        },
         AUTH,
       );
       await new Promise(r => setTimeout(r, 20));
