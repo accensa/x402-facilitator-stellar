@@ -53,14 +53,27 @@ export function validateDiscoveryDeclaration(decl) {
 
   // Check for parameter descriptions if parameters exist in template
   if (decl.routeTemplate) {
-    const matches = decl.routeTemplate.match(/\{([^}]+)\}/g);
-    if (matches) {
-      const params = matches.map(m => m.slice(1, -1));
-      params.forEach(p => {
-        if (!decl.parameters || !decl.parameters[p]) {
-          errors.push(`Missing description for parameter: ${p}`);
-        }
-      });
+    const matches = decl.routeTemplate.match(/\{([^}]+)\}/g) || [];
+    const seen = new Set();
+    for (const raw of matches) {
+      const name = raw.slice(1, -1).trim();
+      if (!name) {
+        errors.push('routeTemplate contains an empty parameter placeholder');
+        continue;
+      }
+      // Parameter names: start with letter/underscore, then word chars (no dots/spaces)
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        errors.push(`Invalid routeTemplate parameter name: ${name}`);
+        continue;
+      }
+      if (seen.has(name)) {
+        continue; // report missing description once
+      }
+      seen.add(name);
+      const desc = Object.hasOwn(decl.parameters ?? {}, name) ? decl.parameters[name] : undefined;
+      if (typeof desc !== 'string' || desc.trim() === '') {
+        errors.push(`Missing description for parameter: ${name}`);
+      }
     }
   }
 
