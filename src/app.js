@@ -112,6 +112,9 @@ export async function createApp(
   extras = {},
 ) {
   const {
+    distributedLock = null,
+    webhooks = null,
+    failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
     // DLQ operator API (#DLQ): { store: DeadLetterStore, publish, retryOptions }.
     // Absent (no DATABASE_URL) means the routes are simply not registered.

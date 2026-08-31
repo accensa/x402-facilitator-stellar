@@ -109,33 +109,62 @@ test('rate limiter sweeps expired buckets', async () => {
 
 test('stubRateLimiter matches the real limiter surface and return shapes', async () => {
   const real = new RateLimiter({
-    global: { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 500, catalogRpm: 10 },
+    global: {
+      verifyRpm: 10,
+      settleRpm: 10,
+      settleRph: 10,
+      settleRpd: 10,
+      feeSpd: 500,
+      catalogRpm: 10,
+      catalogReadRpm: 10,
+    },
     keys: {},
   });
   const stub = stubRateLimiter();
-  const methods = ['checkVerify', 'checkSettle', 'checkCatalog', 'recordVerify', 'recordSettle', 'recordCatalog', 'getUsage'];
 
-  assert.deepEqual(
-    Object.keys(stub).filter(key => typeof stub[key] === 'function').sort(),
-    methods.slice().sort(),
-  );
-  for (const method of methods) {
-    assert.equal(typeof real[method], 'function');
+  // Derived from the stub, never hardcoded: a literal list here goes stale the
+  // moment the stub grows a method, and a stale contract test is exactly the
+  // blind spot #189 is about. (checkCatalogRead/recordCatalogRead were added
+  // after this test was first written, and a hardcoded list missed them.)
+  const stubMethods = Object.keys(stub)
+    .filter(key => typeof stub[key] === 'function')
+    .sort();
+  assert.ok(stubMethods.length > 0, 'the stub should fake at least one method');
+
+  for (const method of stubMethods) {
+    assert.equal(
+      typeof real[method],
+      'function',
+      `stubRateLimiter fakes ${method}(), but the real RateLimiter has no such method`,
+    );
   }
 
+  // Every check* the stub fakes must return the same shape as the real one,
+  // or a test that passes against the stub proves nothing about production.
   const req = { ip: '127.0.0.1' };
-  for (const method of ['checkVerify', 'checkSettle', 'checkCatalog']) {
-    const result = await real[method](req);
+  for (const method of stubMethods.filter(m => m.startsWith('check'))) {
+    const realResult = await real[method](req);
     const stubResult = await stub[method](req);
     for (const key of ['allowed', 'limit', 'remaining', 'resetAt']) {
-      assert.equal(typeof stubResult[key], typeof result[key]);
+      assert.equal(
+        typeof stubResult[key],
+        typeof realResult[key],
+        `${method}(): stub returns ${typeof stubResult[key]} for ${key}, real returns ${typeof realResult[key]}`,
+      );
     }
   }
 });
 
 test('real RateLimiter serves all payment and discovery routes', async () => {
   const rateLimiter = new RateLimiter({
-    global: { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 500000, catalogRpm: 10 },
+    global: {
+      verifyRpm: 10,
+      settleRpm: 10,
+      settleRph: 10,
+      settleRpd: 10,
+      feeSpd: 500000,
+      catalogRpm: 10,
+    },
     keys: {},
   });
   const app = await serve({
