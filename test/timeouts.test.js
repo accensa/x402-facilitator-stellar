@@ -24,7 +24,7 @@ describe('Request Timeouts (#8)', () => {
       recordSettle: async () => {},
     };
 
-    const app = createApp(baseConfig, slowFacilitator, rateLimiter, {});
+    const app = await createApp(baseConfig, slowFacilitator, rateLimiter, {});
     try {
       const res = await app.inject({
         method: 'POST',
@@ -57,7 +57,7 @@ describe('Request Timeouts (#8)', () => {
       recordSettle: async () => {},
     };
 
-    const app = createApp(baseConfig, slowFacilitator, rateLimiter, {});
+    const app = await createApp(baseConfig, slowFacilitator, rateLimiter, {});
     try {
       const res = await app.inject({
         method: 'POST',
@@ -95,7 +95,7 @@ describe('Request Timeouts (#8)', () => {
       recordSettle: async () => {},
     };
 
-    const app = createApp(baseConfig, slowFacilitatorAfterSubmit, rateLimiter, {});
+    const app = await createApp(baseConfig, slowFacilitatorAfterSubmit, rateLimiter, {});
     try {
       const res = await app.inject({
         method: 'POST',

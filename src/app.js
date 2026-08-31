@@ -35,6 +35,7 @@
  */
 import crypto from 'node:crypto';
 import Fastify from 'fastify';
+import compress from '@fastify/compress';
 import { validateForCatalog } from './catalog/validation.js';
 import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
@@ -46,6 +47,7 @@ import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
 import { signerMetrics } from './metrics.js';
 import { buildSettlementStore } from './store/index.js';
+import { registerDlqRoutes } from './dlq/routes.js';
 
 /** 256kb body cap, carried over unchanged from the Express transport. */
 const BODY_LIMIT_BYTES = 256 * 1024;
@@ -99,14 +101,24 @@ const PAYMENT_BODY_SCHEMA = {
  *   - readiness: readiness checker override
  *   - breakerStates: breaker-state reader for the readiness probe (#105)
  *   - failoverHealth (#126): region-aware failover health checker
- * @returns {import('fastify').FastifyInstance}
+ * @returns {Promise<import('fastify').FastifyInstance>}
  */
-export function createApp(config, facilitator, rateLimiter, catalog, idempotency, extras = {}) {
+export async function createApp(
+  config,
+  facilitator,
+  rateLimiter,
+  catalog,
+  idempotency,
+  extras = {},
+) {
   const {
     distributedLock = null,
     webhooks = null,
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+    // DLQ operator API (#DLQ): { store: DeadLetterStore, publish, retryOptions }.
+    // Absent (no DATABASE_URL) means the routes are simply not registered.
+    dlq = null,
   } = extras;
 
   // Observability collaborators. Both are injectable so tests can capture the
@@ -155,8 +167,35 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
   });
 
   /**
-   * In-flight request tracking for graceful shutdown (#248) combined with
-   * request correlation + structured logging (#7).
+   * Compression (#69), registered with the plugin default 1kb threshold rather
+   * than a custom one, after measuring the actual payloads (see the PR):
+   *
+   *   - GET /discovery/resources (full 100-entry page): 71,587 B -> 2,801 B
+   *   - GET /discovery/search (ranked results):          71,605 B -> 2,813 B
+   *
+   * Those are the only responses over a few hundred bytes — the settlement hot
+   * path (/verify, /settle, /supported, /usage) stays well under 1kb and is
+   * deliberately left uncompressed so we don't burn CPU on the hot path to save
+   * nothing. gzip wins ~96% on the discovery reads because they are large JSON
+   * with heavily repeated keys, which is exactly the case gzip is good at.
+   *
+   * The plugin emits `Vary: Accept-Encoding` on compressed responses, so a
+   * shared cache in front of the service cannot serve a gzipped body to a
+   * client that did not ask for one; a request without `Accept-Encoding` gets
+   * the same valid uncompressed body as before. Brotli is out of scope by
+   * choice — gzip is what the stock x402 clients understand.
+   */
+  // Must be awaited: Fastify applies a registered plugin's hooks to routes
+  // registered after it only once its register promise resolves (fastify-plugin
+  // or not), so registering the routes below without this await would silently
+  // ship an uncompressed surface.
+  await app.register(compress);
+
+  /**
+   * Request logging (#78/#86 lineage): one redacted line per request. The
+   * middleware from logger.js speaks the Node req/res pair; Fastify exposes
+   * exactly that as request.raw / reply.raw, so the same redaction choke point
+   * serves both frameworks unchanged.
    */
   let activeRequestCount = 0;
   app.decorate('getInFlightCount', () => activeRequestCount);
@@ -355,7 +394,7 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
     };
   }
 
-  function preflight(policy) {
+  function preflight(policy, methods) {
     return async (req, reply) => {
       cors(policy)(req, reply);
       // Answer the preflight even when the origin is not granted: the 204
@@ -363,7 +402,7 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
       // which is the enforcement point, not the preflight status.
       reply.header(
         'Access-Control-Allow-Methods',
-        policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS',
+        methods ?? (policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS'),
       );
       reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
       reply.header('Access-Control-Max-Age', '600');
@@ -377,8 +416,13 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
    * Cataloging must never delay or fail a payment: the expensive work is
    * enqueued and the payment response returns immediately. A cataloging failure
    * is logged, never surfaced as a payment failure.
+   *
+   * The `source` records how the resource entered the catalog (#140): a verify
+   * ("verify") proves nothing was paid, so the store catalogs it as provisional
+   * and expiring; a real settlement ("settle") promotes it to permanent public
+   * state. A hand-entered resource is "manual".
    */
-  async function processCataloging(req, body, reply, source = 'payment') {
+  async function processCataloging(req, body, reply, source = 'verify') {
     try {
       const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
       const outcome = {};
@@ -451,7 +495,21 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
       );
     } catch (err) {
+      // Cataloging must never fail a payment, so the exception is logged but
+      // never re-thrown. It must also never leave the caller without their
+      // cataloging outcome: EXTENSION-RESPONSES is the only channel a seller
+      // has to learn what the Bazaar did, so a malformed discovery extension
+      // that throws here still surfaces an explicit `not attempted` rather
+      // than silently omitting the header entirely.
       console.error('[Catalog] Unhandled error during processCataloging:', err);
+      try {
+        reply.header(
+          'EXTENSION-RESPONSES',
+          Buffer.from(JSON.stringify({ bazaar: { status: 'not attempted' } })).toString('base64'),
+        );
+      } catch (headerErr) {
+        console.error('[Catalog] Failed to write EXTENSION-RESPONSES fallback:', headerErr);
+      }
     }
   }
 
@@ -555,6 +613,16 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
       }
     }
     return null;
+  }
+
+  /**
+   * Prefer the limiter state returned by a record call (which reflects the
+   * current request already being counted) for the RateLimit-* headers, falling
+   * back to the pre-record check if a limiter library does not return state.
+   */
+  function applyRateLimitHead(reply, recorded, check) {
+    if (recorded && Number.isFinite(recorded.remaining)) return handleRateLimit(reply, recorded);
+    return handleRateLimit(reply, check);
   }
 
   /**
@@ -722,8 +790,8 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         req.span.scheme = body.paymentRequirements.scheme;
       }
       try {
-        await rateLimiter.recordVerify(req);
-        handleRateLimit(reply, check);
+        const recorded = await rateLimiter.recordVerify(req);
+        applyRateLimitHead(reply, recorded, check);
         const timeoutMs = config.requestTimeoutMs ?? 30_000;
         let timeoutTimer;
         const timeoutPromise = new Promise((_, reject) => {
@@ -734,10 +802,16 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           }, timeoutMs);
         });
 
-        const verifyPromise = facilitator.verify(body.paymentPayload, body.paymentRequirements);
-        const result = await Promise.race([verifyPromise, timeoutPromise]).finally(() => {
-          clearTimeout(timeoutTimer);
-        });
+        metrics.incActiveVerifications();
+        let result;
+        try {
+          const verifyPromise = facilitator.verify(body.paymentPayload, body.paymentRequirements);
+          result = await Promise.race([verifyPromise, timeoutPromise]).finally(() => {
+            clearTimeout(timeoutTimer);
+          });
+        } finally {
+          metrics.decActiveVerifications();
+        }
 
         if (req.span) {
           req.span.outcome = result.isValid ? 'ok' : 'rejected';
@@ -750,7 +824,9 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
           network: body.paymentRequirements.network,
         });
         if (result.isValid) {
-          await processCataloging(req, body, reply, 'payment');
+          // A verify moves no money, so the listing it creates is provisional
+          // and expires unless a settlement promotes it (#140).
+          await processCataloging(req, body, reply, 'verify');
         }
         return reply.send(result);
       } catch (err) {
@@ -959,7 +1035,7 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
               : 0;
             // The metrics/audit record the fee actually paid by this settlement.
             const actualFee = result.success ? result.transactionFeeStroops || 0 : 0;
-            await rateLimiter.recordSettle(req, sponsoredFee);
+            const recorded = await rateLimiter.recordSettle(req, sponsoredFee);
             if (req.span) {
               req.span.settleOutcome = result.success ? 'settled' : 'failed';
               req.span.outcome = result.success ? 'ok' : 'rejected';
@@ -969,7 +1045,7 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
               req.span.txHash = result.transaction || null;
               req.span.feeStroops = actualFee;
             }
-            handleRateLimit(reply, check);
+            applyRateLimitHead(reply, recorded, check);
             if (result.success) {
               // Settlement notification (#123): the event is written to the
               // outbox in the SAME database transaction as the 'settled' state
@@ -996,7 +1072,7 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
                 event,
               );
 
-              await processCataloging(req, body, reply, 'payment');
+              await processCataloging(req, body, reply, 'settle');
 
               if (
                 !enqueued.atomicallyEnqueued &&
@@ -1231,7 +1307,8 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
         return reply.send({ ok: true, resource: entry, softDrops: validation.softDrops });
       } catch (err) {
         console.error(`[Catalog] manual upsert error: ${err.message}`);
-        return reply.code(400).send({ error: 'catalog_error', reason: 'catalog_error' });
+        const code = err && err.code ? err.code : 'catalog_error';
+        return reply.code(400).send({ error: 'catalog_error', reason: code });
       }
     },
   );
@@ -1356,6 +1433,22 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
   });
 
   /**
+   * DLQ operator API (view/replay/discard poisoned webhook messages).
+   * Registered only when a DeadLetterStore is available (DATABASE_URL set).
+   */
+  if (dlq) {
+    registerDlqRoutes(app, {
+      dlq: dlq.store,
+      publish: dlq.publish,
+      requireApiKeyStrict,
+      cors,
+      preflight,
+      audit,
+      retryOptions: dlq.retryOptions,
+    });
+  }
+
+  /**
    * Preflight routes (#76).
    *
    * Each CORS-enabled path gets an explicit OPTIONS handler. It sees the
@@ -1406,7 +1499,11 @@ export function createApp(config, facilitator, rateLimiter, catalog, idempotency
 
     // Fastify's content-parser errors, mapped onto the reason codes the
     // Express transport used to emit for entity.parse.failed / entity.too.large.
-    if (err?.code === 'FST_ERR_CTP_INVALID_JSON') {
+    // Fastify 5 names the malformed-JSON error `FST_ERR_CTP_INVALID_JSON_BODY`
+    // (the pre-v5 `FST_ERR_CTP_INVALID_JSON` is matched too for back-compat so
+    // a future downgrade cannot silently regress the wire code to
+    // `internal_error`).
+    if (err?.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || err?.code === 'FST_ERR_CTP_INVALID_JSON') {
       status = 400;
       code = 'malformed_json';
     } else if (err?.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {

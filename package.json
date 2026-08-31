@@ -56,6 +56,7 @@
     "check:migration": "node scripts/check-migration-compat.js"
   },
   "dependencies": {
+    "@fastify/compress": "^9.2.0",
     "@stellar/stellar-sdk": "^16.2.0",
     "@x402/core": "^2.23.0",
     "@x402/extensions": "^2.23.0",

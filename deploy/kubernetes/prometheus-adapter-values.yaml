@@ -1,0 +1,20 @@
+# Values for prometheus-community/prometheus-adapter.
+# Install with:
+# helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
+#   --namespace monitoring --create-namespace \
+#   -f deploy/kubernetes/prometheus-adapter-values.yaml
+
+prometheus:
+  url: http://prometheus-operated.monitoring.svc
+  port: 9090
+
+rules:
+  default: false
+  external:
+    - seriesQuery: 'active_verifications'
+      resources:
+        namespaced: false
+      name:
+        matches: '^active_verifications$'
+        as: 'active_verifications'
+      metricsQuery: 'sum(active_verifications)'

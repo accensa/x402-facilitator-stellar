@@ -21,8 +21,8 @@ import { createApp } from '../src/app.js';
 import { stubCatalog, stubFacilitator, stubRateLimiter, testConfig } from './helpers/app.js';
 
 /** Enumerates `METHOD /path` for every route the app registers. */
-function registeredRoutes() {
-  const app = createApp(
+async function registeredRoutes() {
+  const app = await createApp(
     testConfig({ apiKeys: ['key_0:secret'] }),
     stubFacilitator(),
     stubRateLimiter(),
@@ -93,8 +93,8 @@ function documentedRoutes() {
   return routes;
 }
 
-test('every route registered by src/app.js is documented in AUTHENTICATION.md', () => {
-  const app = registeredRoutes();
+test('every route registered by src/app.js is documented in AUTHENTICATION.md', async () => {
+  const app = await registeredRoutes();
   const doc = documentedRoutes();
 
   // The five OPTIONS preflights are documented as one row — `OPTIONS
@@ -115,8 +115,8 @@ test('every route registered by src/app.js is documented in AUTHENTICATION.md', 
   );
 });
 
-test('every route documented in AUTHENTICATION.md is registered by src/app.js', () => {
-  const app = registeredRoutes();
+test('every route documented in AUTHENTICATION.md is registered by src/app.js', async () => {
+  const app = await registeredRoutes();
   const doc = documentedRoutes();
 
   const phantom = [...doc].filter(route => !app.has(route));

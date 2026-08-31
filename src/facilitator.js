@@ -1,44 +1,38 @@
 /**
  * Wires @x402/stellar's ExactStellarScheme into an x402Facilitator.
- *
- * Deliberately thin. ExactStellarScheme already implements verify and settle —
- * including auth-entry structure and credential-type checks, expiration against
- * a max ledger, facilitator-safety (the facilitator must not be party to the
- * transfer), rejection of sub-invocations, payer-signature status, and
- * simulation-event validation that exactly one transfer event matches the
- * expected sender, recipient, amount and asset.
- *
- * None of that is reimplemented here. Reimplementing it is what the RFP tells
- * respondents not to do, and it is also the part most dangerous to get subtly
- * wrong.
+ * ExactStellarScheme owns protocol verification and settlement; this module only
+ * manages the signer generations supplied to it.
  */
 import { x402Facilitator } from '@x402/core/facilitator';
 import { ExactStellarScheme } from '@x402/stellar/exact/facilitator';
 import { createEd25519Signer } from '@x402/stellar';
 import { TESTNET, PUBNET } from './config.js';
 import { signerMetrics } from './metrics.js';
+import { KeyManager } from './key-manager.js';
 
-/**
- * Builds the facilitator.
- *
- * One scheme instance per network rather than one shared across both: the
- * signer pool, fee-bump signer, RPC endpoint and fee ceiling are all
- * network-specific.
- *
- * @param {object} config - resolved config from resolveConfig()
- * @returns {{ facilitator: x402Facilitator, signers: Record<string, string[]>, feeBumpSigners: Record<string, string|null> }}
- */
+async function loadRemoteKeys(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`key source returned HTTP ${response.status}`);
+  const body = await response.json();
+  return body.keys;
+}
+
 export function buildFacilitator(config) {
   const facilitator = new x402Facilitator();
   const signers = {};
   const feeBumpSigners = {};
+  const keyManagers = {};
+  const schemes = {};
 
   for (const network of config.networks) {
     const netConfig = config.perNetwork[network];
-
-    const secrets = netConfig.secrets ?? [netConfig.secret];
-    const poolSigners = secrets.map(secret => createEd25519Signer(secret, network));
-    signers[network] = poolSigners.map(s => s.address);
+    const keyManager = new KeyManager({
+      network,
+      secrets: netConfig.secrets ?? [netConfig.secret],
+      loadKeys: netConfig.keyManagerUrl ? () => loadRemoteKeys(netConfig.keyManagerUrl) : undefined,
+      pollIntervalMs: netConfig.keyManagerPollIntervalMs,
+    });
+    keyManagers[network] = keyManager;
 
     let feeBumpSigner = null;
     if (netConfig.feeBumpSecret) {
@@ -48,26 +42,43 @@ export function buildFacilitator(config) {
       feeBumpSigners[network] = null;
     }
 
-    let rrIndex = 0;
-    // Package default selection is round-robin; wrapped here to track metrics.
-    const selectSigner = signersList => {
-      const selected = signersList[rrIndex % signersList.length];
-      rrIndex = (rrIndex + 1) % signersList.length;
-      signerMetrics.recordSelection(network, selected.address);
-      return selected;
+    const createScheme = snapshot => {
+      let rrIndex = 0;
+      const signersForScheme = snapshot.entries.map(entry => entry.signer);
+      const selectSigner = addresses => {
+        const address = addresses[rrIndex % addresses.length];
+        rrIndex = (rrIndex + 1) % addresses.length;
+        signerMetrics.recordSelection(network, address);
+        return address;
+      };
+      const scheme = new ExactStellarScheme(signersForScheme, {
+        rpcConfig: netConfig.rpcUrl ? { url: netConfig.rpcUrl } : undefined,
+        maxTransactionFeeStroops: netConfig.maxTransactionFeeStroops,
+        feeBumpSigner,
+        selectSigner,
+      });
+      return { scheme };
     };
 
-    const scheme = new ExactStellarScheme(poolSigners, {
-      rpcConfig: netConfig.rpcUrl ? { url: netConfig.rpcUrl } : undefined,
-      maxTransactionFeeStroops: netConfig.maxTransactionFeeStroops,
-      feeBumpSigner,
-      selectSigner,
-    });
+    const initial = keyManager.snapshot();
+    schemes[network] = createScheme(initial);
+    signers[network] = [...keyManager.getCurrent().entries.values()].map(
+      entry => entry.signer.address,
+    );
 
-    facilitator.register(network, scheme);
+    keyManager.onRefresh = () => {
+      const next = createScheme(keyManager.snapshot());
+      schemes[network] = next;
+      signers[network] = [...keyManager.getCurrent().entries.values()].map(
+        entry => entry.signer.address,
+      );
+      facilitator.register(network, next.scheme);
+    };
+    keyManager.start();
+    facilitator.register(network, schemes[network].scheme);
   }
 
-  return { facilitator, signers, feeBumpSigners };
+  return { facilitator, signers, feeBumpSigners, keyManagers, schemes };
 }
 
 export { TESTNET, PUBNET };

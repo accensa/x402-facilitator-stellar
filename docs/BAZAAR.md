@@ -86,6 +86,8 @@ Why exponential rather than a step function: a step (e.g. "drop everything older
 
 When `EMBEDDINGS_URL` is set, a dense leg runs alongside the lexical one: the query and each resource are embedded, cosine similarity is computed, and the two ranked lists are fused with **Reciprocal Rank Fusion** (`k = 60`). When `ENABLE_RERANKING=true`, the fused top page is passed through a reranker. With no provider configured (the memory-backed default), the lexical leg alone decides order and `partialResults` is reported `true` — see above.
 
+**Embedding model changes:** embedding responses are validated (non-empty array of finite numbers). The dimension of the first accepted vector is recorded; a later vector with a different length is rejected with an explicit error log — it means the embedding model or provider changed and the index must be rebuilt (see the re-index procedure at the end of this file). An operator changing the model should re-index rather than letting stored vectors silently mismatch every query vector.
+
 #### Integrity caveat: the `+5` verified boost
 
 The boost is only meaningful if "verified" means something. Two properties of the current design weaken it, tracked separately:
@@ -122,7 +124,7 @@ The validation rules for resources submitted to the catalog are as follows:
 
 **Catalog limits:**
 - **Rate Limit:** Catalog operations are limited per payer IP to 10 requests per minute (`catalog_rpm` in config).
-- **Resource Cap:** A single `payTo` address can have a maximum of 50 resources in the catalog. New inserts beyond this limit are rejected.
+- **Resource Cap:** A single `payTo` address can have a maximum of 50 resources in the catalog (configurable via `CATALOG_MAX_RESOURCES_PER_PAYTO`). New inserts beyond this limit are rejected with the stable reason code `maximum_resources_per_payto_exceeded` — the same code on both the manual (`POST /discovery/resources`) and payment-cataloging paths.
 - **PayTo changes:** If a resource is already cataloged and a subsequent payment reports a different `payTo`, a warning is logged.
 
 ## The `EXTENSION-RESPONSES` Header
@@ -214,6 +216,7 @@ decodes to:
 | `catalog_success` | `landed` | The listing is live. | Nothing. |
 | `catalog_partial` | `partially landed` | The listing is live but fields were dropped; `reason` names them. | Fix the named fields (table below) and make a fresh payment — cataloging runs off the payment path and will upsert the corrected listing. |
 | `catalog_rate_limited` | `rejected` | Cataloging is metered per caller (default 10/min, `catalog_rpm` via `RATE_LIMIT_GLOBAL`). The payment itself still succeeded — only the cataloging was skipped. | Wait a minute, or raise `catalog_rpm` in the operator's config. |
+| `invalid_declaration` | `rejected` | The declaration was not an object at all — the cataloging path received a null, a string, or a primitive where a discovery declaration was expected. | Send a JSON object shaped like the Seller Guide's example; validate offline with `npx validate-discovery metadata.json` before paying again. |
 | `invalid_extension_schema` | `rejected` | The `bazaar` extension in the payment payload does not conform to the upstream spec. | Validate offline with `npx validate-discovery metadata.json` and fix the extension shape, then pay again. |
 | `invalid_routeTemplate` | `rejected` | The `routeTemplate` is hostile: path traversal (`..`), protocol smuggling (`://`), or unparseable percent-encoding. This is a security boundary, not a quality nit. | Use a plain path template such as `/api/resource/{id}` and pay again. |
 | `missing_or_invalid_discovery_extension` | `not attempted` | No Bazaar discovery extension could be found or extracted from the payment. | If you want to be listed, declare discovery metadata (see the [Seller Guide](SELLER.md)); otherwise nothing to fix. |

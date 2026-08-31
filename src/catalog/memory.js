@@ -10,6 +10,18 @@
 import { scoreResource } from './search.js';
 import { EmbeddingClient } from './embeddings.js';
 
+/** Stable reason code for the catalog-flooding guard (#186). */
+export const MAX_RESOURCES_PER_PAYTO_CODE = 'maximum_resources_per_payto_exceeded';
+
+/** Typed catalog error with a stable code, surfaced identically on every path. */
+export class CatalogError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'CatalogError';
+    this.code = code;
+  }
+}
+
 function cosineSimilarity(vecA, vecB) {
   if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
   let dotProduct = 0;
@@ -27,7 +39,15 @@ function cosineSimilarity(vecA, vecB) {
 export class MemoryCatalogStore {
   constructor(config = {}) {
     this.resources = new Map();
-    this.embeddingClient = new EmbeddingClient(config.embeddingsUrl);
+    // Per-payTo count kept in lockstep with `resources` so the cap check is
+    // O(1) instead of a full catalog scan on every insert (#186).
+    this.payToCounts = new Map();
+    this.maxResourcesPerPayTo =
+      config.maxResourcesPerPayTo ?? config.catalogMaxResourcesPerPayTo ?? 50;
+    this.verifyTtlMs = config.catalogVerifyTtlMs ?? 24 * 60 * 60 * 1000;
+    this.embeddingClient = new EmbeddingClient(config.embeddingsUrl, {
+      timeoutMs: config.embeddingsTimeoutMs,
+    });
     this.enableReranking = config.enableReranking;
     // Track in-flight background embedding promises so callers can await
     // all of them via flush() instead of relying on a hardcoded sleep.
@@ -38,18 +58,46 @@ export class MemoryCatalogStore {
     return resource.type === 'mcp' ? `${resource.url}::${resource.toolName}` : `${resource.url}::`;
   }
 
+  /**
+   * A verify-only listing (`source: 'verify'`) is provisional: it is visible for
+   * discoverability but lacks the proof of a real payment, so once its window
+   * elapses it must stop being public. Settled and manual listings are never
+   * provisional (#140).
+   */
+  _isExpired(entry) {
+    if (!entry?.provisional) return false;
+    if (entry.expires_at == null) return true;
+    return Date.now() >= new Date(entry.expires_at).getTime();
+  }
+
+  _isPublic(entry) {
+    return !this._isExpired(entry);
+  }
+
+  _incrementPayToCount(payTo) {
+    this.payToCounts.set(payTo, (this.payToCounts.get(payTo) ?? 0) + 1);
+  }
+
+  _decrementPayToCount(payTo) {
+    const next = (this.payToCounts.get(payTo) ?? 1) - 1;
+    if (next <= 0) this.payToCounts.delete(payTo);
+    else this.payToCounts.set(payTo, next);
+  }
+
   async upsertResource(resource, source = 'manual') {
     const key = this._key(resource);
     const existing = this.resources.get(key);
 
-    // Limit resources per payTo to prevent catalog flooding (max 50)
+    // Limit resources per payTo to prevent catalog flooding (#186).
+    // O(1) via the maintained per-payTo counter; the cap is configurable via
+    // CATALOG_MAX_RESOURCES_PER_PAYTO.
     if (!existing) {
-      let payToCount = 0;
-      for (const r of this.resources.values()) {
-        if (r.payTo === resource.payTo) payToCount++;
-      }
-      if (payToCount >= 50) {
-        throw new Error('maximum_resources_per_payto_exceeded');
+      const payToCount = this.payToCounts.get(resource.payTo) ?? 0;
+      if (payToCount >= this.maxResourcesPerPayTo) {
+        throw new CatalogError(
+          MAX_RESOURCES_PER_PAYTO_CODE,
+          `maximum resources per payTo (${this.maxResourcesPerPayTo}) exceeded`,
+        );
       }
     }
 
@@ -62,36 +110,66 @@ export class MemoryCatalogStore {
       );
     }
 
+    // Provenance and lifetime (#140). A verify proves nothing was paid, so a
+    // listing it creates is provisional and expires unless a settlement
+    // promotes it. A listing created by a settle (or by hand) is permanent
+    // public state. A settle/manual write always promotes — even one landing
+    // on an old provisional entry — and never demotes an already-settled one.
+    const existingSettled = existing != null && existing.source !== 'verify';
+    const provisional = source === 'verify' && !existingSettled;
+    const expiresAt = provisional ? now.getTime() + this.verifyTtlMs : null;
+    // Provenance records how a listing entered the catalog: a verify touching
+    // an already-settled listing must not mask its permanent origin.
+    const recordedSource = existingSettled ? existing.source : source;
+
     const entry = {
       ...existing,
       ...resource,
-      source,
+      source: recordedSource,
+      provisional,
+      expires_at: expiresAt,
       last_seen_at: now,
       first_seen_at: existing ? existing.first_seen_at : now,
     };
 
     this.resources.set(key, entry);
+    if (!existing) {
+      this._incrementPayToCount(resource.payTo);
+    }
 
     // Re-embed asynchronously without blocking the upsert (or the payment path)
-    if (this.embeddingClient.url) {
-      const p = Promise.resolve().then(async () => {
-        try {
-          const text = this.embeddingClient.composeDocument(entry);
-          const vector = await this.embeddingClient.embed(text);
-          if (vector) {
-            entry.embedding = vector;
-          }
-        } catch (err) {
-          console.warn(`[Catalog] Failed to re-embed ${key}: ${err.message}`);
-        } finally {
-          this._pendingEmbeddings.delete(p);
-        }
-      });
-      this._pendingEmbeddings.add(p);
-    }
+    this._scheduleEmbed(entry);
 
     return entry;
   }
+
+  /**
+   * Re-embeds a resource in the background when an embedding provider is wired
+   * up, never blocking the upsert or the payment path. `_afterEmbedding` is a
+   * hook that durable stores override to persist the freshly-computed vector
+   * (#139) — the base implementation stores nothing.
+   */
+  _scheduleEmbed(entry) {
+    if (!this.embeddingClient.url) return;
+    const p = Promise.resolve().then(async () => {
+      try {
+        const text = this.embeddingClient.composeDocument(entry);
+        const vector = await this.embeddingClient.embed(text);
+        if (vector) {
+          entry.embedding = vector;
+          await this._afterEmbedding(entry);
+        }
+      } catch (err) {
+        console.warn(`[Catalog] Failed to re-embed ${this._key(entry)}: ${err.message}`);
+      } finally {
+        this._pendingEmbeddings.delete(p);
+      }
+    });
+    this._pendingEmbeddings.add(p);
+  }
+
+  /** Hook for durable stores to persist a freshly-computed embedding vector. */
+  async _afterEmbedding() {}
 
   /**
    * Await all in-flight background embedding requests.
@@ -105,11 +183,12 @@ export class MemoryCatalogStore {
 
   async getResource(url, toolName = null) {
     const key = toolName ? `${url}::${toolName}` : `${url}::`;
-    return this.resources.get(key) || null;
+    const entry = this.resources.get(key) || null;
+    return entry && this._isPublic(entry) ? entry : null;
   }
 
   async listResources(params = {}) {
-    let items = Array.from(this.resources.values());
+    let items = Array.from(this.resources.values()).filter(item => this._isPublic(item));
 
     if (params.type) items = items.filter(r => r.type === params.type);
     if (params.payTo) items = items.filter(r => r.payTo === params.payTo);
@@ -143,8 +222,25 @@ export class MemoryCatalogStore {
     };
   }
 
+  /**
+   * Physically removes expired provisional (verify-only) listings so they do
+   * not accumulate forever (#140). Called lazily by a background sweep rather
+   * than on the payment hot path. Returns the number of entries pruned.
+   */
+  async pruneExpired() {
+    let pruned = 0;
+    for (const [key, entry] of this.resources) {
+      if (this._isExpired(entry)) {
+        this.resources.delete(key);
+        this._decrementPayToCount(entry.payTo);
+        pruned += 1;
+      }
+    }
+    return pruned;
+  }
+
   async search(params) {
-    let items = Array.from(this.resources.values());
+    let items = Array.from(this.resources.values()).filter(item => this._isPublic(item));
 
     if (params.type) items = items.filter(r => r.type === params.type);
     if (params.payTo) items = items.filter(r => r.payTo === params.payTo);

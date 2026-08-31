@@ -16,6 +16,15 @@
  * back to direct fire-and-forget delivery — still off the critical path, but
  * without durability across restarts. That keeps single-binary deployments
  * working while production runs get the queue.
+ *
+ * DEAD-LETTERING. Every path that gives up on a message after exhausting
+ * deliverWebhook's own retry budget — direct-mode enqueue, and the Kafka
+ * consumer's eachMessage — records the message with the injected
+ * DeadLetterStore (`dlq`) when one is configured, instead of the message
+ * simply vanishing after the last warn(). The Kafka producer side also gets a
+ * broker-level DLQ: when `dlqTopic` is set, a message the consumer could not
+ * deliver is additionally published there for any other consumer watching the
+ * dead-letter topic.
  */
 
 import crypto from 'node:crypto';
@@ -70,6 +79,23 @@ export async function deliverWebhook({
   return { delivered: false };
 }
 
+/** Records a message that exhausted its delivery budget, when a DLQ store is configured. */
+async function recordDeadLetter({ dlq, source, record, error, deliveryAttempts, warn }) {
+  if (!dlq) return;
+  try {
+    await dlq.insert({
+      messageId: record.id,
+      source,
+      type: record.type,
+      payload: record,
+      error,
+      deliveryAttempts,
+    });
+  } catch (err) {
+    warn(`webhooks: DLQ insert failed for message ${record.id}: ${err.message}`);
+  }
+}
+
 /**
  * Creates the webhook dispatcher used by the transport.
  *
@@ -83,6 +109,11 @@ export async function deliverWebhook({
  * @param {string} [options.clientId]
  * @param {string} [options.topic]
  * @param {string} [options.groupId]
+ * @param {string} [options.dlqTopic] - Kafka DLQ topic; a message the consumer
+ *   could not deliver is republished here in addition to the `dlq` store, when set
+ * @param {import('../dlq/store.js').DeadLetterStore} [options.dlq] - when given,
+ *   messages that exhaust their delivery budget are recorded here instead of
+ *   only logged and dropped
  * @param {Function} [options.createKafka] - kafkajs factory (injectable for tests)
  * @param {(msg: string) => void} [options.log]
  * @returns {Promise<{enqueue: Function, start: Function, stop: Function, kind: string}>}
@@ -92,6 +123,8 @@ export async function createWebhookDispatcher({
   clientId = DEFAULT_CLIENT_ID,
   topic = DEFAULT_TOPIC,
   groupId = DEFAULT_GROUP_ID,
+  dlqTopic = null,
+  dlq = null,
   /** Default receiver; events may override with their own url. */
   url = null,
   createKafka,
@@ -115,9 +148,26 @@ export async function createWebhookDispatcher({
       enqueue(event) {
         const record = buildRecord(event);
         if (!record.url) return;
-        Promise.resolve().then(() =>
-          deliverWebhook({ url: record.url, body: record, warn, fetchImpl }),
-        );
+        const maxAttempts = 5; // deliverWebhook's own default, named here for the DLQ record
+        Promise.resolve().then(async () => {
+          const res = await deliverWebhook({
+            url: record.url,
+            body: record,
+            warn,
+            fetchImpl,
+            maxAttempts,
+          });
+          if (!res.delivered) {
+            await recordDeadLetter({
+              dlq,
+              source: 'direct',
+              record,
+              error: `webhook delivery to ${record.url} failed after ${maxAttempts} attempts`,
+              deliveryAttempts: maxAttempts,
+              warn,
+            });
+          }
+        });
       },
       /**
        * Awaitable publish for the outbox worker (#123): direct delivery with
@@ -170,11 +220,27 @@ export async function createWebhookDispatcher({
             messages: [{ key: record.id, value: JSON.stringify(record) }],
           });
         })
-        .catch(err => {
+        .catch(async err => {
           // Last-resort fallback so a broker blip does not drop the event.
           warn(`webhooks: publish failed (${err.message}); delivering directly`);
-          if (record.url) {
-            deliverWebhook({ url: record.url, body: record, warn, fetchImpl }).catch(() => {});
+          if (!record.url) return;
+          const maxAttempts = 5;
+          const res = await deliverWebhook({
+            url: record.url,
+            body: record,
+            warn,
+            fetchImpl,
+            maxAttempts,
+          }).catch(() => ({ delivered: false }));
+          if (!res.delivered) {
+            await recordDeadLetter({
+              dlq,
+              source: 'direct',
+              record,
+              error: `broker publish failed (${err.message}) and direct fallback delivery also failed`,
+              deliveryAttempts: maxAttempts,
+              warn,
+            });
           }
         });
     },
@@ -209,7 +275,36 @@ export async function createWebhookDispatcher({
             return;
           }
           if (!record.url) return;
-          await deliverWebhook({ url: record.url, body: record, warn, fetchImpl });
+          const maxAttempts = 5;
+          const res = await deliverWebhook({
+            url: record.url,
+            body: record,
+            warn,
+            fetchImpl,
+            maxAttempts,
+          });
+          if (res.delivered) return;
+
+          // Broker-level DLQ (issue: "Configure DLQs in the message broker"):
+          // republish to the dead-letter topic for any other consumer watching
+          // it, in addition to the operator-facing Postgres record below.
+          if (dlqTopic) {
+            await producer
+              .send({
+                topic: dlqTopic,
+                messages: [{ key: record.id, value: JSON.stringify(record) }],
+              })
+              .catch(dlqErr => warn(`webhooks: DLQ topic publish failed: ${dlqErr.message}`));
+          }
+
+          await recordDeadLetter({
+            dlq,
+            source: 'kafka-consumer',
+            record,
+            error: `webhook delivery to ${record.url} failed after ${maxAttempts} attempts (last status ${res.status ?? 'transport error'})`,
+            deliveryAttempts: maxAttempts,
+            warn,
+          });
         },
       });
       running = true;

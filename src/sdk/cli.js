@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'fs';
-import { validateDiscoveryDeclaration } from './validation.js';
+import { validateDiscoveryPolicy } from './validation.js';
 
 const file = process.argv[2];
 if (!file) {
@@ -10,11 +10,19 @@ if (!file) {
 
 try {
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const errors = validateDiscoveryDeclaration(data);
-  if (errors.length > 0) {
+  const result = validateDiscoveryPolicy(data);
+
+  if (result.hardDrop) {
     console.error('Validation failed:');
-    errors.forEach(err => console.error(' - ' + err));
+    console.error(` - ${result.reason}`);
     process.exit(1);
+  }
+
+  for (const field of result.softDrops) {
+    console.warn(`Warning: ${field} will be dropped or sanitized by the catalog.`);
+  }
+  for (const advisory of result.advisories) {
+    console.warn(`Advisory: ${advisory}`);
   }
   console.log('Validation passed.');
 } catch (err) {

@@ -9,6 +9,60 @@ the upstream one cannot.
 This document records how that suite is invoked, what it requires, and what it
 found. It is the artifact; the CI job is the automation that keeps it honest.
 
+<!-- conformance-facilitator-sha: 8c7ccfc -->
+<!-- conformance-anchor-date: 2026-08-26 -->
+<!-- conformance-staleness-threshold: 50 -->
+
+> **Staleness anchor.** The two HTML comments above record the facilitator commit
+> this report was last reconciled against (`conformance-facilitator-sha`), the
+> date that reconciliation happened (`conformance-anchor-date`), and how many
+> commits main is allowed to advance past it before CI fails the report as stale
+> (`conformance-staleness-threshold`). They are parsed by
+> `scripts/check-conformance-staleness.mjs` — keep the key names exactly as
+> written. When you refresh this report, update the SHA to the current `main`
+> HEAD and the date; that resets the counter.
+
+---
+
+## 0. What was run, exactly
+
+A conformance claim without versions is not reproducible. Everything in this
+report was produced by the following inputs — pin them before trusting the
+conclusions:
+
+| Input | Value |
+|---|---|
+| Facilitator commit that produced the settled txs | `71743e1` |
+| Report last reconciled against | `8c7ccfc` (`main`) on 2026-08-26 |
+| Date of the run recorded below | 2026-08-14 |
+| Network / scheme | `stellar:testnet` / `exact` |
+| Canonical client | `x402-foundation/x402` TypeScript `http/fetch` client, upstream `main` (unpinned at run time; the CI job now pins and records the upstream SHA) |
+| `@x402/stellar` (verify / settle — not reimplemented here) | declared `^2.21.0` (see `package.json`) |
+| `@x402/core` | declared `^2.21.0` |
+| `@x402/extensions` (bazaar) | declared `^2.23.0` |
+| `@stellar/stellar-sdk` | declared `^16.2.0` |
+
+The declared semver ranges are the versions the run resolved against; the locked
+resolutions live in `package-lock.json` and are what CI installs via `npm ci`.
+
+---
+
+## 0b. Settled transaction hashes (per network, per scheme)
+
+Clickable `stellar.expert` links a reviewer can verify independently. These are
+the canonical acceptance artifact — a published, settled, on-chain transaction
+hash is the thing a reviewer checks instead of this prose.
+
+| Network | Scheme | Transaction | Ledger | Settled |
+|---|---|---|---|---|
+| `stellar:testnet` | `exact` | [`5f1bd15a…5558`](https://stellar.expert/explorer/testnet/tx/5f1bd15aec8ca3c6390689ed7fed82506f6c3d8eb8ed325a05a8b83974925558) | 4134781 | 2026-08-14T08:15:33Z |
+| `stellar:testnet` | `exact` | [`ff798145…0590`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590) | 4134928 | 2026-08-14T08:27:49Z |
+| `stellar:pubnet` | `exact` | — | — | blocked on #17, see §4 |
+
+`pubnet` has no settled hash because this service is not yet deployed there
+([#17](https://github.com/accensa/x402-facilitator-stellar/issues/17)). A stale
+report with a missing row is honest; a report that invented one would not be.
+
 ---
 
 ## 1. Where the suite lives, and what shape it is
@@ -359,6 +413,43 @@ only inputs are a network connection and Node 22+; the accounts fund themselves.
 If you get a different result, that is a bug report worth filing — the README
 says a conformance failure is the most useful contribution to this repo, and it
 means it.
+
+ docs/conformance
+### 6a. Verify the settled transactions yourself (two read-only commands)
+
+You do not need to run the suite to trust the headline claim. These two commands
+hit Stellar's public Horizon API and report what the chain says — no clone, no
+account, no secret:
+
+```bash
+# Run 1 — was it settled, and was it successful?
+curl -s https://horizon-testnet.stellar.org/transactions/5f1bd15aec8ca3c6390689ed7fed82506f6c3d8eb8ed325a05a8b83974925558 \
+  | jq '{successful, ledger, created_at}'
+
+# Run 2 — same question, independent hash
+curl -s https://horizon-testnet.stellar.org/transactions/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590 \
+  | jq '{successful, ledger, created_at}'
+```
+
+Both return `"successful": true`. For the same data through the explorer UI, open
+the `stellar.expert` links in §0b. Either path lets a third party confirm the
+transactions without asking us for anything.
+
+### 6b. Reproduce the full run
+
+```bash
+git clone --depth 1 https://github.com/x402-foundation/x402.git
+cd x402/e2e
+pnpm install:all
+mkdir -p facilitators/external-proxies/accensa
+cp /path/to/x402-facilitator-stellar/e2e/accensa-proxy/* facilitators/external-proxies/accensa/
+node /path/to/x402-facilitator-stellar/scripts/fund-testnet-accounts.mjs > .env
+echo "ACCENSA_FACILITATOR_DIR=/path/to/x402-facilitator-stellar" >> .env
+pnpm test --testnet --families=stellar --facilitators=accensa --min -v
+```
+
+The `conformance.yml` workflow runs this nightly and publishes the full output as
+an artifact, so the linked evidence in §4 is regenerated rather than asserted.
 
 ## 7. Post-grant maintenance commitment
 

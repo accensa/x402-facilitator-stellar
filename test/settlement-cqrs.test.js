@@ -304,7 +304,7 @@ describe('CQRS read replica settlement store (#121)', () => {
       updated_at: new Date(),
     });
 
-    const app = createApp(
+    const app = await createApp(
       config,
       { getSupported: () => ({}) },
       { checkSettle: async () => ({ allowed: true }) },

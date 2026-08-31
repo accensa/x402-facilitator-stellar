@@ -1,3 +1,22 @@
+/**
+ * Normalizes a `last_seen_at` value to epoch milliseconds, or null when the
+ * value is not a Date, a number, or a parseable ISO string. Called at the
+ * scorer boundary so a ranking helper can never throw on a stored value.
+ */
+function toEpochMillis(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
 export function scoreResource(resource, query) {
   if (!query || !query.trim()) return 0;
 
@@ -41,9 +60,12 @@ export function scoreResource(resource, query) {
     score += 5; // Payment-verified boost
   }
 
-  // Recency decay (half-life of ~30 days)
-  if (resource.last_seen_at) {
-    const daysOld = (Date.now() - resource.last_seen_at.getTime()) / (1000 * 60 * 60 * 24);
+  // Recency decay (half-life of ~30 days).
+  // Accepts Date, number (epoch ms), or ISO string; skips decay on anything
+  // else so a malformed stored value can never throw a 500.
+  const lastSeenMs = toEpochMillis(resource.last_seen_at);
+  if (lastSeenMs !== null) {
+    const daysOld = (Date.now() - lastSeenMs) / (1000 * 60 * 60 * 24);
     if (daysOld > 0) {
       score = score * Math.exp(-daysOld / 43); // e^(-x/43) is approx 0.5 at x=30
     }

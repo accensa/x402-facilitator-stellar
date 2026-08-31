@@ -77,6 +77,8 @@ export function resolveConfig(env = process.env) {
       feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
       maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS ?? 50_000),
+      keyManagerUrl: env.KEY_MANAGER_URL || null,
+      keyManagerPollIntervalMs: Number(env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0),
     },
   };
 
@@ -169,6 +171,10 @@ export function resolveConfig(env = process.env) {
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
       maxTransactionFeeStroops: Number(env.MAX_TX_FEE_STROOPS_PUBNET ?? 50_000),
+      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET || null,
+      keyManagerPollIntervalMs: Number(
+        env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
+      ),
     };
   }
 
@@ -366,10 +372,25 @@ export function resolveConfig(env = process.env) {
       clientId: env.KAFKA_CLIENT_ID ?? 'x402-facilitator-stellar',
       topic: env.KAFKA_WEBHOOK_TOPIC ?? 'x402-webhook-delivery',
       groupId: env.KAFKA_WEBHOOK_GROUP_ID ?? 'x402-webhook-dispatchers',
+      /** Broker-level DLQ topic (#DLQ). Unset means no broker-side DLQ topic. */
+      dlqTopic: env.KAFKA_WEBHOOK_DLQ_TOPIC || null,
     },
 
     /** Default webhook receiver (#117); events may carry their own url. */
     webhookUrl: env.WEBHOOK_URL || null,
+
+    /**
+     * Dead-letter queue (#DLQ). Only relevant when DATABASE_URL is set (the
+     * dead_letters table lives in Postgres, migration 007) — without it,
+     * exhausted messages are still logged and dropped, the pre-DLQ behaviour.
+     */
+    dlq: {
+      pollIntervalMs: Number(env.DLQ_POLL_INTERVAL_MS ?? 10_000),
+      maxRetryAttempts: Number(env.DLQ_MAX_RETRY_ATTEMPTS ?? 5),
+      baseBackoffMs: Number(env.DLQ_BASE_BACKOFF_MS ?? 30_000),
+      /** pending+exhausted depth that trips the alert; 0 disables the check. */
+      alertThreshold: Number(env.DLQ_ALERT_THRESHOLD ?? 50),
+    },
 
     /**
      * Caller authentication. Unset means open, which is correct for a free
@@ -380,6 +401,14 @@ export function resolveConfig(env = process.env) {
     apiKeys,
     rateLimits,
     embeddingsUrl: env.EMBEDDINGS_URL || null,
+    embeddingsTimeoutMs: Number(env.EMBEDDINGS_TIMEOUT_MS ?? 3000),
+    catalogMaxResourcesPerPayTo: Number(env.CATALOG_MAX_RESOURCES_PER_PAYTO ?? 50),
+    /**
+     * How long a verify-only (provisional) catalog listing lives before it is
+     * hidden and pruned if no settlement promotes it (#140). A verify moves no
+     * money, so a listing it creates must not live forever.
+     */
+    catalogVerifyTtlMs: Number(env.CATALOG_VERIFY_TTL_MS ?? 24 * 60 * 60 * 1000),
     enableReranking: env.ENABLE_RERANKING === 'true',
     shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),
     requestTimeoutMs: Number(env.REQUEST_TIMEOUT_MS ?? 30_000),
