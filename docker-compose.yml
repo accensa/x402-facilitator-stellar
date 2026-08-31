@@ -123,18 +123,21 @@ services:
   db-replica:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - PGPASSWORD=postgres
-    ports:
-      - '5433:5432'
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    # Not published to the host, for the same reason as the primary: the
+    # replica holds a byte-for-byte copy of the primary's data. Uncomment only
+    # for local debugging:
+    # ports:
+    #   - '127.0.0.1:5433:5432'
     command:
       - bash
       - -ec
       - |
         if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
           rm -rf /var/lib/postgresql/data
-          pg_basebackup -h db -U postgres -D /var/lib/postgresql/data -Fp -R -X stream
+          pg_basebackup -h db -U "$${POSTGRES_USER:-postgres}" -D /var/lib/postgresql/data -Fp -R -X stream
         fi
         exec docker-entrypoint.sh postgres
     volumes:
@@ -143,7 +146,7 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres}']
       interval: 5s
       timeout: 5s
       retries: 5

@@ -9,11 +9,15 @@ COPY src/ src/
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
 WORKDIR /app
 
-RUN addgroup -S facilitator && adduser -S facilitator -G facilitator
-USER facilitator
-
+# Install production deps as root before switching to non-root user (#177).
+# Running npm ci as root ensures the node_modules tree is fully writable during
+# install; the cache and symlinks created by npm are owned by root but readable
+# by the facilitator user, so no permission issues at runtime.
 COPY package*.json ./
 RUN npm ci --omit=dev
+
+RUN addgroup -S facilitator && adduser -S facilitator -G facilitator
+USER facilitator
 
 COPY --from=builder /app/src ./src
 
