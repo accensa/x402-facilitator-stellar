@@ -528,7 +528,7 @@ describe('app settle path with the outbox (#123)', () => {
   test('memory store falls back to the fire-and-forget enqueue', async () => {
     const store = new MemorySettlementStore();
     const enqueued = [];
-    const app = createApp(makeConfig(), facilitator(), rateLimiter(), {}, null, {
+    const app = await createApp(makeConfig(), facilitator(), rateLimiter(), {}, null, {
       settlementStore: store,
       webhooks: { enqueue: e => enqueued.push(e) },
     });
@@ -552,7 +552,7 @@ describe('app settle path with the outbox (#123)', () => {
     const pool = fakePool();
     const store = new PostgresSettlementStore('postgres://fake', { pool });
     const enqueued = [];
-    const app = createApp(makeConfig(), facilitator(), rateLimiter(), {}, null, {
+    const app = await createApp(makeConfig(), facilitator(), rateLimiter(), {}, null, {
       settlementStore: store,
       webhooks: { enqueue: e => enqueued.push(e) },
     });

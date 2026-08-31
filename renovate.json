@@ -1,0 +1,30 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group the @x402/* packages into one PR — they are released together and a piecemeal version set is incoherent (and would fail the conformance gate).",
+      "matchPackagePatterns": ["^@x402/"],
+      "groupName": "x402 monorepo",
+      "groupSlug": "x402",
+      "labels": ["dependencies", "x402-upstream"]
+    },
+    {
+      "description": "Keep the @stellar/* SDK bumps together so a Stellar change is reviewed as one unit.",
+      "matchPackagePatterns": ["^@stellar/"],
+      "groupName": "stellar sdk",
+      "groupSlug": "stellar",
+      "labels": ["dependencies", "stellar-sdk"]
+    },
+    {
+      "description": "express and undici are explicitly in scope for drift watching (transport layer).",
+      "matchPackagePatterns": ["^express$", "^undici$"],
+      "labels": ["dependencies", "transport-deps"]
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 9am on monday"]
+  }
+}

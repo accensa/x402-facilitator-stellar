@@ -105,7 +105,17 @@ checklist. The groups:
 | **Shared stores** | `REDIS_URL`, `REDIS_NODES`, `DATABASE_URL`, `KAFKA_BROKERS`, `KAFKA_CLIENT_ID`, `KAFKA_WEBHOOK_TOPIC`, `KAFKA_WEBHOOK_GROUP_ID`, `WEBHOOK_URL` |
 | **Resilience** | `BREAKER_TIMEOUT_MS`, `BREAKER_ERROR_THRESHOLD_PERCENTAGE`, `BREAKER_RESET_TIMEOUT_MS`, `RPC_BREAKER_THRESHOLD`, `RPC_BREAKER_COOLDOWN_MS`, `RPC_FORCE_IPV4`, `HORIZON_MAX_SOCKETS`, `HORIZON_KEEP_ALIVE_TIMEOUT_MS`, `HORIZON_KEEP_ALIVE_MAX_TIMEOUT_MS`, `HORIZON_HEADERS_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, `SHUTDOWN_GRACE_MS` |
 | **Readiness** | `READINESS_TIMEOUT_MS`, `READINESS_CACHE_TTL_MS`, `READINESS_FUNDING_FLOOR_STROOPS` |
-| **Audit / Bazaar** | `AUDIT_LOG_FILE`, `EMBEDDINGS_URL`, `ENABLE_RERANKING` |
+| **Audit / Bazaar** | `AUDIT_LOG_FILE`, `EMBEDDINGS_URL`, `EMBEDDINGS_TIMEOUT_MS`, `ENABLE_RERANKING`, `CATALOG_MAX_RESOURCES_PER_PAYTO` |
+
+**Embeddings timeout and fallback:** outbound embedding and rerank calls carry a
+timeout (`EMBEDDINGS_TIMEOUT_MS`, default `3000`). A timeout is treated like any
+other provider failure: the call returns `null` and search falls back to the
+lexical path (`partialResults: true`), but timeouts are counted separately from
+ordinary failures. After `3` consecutive failures the provider is skipped for a
+`30s` cooldown so a down provider costs one attempt, not one per request. A
+provider response that is not a non-empty array of finite numbers is rejected
+and logged; a vector whose dimension differs from the first accepted one is
+rejected with an explicit log line (the index needs rebuilding).
 
 **House rule:** a variable the code reads and `.env.example` does not document is a bug
 — if you find one, fix `.env.example` in the same PR that touches the code.

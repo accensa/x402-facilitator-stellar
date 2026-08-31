@@ -83,7 +83,7 @@ describe('Multi-Signer Pool & Fee-Bump Signer (#9)', () => {
       FACILITATOR_SECRETS: `${k1.secret()},${k2.secret()}`,
     });
     const { facilitator } = buildFacilitator(config);
-    const app = createApp(config, facilitator, {}, {});
+    const app = await createApp(config, facilitator, {}, {});
 
     try {
       const res = await app.inject({ method: 'GET', url: '/supported' });
@@ -150,7 +150,7 @@ describe('Multi-Signer Pool & Fee-Bump Signer (#9)', () => {
     signerMetrics.incrementInflight('stellar:testnet', k1.publicKey());
 
     const config = resolveConfig({ FACILITATOR_SECRET: k1.secret() });
-    const app = createApp(config, { getSupported: () => ({}) }, {}, {});
+    const app = await createApp(config, { getSupported: () => ({}) }, {}, {});
 
     try {
       const res = await app.inject({ method: 'GET', url: '/metrics' });

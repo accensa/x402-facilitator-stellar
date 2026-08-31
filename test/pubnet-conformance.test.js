@@ -108,7 +108,7 @@ describe('pubnet serving (#17): HTTP surface', () => {
       STELLAR_RPC_URL_PUBNET: 'https://mainnet.rpc.example.com',
     });
     const { facilitator } = buildFacilitator(config);
-    const app = createApp(config, facilitator, {}, {});
+    const app = await createApp(config, facilitator, {}, {});
 
     try {
       const res = await app.inject({ method: 'GET', url: '/supported' });

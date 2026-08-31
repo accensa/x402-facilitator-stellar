@@ -80,8 +80,13 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Bazaar discovery](docs/BAZAAR.md) · [MCP server](docs/MCP.md) ·
 [Conformance](docs/CONFORMANCE.md) · [Deployment](docs/DEPLOYMENT.md) ·
 [Operations](docs/OPERATIONS.md) · [Authentication](docs/AUTHENTICATION.md) ·
+ feat/upstream-drift-watch
+[Threat model](docs/THREAT-MODEL.md) · [Audit readiness](docs/AUDIT.md) ·
+[Privacy](docs/PRIVACY.md) · [Upstream tracking](docs/UPSTREAM.md) ·
+
 [Business model](docs/BUSINESS-MODEL.md) · [Threat model](docs/THREAT-MODEL.md) ·
 [Audit readiness](docs/AUDIT.md) · [Privacy](docs/PRIVACY.md) ·
+ main
 [Glossary](docs/GLOSSARY.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
@@ -117,15 +122,15 @@ it is documented (and scripted) rather than left to a deep stack trace. Two help
 in `scripts/` handle the testnet side, wired to npm:
 
 ```bash
-npm run fund:testnet        # scripts/fund-testnet-accounts.mjs
-npm run prepare:testnet-usdc  # scripts/prepare-testnet-usdc.mjs
+npm run testnet:fund        # scripts/fund-testnet-accounts.mjs
+npm run testnet:usdc  # scripts/prepare-testnet-usdc.mjs
 ```
 
-- `npm run fund:testnet` creates three fresh accounts (client, server/payee,
+- `npm run testnet:fund` creates three fresh accounts (client, server/payee,
   facilitator), funds them via Friendbot, **opens a USDC trustline on each**, and
   prints the credentials as env assignments (`--json` / `--github-env` for other
   formats).
-- `npm run prepare:testnet-usdc` puts existing payer/payee accounts into a
+- `npm run testnet:usdc` puts existing payer/payee accounts into a
   pay-ready state: USDC trustlines on both, and a small USDC balance on the payer
   drawn from `TESTNET_USDC_TREASURY_SECRET` (testnet-only; reports
   `usdc_ready=false` honestly when the treasury is absent).
@@ -156,6 +161,33 @@ FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
 ALICE_SECRET=$(stellar keys show alice) npm run e2e
 ```
 
+#### Testnet setup scripts
+
+The accounts that end-to-end run needs are a chore on day one, and the scripts
+for it exist: `npm run testnet:fund` generates and friendbot-funds the three
+testnet accounts the suite needs (client, server payee, facilitator) and prints
+them as env assignments, and `npm run testnet:usdc` gives the payer and payee
+USDC trustlines plus a funded balance from a treasury account
+(`TESTNET_USDC_TREASURY_SECRET`). Both are exactly what the conformance
+workflow does before each run — see docs/CONFORMANCE.md.
+
+### Operator tooling
+
+Everything in `scripts/`, and where it is documented:
+
+| Script | npm script | Purpose |
+|---|---|---|
+| `check-licenses.mjs` | `npm run licenses` | Fails on any non-permissive (AGPL) dependency in the tree. |
+| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`. |
+| `smoke-examples.mjs` | `npm run smoke:examples` | Starts both examples and asserts real behaviour (402 challenge; MCP `initialize`/`tools/list`); the CI examples gate. |
+| `e2e.mjs` | `npm run e2e` | End-to-end x402 payment against a running facilitator on testnet. |
+| `fund-testnet-accounts.mjs` | `npm run testnet:fund` | Generates and friendbot-funds the three testnet accounts the suite needs. |
+| `prepare-testnet-usdc.mjs` | `npm run testnet:usdc` | Gives the payer and payee USDC trustlines and a funded balance. |
+| `select-conformance-components.mjs` | (CI, `conformance.yml`) | Decides which upstream e2e components a run exercises; documented in docs/CONFORMANCE.md. |
+| `bench-http.mjs` | `npm run bench` | Local throughput benchmark of the HTTP surface with stubbed collaborators. |
+| `check-conformance-staleness.mjs` | (CI gate) | Fails if docs/CONFORMANCE.md is stale relative to main facilitator commit SHA. |
+| `data_retention_job.js` | — | **Not implemented.** Exits non-zero on purpose: it is scheduled to enforce the docs/PRIVACY.md retention periods once a datastore exists, and nothing is purged until then. Tracked in [Issue #50](https://github.com/accensa/x402-facilitator-stellar/issues/50). |
+
 ### Privacy and Data Minimisation
 
 The X402 Facilitator handles sensitive transaction and search query data. Our approach is to collect only what is necessary, and to aggressively purge it according to strict retention policies.
@@ -170,6 +202,33 @@ environment — see `.env.example` and [Operations](docs/OPERATIONS.md)
 for the log fields and the alert to set on each metric.
 
 ## Conformance
+
+ docs/conformance
+Acceptance is tested at the wire level with stock SDK code, not by reading a claim. The
+canonical, citable report — with versions, per-item evidence, settled transaction hashes,
+what fails and why, and commands to reproduce it yourself — is
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md). CI fails the build if that report goes stale
+relative to `main` ([`ci.yml`](.github/workflows/ci.yml)).
+
+Summary (full detail and evidence in the report):
+
+- ✅ **An unmodified canonical client completes a payment end-to-end** on `stellar:testnet`
+  / `exact`, fee sponsored by the facilitator. Two settled hashes published:
+  [`5f1bd15a…5558`](https://stellar.expert/explorer/testnet/tx/5f1bd15aec8ca3c6390689ed7fed82506f6c3d8eb8ed325a05a8b83974925558)
+  and
+  [`ff798145…0590`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590).
+- ✅ `/supported` emits `extra.areFeesSponsored`; every rejection carries a non-null reason;
+  `payload: {transaction}` accepted verbatim.
+- 🟡 Upstream e2e suite, testnet: **1 of 5 server components passes** (`next`; `express`,
+  `fastify`, `hono`, `mcp` fail, structural — tracked in
+  [#64](https://github.com/accensa/x402-facilitator-stellar/issues/64)).
+- ⬜ `stellar:pubnet` and the pubnet half of the upstream suite — blocked on
+  [#17](https://github.com/accensa/x402-facilitator-stellar/issues/17).
+- ❌ Bazaar listing rejected by a third-party client (`invalid_routeTemplate`,
+  [#65](https://github.com/accensa/x402-facilitator-stellar/issues/65)); `__check_auth`
+  smart-account payer untested ([#13](https://github.com/accensa/x402-facilitator-stellar/issues/13)).
+
+The README is the summary; the report is the artifact. Trust the links, not this paragraph.
 
 Acceptance is tested at the wire level with stock SDK code, not by reading a claim. What
 holds today on testnet:

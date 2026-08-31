@@ -7,11 +7,7 @@ services:
       - '${PORT:-3402}:3402'
     environment:
       - FACILITATOR_SECRET=${FACILITATOR_SECRET}
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/x402_facilitator
-      # CQRS read replica (#121): status reads and the reconciliation sweep hit
-      # db-replica, writes stay on db. Set point read traffic grows without
-      # touching the primary that carries settlement submissions.
-      - DATABASE_URL_REPLICA=postgres://postgres:postgres@db-replica:5432/x402_facilitator
+      - DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-x402_facilitator}
       - REDIS_URL=redis://redis:6379
       # Redlock quorum (#116): three independent masters.
       - REDIS_NODES=redis://redis-node-1:6379,redis://redis-node-2:6379,redis://redis-node-3:6379
@@ -102,14 +98,18 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-facilitator}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       - POSTGRES_DB=${POSTGRES_DB:-x402_facilitator}
-    # No host port binding — DB is only reachable from inside the compose network.
+    # Port is intentionally NOT published to the host — Postgres is only
+    # reachable from inside the compose network. Remove this comment and
+    # uncomment the block below only for local debugging:
+    # ports:
+    #   - '127.0.0.1:5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-facilitator}']
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres}']
       interval: 5s
       timeout: 5s
       retries: 5

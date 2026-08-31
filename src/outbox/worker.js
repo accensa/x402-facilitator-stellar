@@ -23,6 +23,9 @@
  * @param {number} [options.maxAttempts] - publish attempts before a row goes `failed`
  * @param {number} [options.batchSize]
  * @param {number} [options.leaseMs] - claim lease before a stuck row is re-claimed
+ * @param {import('../dlq/store.js').DeadLetterStore} [options.dlq] - when given, a
+ *   row that exhausts maxAttempts is also recorded as a dead letter (DLQ) so it
+ *   surfaces in the operator API instead of sitting unreachable as `failed`
  * @param {(msg: string) => void} [options.log]
  * @param {() => Date} [options.now] - injectable clock
  * @returns {Promise<{claimed: number, published: number, failed: number}>}
@@ -33,6 +36,7 @@ export async function pollOutboxOnce({
   maxAttempts = 10,
   batchSize = 50,
   leaseMs = 60_000,
+  dlq = null,
   log = () => {},
   now = () => new Date(),
 }) {
@@ -60,10 +64,25 @@ export async function pollOutboxOnce({
       published++;
     } catch (err) {
       failed++;
+      const exhausted = row.attempts + 1 >= maxAttempts;
       try {
         await outbox.markFailed(row.id, err.message, maxAttempts);
       } catch (markErr) {
         log(`[Outbox] markFailed for event ${row.event_id} failed: ${markErr.message}`);
+      }
+      if (exhausted && dlq) {
+        try {
+          await dlq.insert({
+            messageId: row.event_id,
+            source: 'outbox',
+            type: row.type,
+            payload: record,
+            error: err.message,
+            deliveryAttempts: row.attempts + 1,
+          });
+        } catch (dlqErr) {
+          log(`[DLQ] insert for event ${row.event_id} failed: ${dlqErr.message}`);
+        }
       }
       log(
         `[Outbox] publish failed for event ${row.event_id} (${maxAttempts - row.attempts} attempts left): ${err.message}`,

@@ -94,7 +94,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
     };
     const store = new MemorySettlementStore();
 
-    const app = createApp(config, mockFacilitator, mockRateLimiter, {}, null, {
+    const app = await createApp(config, mockFacilitator, mockRateLimiter, {}, null, {
       settlementStore: store,
     });
 
@@ -148,7 +148,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       key_id: 'callerA',
     });
 
-    const app = createApp(
+    const app = await createApp(
       config,
       { getSupported: () => ({}) },
       { checkSettle: async () => ({ allowed: true }) },
