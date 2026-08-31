@@ -3,24 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "description": "Conformance spike: a minimal x402 facilitator for Stellar built on @x402/stellar",
-  "keywords": [
-    "x402",
-    "stellar",
-    "soroban",
-    "facilitator",
-    "agentic-payments",
-    "payments",
-    "bazaar",
-    "mcp"
-  ],
-  "homepage": "https://accensa.github.io/accensa-app/docs/facilitator/overview",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/accensa/x402-facilitator-stellar.git"
-  },
-  "bugs": {
-    "url": "https://github.com/accensa/x402-facilitator-stellar/issues"
-  },
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
