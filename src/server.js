@@ -23,6 +23,7 @@ import { buildIdempotencyStore } from './idempotency.js';
 import { buildCatalogStore } from './catalog/postgres.js';
 import { createWebhookDispatcher } from './webhooks/dispatcher.js';
 import { FailoverHealthChecker } from './failover-health.js';
+import { initTracing } from './tracing.js';
 import { createApp } from './app.js';
 import { buildSettlementStore } from './store/index.js';
 import { startReconciliationLoop } from './store/reconciliation.js';
@@ -39,6 +40,11 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config({ quiet: true });
 }
 
+// OpenTelemetry tracing: must run BEFORE installHorizonClient /
+// installRpcRetry so the undici instrumentation patches the npm `undici` client they
+// dial through, and before the http server starts so inbound span + traceparent
+// extraction are live for every request. No-op (returns null) when TRACING_ENABLED=false.
+const otel = initTracing();
 // Must run BEFORE installRpcRetry: the retry wrapper composes on top of
 // whatever fetch is global when it installs. Innermost first — pooled sockets
 // and the per-origin breaker (#120) sit under connection-level retries and the
@@ -363,9 +369,13 @@ async function shutdown(signal) {
       }
       await vaultDatabase?.stop();
       await app.close();
+
+      await otel?.shutdown().catch(() => {});
+
       await new Promise(resolve =>
         metricsServerRef ? metricsServerRef.close(resolve) : resolve(),
       );
+
       await webhooks.stop().catch(() => {});
       await distributedLock?.quit()?.catch(() => {});
       await crdtStore?.close().catch(() => {});
