@@ -65,6 +65,18 @@ function parseOptionalSecret(env, key) {
   return raw;
 }
 
+/**
+ * Non-negative integer from an env var, falling back to `fallback` when unset,
+ * unparsable, or negative (#200). Garbage config must not poison a
+ * Cache-Control header — it falls back to the documented default instead.
+ */
+function nonNegativeInt(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+
 export function resolveConfig(env = process.env) {
   const testnetSecrets = parseSecrets(env, 'FACILITATOR_SECRETS', 'FACILITATOR_SECRET');
   const testnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET');
@@ -410,6 +422,23 @@ export function resolveConfig(env = process.env) {
      */
     catalogVerifyTtlMs: Number(env.CATALOG_VERIFY_TTL_MS ?? 24 * 60 * 60 * 1000),
     enableReranking: env.ENABLE_RERANKING === 'true',
+
+    /**
+     * Discovery caching (#200). Applied to GET /discovery/resources and
+     * GET /discovery/search: the Cache-Control max-age and the
+     * stale-while-revalidate window. Values belong in config, not hardcoded —
+     * an operator running a fast-moving catalog wants something different from
+     * one running a static demo. Defaults: 60s max-age, 300s
+     * stale-while-revalidate. max-age=0 disables client-side caching entirely
+     * (the ETag/304 revalidation still works — it just requires a round trip).
+     * Garbage or negative values fall back to the defaults rather than
+     * poisoning the Cache-Control header.
+     */
+    discoveryCache: {
+      maxAgeSeconds: nonNegativeInt(env.DISCOVERY_CACHE_MAX_AGE_SECONDS, 60),
+      staleWhileRevalidateSeconds: nonNegativeInt(env.DISCOVERY_CACHE_STALE_SECONDS, 300),
+    },
+
     shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),
     requestTimeoutMs: Number(env.REQUEST_TIMEOUT_MS ?? 30_000),
 

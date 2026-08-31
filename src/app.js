@@ -53,6 +53,36 @@ import { registerDlqRoutes } from './dlq/routes.js';
 const BODY_LIMIT_BYTES = 256 * 1024;
 
 /**
+ * Stable, dependency-free serialization of the params that shape a discovery
+ * response, so the ETag is stable across request encodings of the same filter.
+ * Keys are sorted, arrays are sorted, and undefined/null are dropped.
+ */
+function canonicalizeDiscoveryParams(params) {
+  const out = {};
+  for (const key of Object.keys(params || {}).sort()) {
+    const v = params[key];
+    if (v === undefined || v === null) continue;
+    out[key] = Array.isArray(v) ? v.slice().sort() : String(v);
+  }
+  return JSON.stringify(out);
+}
+
+/**
+ * Weak ETag for a discovery response (#200). Keyed on BOTH the monotonic
+ * catalog version (any write changes it, so it invalidates every cached
+ * variant at once) AND the full parameter set (different filters are different
+ * representations and must never share a validator).
+ */
+function discoveryETag(catalogVersion, params) {
+  const hash = crypto
+    .createHash('sha1')
+    .update(canonicalizeDiscoveryParams(params))
+    .digest('base64url')
+    .replace(/=+$/, '');
+  return `W/"${catalogVersion}-${hash}"`;
+}
+
+/**
  * AJV schema for both payment routes. Deliberately loose: it asserts only the
  * structure the transport itself branches on — the same contract as
  * request-validation.js, expressed declaratively. The transaction XDR,
@@ -1314,17 +1344,48 @@ export async function createApp(
   );
 
   /**
-   * GET /discovery/resources — public catalog read.
+   * Discovery caching (#200).
    *
-   * Public reads are intentional: a discovery catalog that agents cannot browse
-   * is not much of a catalog. The endpoint is unauthenticated but rate-limited
-   * to prevent abuse. Reads use a separate bucket from writes (catalogReadRpm)
-   * because they have very different cost profiles.
+   * GET /discovery/resources and /discovery/search are the read-heavy half of
+   * the service and the half most likely to be polled, yet they carried no
+   * cache headers — so every agent query re-ran the ranking/embedding path over
+   * data the client already held. Both routes now emit:
    *
-   * Pagination is clamped at the API boundary before passing to the catalog.
-   * The catalog may assume validated input; duplicated defensive clamping in
-   * the catalog implementation is acceptable if documented.
+   *   - Cache-Control: configurable `public, max-age=…, stale-while-revalidate=…`
+   *   - a weak ETag derived from BOTH the monotonic catalog version (any write
+   *     changes it) AND the full query-parameter set (different filters get
+   *     different validators, so a cache can never satisfy one filter with
+   *     another's body), and
+   *   - Last-Modified (from the catalog store's write timestamp) when available.
+   *
+   * If-None-Match is honoured with an empty 304 BEFORE the expensive work runs,
+   * so a polling client that already holds the data never re-embeds the query
+   * or re-scores the catalog.
    */
+  function applyDiscoveryCache(req, reply, catalog, params) {
+    const policy = config.discoveryCache ?? { maxAgeSeconds: 60, staleWhileRevalidateSeconds: 300 };
+    const cc = `public, max-age=${policy.maxAgeSeconds}, stale-while-revalidate=${policy.staleWhileRevalidateSeconds}`;
+    reply.header('cache-control', cc);
+
+    const version = typeof catalog.getVersion === 'function' ? catalog.getVersion() : 0;
+    const etag = discoveryETag(version, params);
+    reply.header('etag', etag);
+
+    if (typeof catalog.getLastModified === 'function') {
+      const lm = catalog.getLastModified();
+      if (lm) reply.header('last-modified', new Date(lm).toUTCString());
+    }
+
+    const inm = req.headers['if-none-match'];
+    const notModified = inm
+      ? inm
+          .split(',')
+          .map(s => s.trim())
+          .includes(etag)
+      : false;
+    return { etag, notModified };
+  }
+
   app.get('/discovery/resources', { onRequest: cors('public') }, async (req, reply) => {
     const check = await rateLimiter.checkCatalogRead(req);
     if (!check.allowed) return rejectRateLimited(req, reply, '/discovery/resources', check);
@@ -1354,6 +1415,12 @@ export async function createApp(
       limit: clampedLimit,
       offset: clampedOffset,
     };
+
+    // #200: validators are computed and matched BEFORE the expensive work, so
+    // a polling client that already holds this representation gets an empty
+    // 304 instead of a re-run of the listing path.
+    const cache = applyDiscoveryCache(req, reply, catalog, params);
+    if (cache.notModified) return reply.code(304).send();
 
     try {
       const result = await catalog.listResources(params);
@@ -1414,6 +1481,11 @@ export async function createApp(
       limit: clampedLimit,
       cursor: req.query.cursor,
     };
+
+    // #200: same contract as the listing route — validators before the
+    // expensive work (here: embedding the query and scoring the catalog).
+    const cache = applyDiscoveryCache(req, reply, catalog, params);
+    if (cache.notModified) return reply.code(304).send();
 
     try {
       const result = await catalog.search(params);

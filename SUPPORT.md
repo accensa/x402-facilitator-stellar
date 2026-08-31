@@ -22,6 +22,7 @@ Both channels are staffed by the maintainers. If you are working on a Drips Wave
 **Before you ask**, the following usually answer the question faster:
 
 - [`README.md`](README.md) — what the service does and how to run it
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — the repo's enforced conventions and the full local check sequence
 - [`docs/`](docs/) — transport, discovery and MCP documentation
 - [Facilitator documentation](https://accensa.github.io/accensa-app/docs/facilitator/overview)
 

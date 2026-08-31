@@ -114,6 +114,12 @@ curl localhost:3402/readyz
 
 `FACILITATOR_SECRET` is a signing key. `.env` is gitignored — never commit it.
 
+The two standalone CLIs — the agent-facing `x402-mcp` MCP server and the
+seller-facing `validate-discovery` tool — ship on npm as
+[`@accensa/x402-facilitator-stellar`](https://www.npmjs.com/package/@accensa/x402-facilitator-stellar)
+(`npm install -g @accensa/x402-facilitator-stellar` then `x402-mcp`; see
+[`docs/MCP.md`](docs/MCP.md)). The facilitator service itself runs from this
+checkout, as above.
 ### Testnet Setup
 
 Payments on Stellar need funded accounts, and USDC-priced payments additionally need
@@ -328,6 +334,10 @@ and `network`. The transport-layer HTTP rejections (such as 401 Unauthorized or 
 
 Issues and pull requests welcome. Given the status above, the most useful contribution is
 a conformance failure: point a canonical client at it and report what breaks.
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first — it covers the Node version to
+develop against, the full local check sequence, the dependency licence policy,
+and how to run conformance against a branch.
 
 ## Contributors
 
