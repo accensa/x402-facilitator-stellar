@@ -185,6 +185,7 @@ Everything in `scripts/`, and where it is documented:
 | `prepare-testnet-usdc.mjs` | `npm run testnet:usdc` | Gives the payer and payee USDC trustlines and a funded balance. |
 | `select-conformance-components.mjs` | (CI, `conformance.yml`) | Decides which upstream e2e components a run exercises; documented in docs/CONFORMANCE.md. |
 | `bench-http.mjs` | `npm run bench` | Local throughput benchmark of the HTTP surface with stubbed collaborators. |
+| `check-conformance-staleness.mjs` | (CI gate) | Fails if docs/CONFORMANCE.md is stale relative to main facilitator commit SHA. |
 | `data_retention_job.js` | — | **Not implemented.** Exits non-zero on purpose: it is scheduled to enforce the docs/PRIVACY.md retention periods once a datastore exists, and nothing is purged until then. Tracked in [Issue #50](https://github.com/accensa/x402-facilitator-stellar/issues/50). |
 
 ### Privacy and Data Minimisation
@@ -201,6 +202,33 @@ environment — see `.env.example` and [Operations](docs/OPERATIONS.md)
 for the log fields and the alert to set on each metric.
 
 ## Conformance
+
+ docs/conformance
+Acceptance is tested at the wire level with stock SDK code, not by reading a claim. The
+canonical, citable report — with versions, per-item evidence, settled transaction hashes,
+what fails and why, and commands to reproduce it yourself — is
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md). CI fails the build if that report goes stale
+relative to `main` ([`ci.yml`](.github/workflows/ci.yml)).
+
+Summary (full detail and evidence in the report):
+
+- ✅ **An unmodified canonical client completes a payment end-to-end** on `stellar:testnet`
+  / `exact`, fee sponsored by the facilitator. Two settled hashes published:
+  [`5f1bd15a…5558`](https://stellar.expert/explorer/testnet/tx/5f1bd15aec8ca3c6390689ed7fed82506f6c3d8eb8ed325a05a8b83974925558)
+  and
+  [`ff798145…0590`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590).
+- ✅ `/supported` emits `extra.areFeesSponsored`; every rejection carries a non-null reason;
+  `payload: {transaction}` accepted verbatim.
+- 🟡 Upstream e2e suite, testnet: **1 of 5 server components passes** (`next`; `express`,
+  `fastify`, `hono`, `mcp` fail, structural — tracked in
+  [#64](https://github.com/accensa/x402-facilitator-stellar/issues/64)).
+- ⬜ `stellar:pubnet` and the pubnet half of the upstream suite — blocked on
+  [#17](https://github.com/accensa/x402-facilitator-stellar/issues/17).
+- ❌ Bazaar listing rejected by a third-party client (`invalid_routeTemplate`,
+  [#65](https://github.com/accensa/x402-facilitator-stellar/issues/65)); `__check_auth`
+  smart-account payer untested ([#13](https://github.com/accensa/x402-facilitator-stellar/issues/13)).
+
+The README is the summary; the report is the artifact. Trust the links, not this paragraph.
 
 Acceptance is tested at the wire level with stock SDK code, not by reading a claim. What
 holds today on testnet:

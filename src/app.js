@@ -47,6 +47,7 @@ import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
 import { signerMetrics } from './metrics.js';
 import { buildSettlementStore } from './store/index.js';
+import { registerDlqRoutes } from './dlq/routes.js';
 
 /** 256kb body cap, carried over unchanged from the Express transport. */
 const BODY_LIMIT_BYTES = 256 * 1024;
@@ -115,6 +116,9 @@ export async function createApp(
     webhooks = null,
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+    // DLQ operator API (#DLQ): { store: DeadLetterStore, publish, retryOptions }.
+    // Absent (no DATABASE_URL) means the routes are simply not registered.
+    dlq = null,
   } = extras;
 
   // Observability collaborators. Both are injectable so tests can capture the
@@ -390,7 +394,7 @@ export async function createApp(
     };
   }
 
-  function preflight(policy) {
+  function preflight(policy, methods) {
     return async (req, reply) => {
       cors(policy)(req, reply);
       // Answer the preflight even when the origin is not granted: the 204
@@ -398,7 +402,7 @@ export async function createApp(
       // which is the enforcement point, not the preflight status.
       reply.header(
         'Access-Control-Allow-Methods',
-        policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS',
+        methods ?? (policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS'),
       );
       reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
       reply.header('Access-Control-Max-Age', '600');
@@ -412,8 +416,13 @@ export async function createApp(
    * Cataloging must never delay or fail a payment: the expensive work is
    * enqueued and the payment response returns immediately. A cataloging failure
    * is logged, never surfaced as a payment failure.
+   *
+   * The `source` records how the resource entered the catalog (#140): a verify
+   * ("verify") proves nothing was paid, so the store catalogs it as provisional
+   * and expiring; a real settlement ("settle") promotes it to permanent public
+   * state. A hand-entered resource is "manual".
    */
-  async function processCataloging(req, body, reply, source = 'payment') {
+  async function processCataloging(req, body, reply, source = 'verify') {
     try {
       const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
       const outcome = {};
@@ -486,7 +495,21 @@ export async function createApp(
         Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
       );
     } catch (err) {
+      // Cataloging must never fail a payment, so the exception is logged but
+      // never re-thrown. It must also never leave the caller without their
+      // cataloging outcome: EXTENSION-RESPONSES is the only channel a seller
+      // has to learn what the Bazaar did, so a malformed discovery extension
+      // that throws here still surfaces an explicit `not attempted` rather
+      // than silently omitting the header entirely.
       console.error('[Catalog] Unhandled error during processCataloging:', err);
+      try {
+        reply.header(
+          'EXTENSION-RESPONSES',
+          Buffer.from(JSON.stringify({ bazaar: { status: 'not attempted' } })).toString('base64'),
+        );
+      } catch (headerErr) {
+        console.error('[Catalog] Failed to write EXTENSION-RESPONSES fallback:', headerErr);
+      }
     }
   }
 
@@ -590,6 +613,16 @@ export async function createApp(
       }
     }
     return null;
+  }
+
+  /**
+   * Prefer the limiter state returned by a record call (which reflects the
+   * current request already being counted) for the RateLimit-* headers, falling
+   * back to the pre-record check if a limiter library does not return state.
+   */
+  function applyRateLimitHead(reply, recorded, check) {
+    if (recorded && Number.isFinite(recorded.remaining)) return handleRateLimit(reply, recorded);
+    return handleRateLimit(reply, check);
   }
 
   /**
@@ -757,8 +790,8 @@ export async function createApp(
         req.span.scheme = body.paymentRequirements.scheme;
       }
       try {
-        await rateLimiter.recordVerify(req);
-        handleRateLimit(reply, check);
+        const recorded = await rateLimiter.recordVerify(req);
+        applyRateLimitHead(reply, recorded, check);
         const timeoutMs = config.requestTimeoutMs ?? 30_000;
         let timeoutTimer;
         const timeoutPromise = new Promise((_, reject) => {
@@ -791,7 +824,9 @@ export async function createApp(
           network: body.paymentRequirements.network,
         });
         if (result.isValid) {
-          await processCataloging(req, body, reply, 'payment');
+          // A verify moves no money, so the listing it creates is provisional
+          // and expires unless a settlement promotes it (#140).
+          await processCataloging(req, body, reply, 'verify');
         }
         return reply.send(result);
       } catch (err) {
@@ -972,7 +1007,7 @@ export async function createApp(
               : 0;
             // The metrics/audit record the fee actually paid by this settlement.
             const actualFee = result.success ? result.transactionFeeStroops || 0 : 0;
-            await rateLimiter.recordSettle(req, sponsoredFee);
+            const recorded = await rateLimiter.recordSettle(req, sponsoredFee);
             if (req.span) {
               req.span.settleOutcome = result.success ? 'settled' : 'failed';
               req.span.outcome = result.success ? 'ok' : 'rejected';
@@ -982,7 +1017,7 @@ export async function createApp(
               req.span.txHash = result.transaction || null;
               req.span.feeStroops = actualFee;
             }
-            handleRateLimit(reply, check);
+            applyRateLimitHead(reply, recorded, check);
             if (result.success) {
               // Settlement notification (#123): the event is written to the
               // outbox in the SAME database transaction as the 'settled' state
@@ -1009,7 +1044,7 @@ export async function createApp(
                 event,
               );
 
-              await processCataloging(req, body, reply, 'payment');
+              await processCataloging(req, body, reply, 'settle');
 
               if (
                 !enqueued.atomicallyEnqueued &&
@@ -1370,6 +1405,22 @@ export async function createApp(
   });
 
   /**
+   * DLQ operator API (view/replay/discard poisoned webhook messages).
+   * Registered only when a DeadLetterStore is available (DATABASE_URL set).
+   */
+  if (dlq) {
+    registerDlqRoutes(app, {
+      dlq: dlq.store,
+      publish: dlq.publish,
+      requireApiKeyStrict,
+      cors,
+      preflight,
+      audit,
+      retryOptions: dlq.retryOptions,
+    });
+  }
+
+  /**
    * Preflight routes (#76).
    *
    * Each CORS-enabled path gets an explicit OPTIONS handler. It sees the
@@ -1420,7 +1471,11 @@ export async function createApp(
 
     // Fastify's content-parser errors, mapped onto the reason codes the
     // Express transport used to emit for entity.parse.failed / entity.too.large.
-    if (err?.code === 'FST_ERR_CTP_INVALID_JSON') {
+    // Fastify 5 names the malformed-JSON error `FST_ERR_CTP_INVALID_JSON_BODY`
+    // (the pre-v5 `FST_ERR_CTP_INVALID_JSON` is matched too for back-compat so
+    // a future downgrade cannot silently regress the wire code to
+    // `internal_error`).
+    if (err?.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || err?.code === 'FST_ERR_CTP_INVALID_JSON') {
       status = 400;
       code = 'malformed_json';
     } else if (err?.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {

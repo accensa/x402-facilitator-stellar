@@ -14,7 +14,8 @@
  *   x402_settlement_fee_stroops histogram{network}
  *   x402_rpc_retries_total{code}
  *   x402_signer_inflight{network,signer}
- *   active_verifications
+ *   x402_dlq_depth{status} - dead-letter queue depth; alert if pending+exhausted
+ *     exceeds DLQ_ALERT_THRESHOLD (see src/dlq/worker.js)
  */
 
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
@@ -186,12 +187,11 @@ export function createMetrics() {
     'In-flight settlements per signer — the sequence-contention signal (#9).',
     ['network', 'signer'],
   );
-  const activeVerifications = new Gauge(
-    'active_verifications',
-    'Current number of in-flight verification operations.',
-    [],
+  const dlqDepth = new Gauge(
+    'x402_dlq_depth',
+    'Dead-letter queue depth by status (pending, exhausted). Alert when pending+exhausted exceeds DLQ_ALERT_THRESHOLD.',
+    ['status'],
   );
-  activeVerifications.set({}, 0);
 
   return {
     incRequests: labels => requests.inc(labels),
@@ -202,11 +202,10 @@ export function createMetrics() {
     incRpcRetry: ({ code }) => rpcRetries.inc({ code: code ?? 'unknown' }),
     setSignerInflight: ({ network, signer, value }) =>
       signerInflight.set({ network, signer }, value),
-    incActiveVerifications: () => activeVerifications.inc(),
-    decActiveVerifications: () => activeVerifications.dec(),
+    setDlqDepth: ({ status, value }) => dlqDepth.set({ status }, value),
 
     render: () =>
-      [requests, duration, settlements, fee, rpcRetries, signerInflight, activeVerifications]
+      [requests, duration, settlements, fee, rpcRetries, signerInflight, dlqDepth]
         .map(m => m.render())
         .join(''),
   };

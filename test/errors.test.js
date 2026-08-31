@@ -27,7 +27,7 @@ describe('404', () => {
 });
 
 describe('malformed JSON on /verify', () => {
-  test('returns JSON with a non-null invalidReason', async () => {
+  test('returns JSON with the malformed_json reason, not HTML', async () => {
     const app = await serve();
     try {
       const res = await app.post('/verify', '{"paymentPayload": broken');
@@ -35,7 +35,10 @@ describe('malformed JSON on /verify', () => {
       assert.match(res.headers.get('content-type'), /application\/json/);
       const body = await res.json();
       assert.equal(body.isValid, false);
-      assert.ok(body.invalidReason);
+      // #143: Fastify 5 names the parser error FST_ERR_CTP_INVALID_JSON_BODY.
+      // It used to fall through to `internal_error`; the wire reason is
+      // contract and must stay `malformed_json`.
+      assert.equal(body.invalidReason, 'malformed_json');
       assert.ok(!/at\s+\S+:\d+/.test(JSON.stringify(body)), 'must not carry a stack trace');
     } finally {
       await app.close();

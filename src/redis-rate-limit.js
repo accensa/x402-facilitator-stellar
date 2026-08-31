@@ -117,7 +117,15 @@ export class RedisRateLimiter extends RateLimiter {
 
   async recordVerify(req) {
     const ownerId = req.keyId || req.ip;
-    await this._incrementAsync(ownerId, 'verify', 60, 1);
+    const limits = this._getKeyConfig(req.keyId);
+    const bucket = await this._incrementAsync(ownerId, 'verify', 60, 1);
+    const limit = limits.verifyRpm;
+    return {
+      allowed: true,
+      limit,
+      remaining: this._postRecordRemaining(limit, bucket),
+      resetAt: bucket?.resetAt,
+    };
   }
 
   async checkSettle(req, _network = null) {
@@ -142,10 +150,22 @@ export class RedisRateLimiter extends RateLimiter {
 
   async recordSettle(req, feeCharged) {
     const ownerId = req.keyId || req.ip;
-    await this._incrementAsync(ownerId, 'settle', 60, 1);
-    await this._incrementAsync(ownerId, 'settle', 3600, 1);
-    await this._incrementAsync(ownerId, 'settle', 86400, 1);
+    const limits = this._getKeyConfig(req.keyId);
+    const b60 = await this._incrementAsync(ownerId, 'settle', 60, 1);
+    const b3600 = await this._incrementAsync(ownerId, 'settle', 3600, 1);
+    const b86400 = await this._incrementAsync(ownerId, 'settle', 86400, 1);
     if (feeCharged) await this._incrementAsync(ownerId, 'fee', 86400, feeCharged);
+    const tightest = [
+      { limit: limits.settleRpm, remaining: this._postRecordRemaining(limits.settleRpm, b60) },
+      { limit: limits.settleRph, remaining: this._postRecordRemaining(limits.settleRph, b3600) },
+      { limit: limits.settleRpd, remaining: this._postRecordRemaining(limits.settleRpd, b86400) },
+    ].sort((a, b) => a.remaining - b.remaining)[0];
+    return {
+      allowed: true,
+      limit: tightest.limit,
+      remaining: tightest.remaining,
+      resetAt: b60?.resetAt,
+    };
   }
 
   checkCatalog(req) {
