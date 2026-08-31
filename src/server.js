@@ -367,9 +367,8 @@ async function shutdown(signal) {
         metricsServerRef ? metricsServerRef.close(resolve) : resolve(),
       );
       await webhooks.stop().catch(() => {});
-      await distributedLock?.quit()?.catch(() => {});
+      await distributedLock?.quit().catch(() => {});
       await crdtStore?.close().catch(() => {});
-
       failoverHealth?.stop();
 
       if (catalogPruneTimer) globalThis.clearInterval(catalogPruneTimer);

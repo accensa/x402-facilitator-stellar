@@ -1,0 +1,29 @@
+# Code owners (#195).
+#
+# Files where a mistake moves money or weakens an auth boundary get explicit,
+# non-optional review from the facilitator maintainers. These are the ones a
+# reviewer must actually read, not skim:
+#
+#   - src/facilitator.js — the scheme wiring, including which signer serves
+#     which network (its own comments explain how a testnet key ends up
+#     submitting to pubnet when signers are shared across networks).
+#   - src/config.js — boot-time validation meant to make a misconfiguration
+#     fail at start, including the pubnet opt-in.
+#   - src/app.js — the auth middleware and every route.
+#   - docs/THREAT-MODEL.md and SECURITY.md — what an external reviewer reads to
+#     decide what is claimed.
+#   - .github/workflows/** — a workflow diff can disable a gate, and it is the
+#     diff reviewers skim hardest.
+src/facilitator.js           @accensa/facilitator-maintainers
+src/config.js                @accensa/facilitator-maintainers
+src/app.js                   @accensa/facilitator-maintainers
+docs/THREAT-MODEL.md         @accensa/facilitator-maintainers
+SECURITY.md                  @accensa/facilitator-maintainers
+.github/workflows/**         @accensa/facilitator-maintainers
+
+# Catch-all. Per the team decision in #195 the same roster owns the rest, so a
+# docs-only PR still waits on the team. Trade-off, stated plainly: a catch-all
+# that owns every file makes each PR wait on one group and can get routed
+# around; if that happens, loosen this to a permissive default (no owner) and
+# keep the explicit sensitive-path rules above.
+*                            @accensa/facilitator-maintainers
