@@ -160,3 +160,52 @@ test('createStellarDiscoveryResource surfaces the same structured error as other
   });
   assert.equal(free.pricing.amount, '0');
 });
+
+test('routeTemplate placeholders: empty, malformed, duplicated and inherited names (#226)', () => {
+  // An empty placeholder is called out on its own rather than becoming a
+  // parameter named ''.
+  const empty = validateDiscoveryDeclaration({
+    ...validDeclaration,
+    routeTemplate: '/x/{ }',
+    parameters: {},
+  });
+  assert.ok(empty.some(e => e.includes('empty parameter placeholder')));
+
+  // Names that are not plain identifiers are rejected outright — a dotted or
+  // spaced name is never a real route parameter.
+  const malformed = validateDiscoveryDeclaration({
+    ...validDeclaration,
+    routeTemplate: '/x/{a.b}',
+    parameters: {},
+  });
+  assert.ok(malformed.some(e => e.includes('Invalid routeTemplate parameter name: a.b')));
+
+  // The same parameter twice is one missing description, not two.
+  const duplicated = validateDiscoveryDeclaration({
+    ...validDeclaration,
+    routeTemplate: '/users/{id}/posts/{id}',
+    parameters: {},
+  });
+  assert.equal(
+    duplicated.filter(e => e.includes('Missing description for parameter: id')).length,
+    1,
+  );
+
+  // The bug this guards: `decl.parameters['constructor']` is truthy via
+  // Object.prototype even when the seller described nothing, so a plain
+  // truthiness check silently accepted it. Object.hasOwn is what fixes it.
+  const inherited = validateDiscoveryDeclaration({
+    ...validDeclaration,
+    routeTemplate: '/x/{constructor}',
+    parameters: {},
+  });
+  assert.ok(inherited.some(e => e.includes('Missing description for parameter: constructor')));
+
+  // A present-but-blank description is not a description.
+  const blank = validateDiscoveryDeclaration({
+    ...validDeclaration,
+    routeTemplate: '/x/{id}',
+    parameters: { id: '   ' },
+  });
+  assert.ok(blank.some(e => e.includes('Missing description for parameter: id')));
+});
