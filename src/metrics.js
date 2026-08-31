@@ -193,6 +193,13 @@ export function createMetrics() {
     ['status'],
   );
 
+  const activeVerifications = new Gauge(
+    'active_verifications',
+    'Verifies currently in flight — the scale signal the HPA reads through the Prometheus Adapter (#118).',
+    [],
+  );
+  activeVerifications.set({}, 0);
+
   return {
     incRequests: labels => requests.inc(labels),
     observeRequestDuration: ({ route, network, durationSeconds }) =>
@@ -203,9 +210,20 @@ export function createMetrics() {
     setSignerInflight: ({ network, signer, value }) =>
       signerInflight.set({ network, signer }, value),
     setDlqDepth: ({ status, value }) => dlqDepth.set({ status }, value),
+    incActiveVerifications: () => activeVerifications.inc({}),
+    decActiveVerifications: () => activeVerifications.dec({}),
 
     render: () =>
-      [requests, duration, settlements, fee, rpcRetries, signerInflight, dlqDepth]
+      [
+        requests,
+        duration,
+        settlements,
+        fee,
+        rpcRetries,
+        signerInflight,
+        dlqDepth,
+        activeVerifications,
+      ]
         .map(m => m.render())
         .join(''),
   };
