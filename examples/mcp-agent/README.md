@@ -1,6 +1,6 @@
 # x402 MCP Agent Simulation
 
-This example demonstrates how an AI agent uses the `x402-mcp` standalone server to discover and call paid resources entirely autonomously.
+This example demonstrates how an AI agent uses the standalone MCP server (`node src/mcp/cli.js`) to discover and call paid resources entirely autonomously.
 
 When started, it automatically configures and funds a Stellar testnet account for the agent via Friendbot. It then spins up the local MCP server and runs through a simulated AI tool loop.
 

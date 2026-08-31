@@ -46,6 +46,8 @@ test('the CLI explains itself when given no argument', () => {
     assert.fail('expected a non-zero exit');
   } catch (err) {
     assert.equal(err.status, 1);
-    assert.match(err.stderr, /Usage:/);
+    // The usage line must show an invocation that actually works from a clean
+    // clone — the package is private, so there is no installed bin name (#193).
+    assert.match(err.stderr, /node src\/sdk\/cli\.js/);
   }
 });

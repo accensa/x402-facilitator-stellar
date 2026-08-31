@@ -4,7 +4,7 @@ import { validateDiscoveryPolicy } from '../catalog/validation.js';
 
 const file = process.argv[2];
 if (!file) {
-  console.error('Usage: validate-discovery <path-to-json>');
+  console.error('Usage: node src/sdk/cli.js <path-to-json>');
   process.exit(1);
 }
 

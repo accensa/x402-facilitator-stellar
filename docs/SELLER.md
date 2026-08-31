@@ -28,7 +28,7 @@
    
    You can also validate your metadata offline without making payments:
    ```bash
-   npx validate-discovery metadata.json
+   node src/sdk/cli.js metadata.json
    ```
 4. **Verify listing:** Check the Bazaar endpoint to ensure you are listed. Your
    payment responses also tell you directly: every successful `/verify` and
