@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'fs';
-import { validateDiscoveryPolicy } from './validation.js';
+import { validateDiscoveryPolicy } from '../catalog/validation.js';
 
 const file = process.argv[2];
 if (!file) {
