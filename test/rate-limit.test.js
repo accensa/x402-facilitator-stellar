@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RateLimiter } from '../src/rate-limit.js';
+import { stubRateLimiter, testConfig, VALID_BODY, serve } from './helpers/app.js';
 
 test('rate limiter honors global limits', async () => {
   const config = {
@@ -104,6 +105,56 @@ test('rate limiter sweeps expired buckets', async () => {
   limiter.store.map.set('catalog:127.0.0.1:60', { count: 5, resetAt: now - 10 });
   await limiter._sweep(now);
   assert.equal(limiter.store.map.has('catalog:127.0.0.1:60'), false);
+});
+
+test('stubRateLimiter matches the real limiter surface and return shapes', async () => {
+  const real = new RateLimiter({
+    global: { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 500, catalogRpm: 10 },
+    keys: {},
+  });
+  const stub = stubRateLimiter();
+  const methods = ['checkVerify', 'checkSettle', 'checkCatalog', 'recordVerify', 'recordSettle', 'recordCatalog', 'getUsage'];
+
+  assert.deepEqual(
+    Object.keys(stub).filter(key => typeof stub[key] === 'function').sort(),
+    methods.slice().sort(),
+  );
+  for (const method of methods) {
+    assert.equal(typeof real[method], 'function');
+  }
+
+  const req = { ip: '127.0.0.1' };
+  for (const method of ['checkVerify', 'checkSettle', 'checkCatalog']) {
+    const result = await real[method](req);
+    const stubResult = await stub[method](req);
+    for (const key of ['allowed', 'limit', 'remaining', 'resetAt']) {
+      assert.equal(typeof stubResult[key], typeof result[key]);
+    }
+  }
+});
+
+test('real RateLimiter serves all payment and discovery routes', async () => {
+  const rateLimiter = new RateLimiter({
+    global: { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 500000, catalogRpm: 10 },
+    keys: {},
+  });
+  const app = await serve({
+    config: testConfig(),
+    rateLimiter,
+    catalog: {
+      upsertResource: async resource => resource,
+      listResources: async () => ({ items: [], total: 0 }),
+      search: async () => ({ resources: [], partialResults: false, pagination: {} }),
+    },
+  });
+  try {
+    assert.equal((await app.post('/verify', VALID_BODY)).status, 200);
+    assert.equal((await app.post('/settle', VALID_BODY)).status, 200);
+    assert.equal((await app.get('/discovery/resources')).status, 200);
+    assert.equal((await app.get('/discovery/search?query=stellar')).status, 200);
+  } finally {
+    await app.close();
+  }
 });
 
 test('catalog limiter enforces limits', async () => {
