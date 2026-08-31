@@ -33,7 +33,7 @@ function vaultUrlHasUserinfo(url) {
 function parsePositiveInt(value, { name, defaultValue, min = 1, max = Number.MAX_SAFE_INTEGER }) {
   const raw = value ?? String(defaultValue);
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < min || n > max) {
+  if (!Number.isInteger(n) || n < min || n > max) {
     throw new Error(
       `${name} must be a finite integer between ${min} and ${max}, got "${raw}".`,
     );

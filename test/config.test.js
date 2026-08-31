@@ -92,3 +92,74 @@ test('resolves custom rate limits from RATE_LIMIT_GLOBAL and RATE_LIMIT_<key>', 
   // Unspecified per-key limits fall back to global
   assert.equal(config.rateLimits.keys.ADMIN.settleRph, 100);
 });
+
+test('resolveConfig: PORT defaults to 3402 when unset', () => {
+  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  assert.strictEqual(config.port, 3402);
+});
+
+test('resolveConfig: PORT rejects non-numeric and out-of-range values', () => {
+  const base = { FACILITATOR_SECRET: 'S123' };
+  for (const bad of ['abc', '12.5', '-1', '0', '65536', '']) {
+    assert.throws(
+      () => resolveConfig({ ...base, PORT: bad }),
+      /PORT must be a finite integer between 1 and 65535/,
+      `PORT=${JSON.stringify(bad)} should throw`,
+    );
+  }
+});
+
+test('resolveConfig: PORT accepts range boundary values', () => {
+  const base = { FACILITATOR_SECRET: 'S123' };
+  assert.strictEqual(resolveConfig({ ...base, PORT: '1' }).port, 1);
+  assert.strictEqual(resolveConfig({ ...base, PORT: '65535' }).port, 65535);
+});
+
+test('resolveConfig: MAX_TX_FEE_STROOPS defaults to 50000 when unset', () => {
+  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  assert.strictEqual(config.perNetwork[TESTNET].maxTransactionFeeStroops, 50000);
+});
+
+test('resolveConfig: MAX_TX_FEE_STROOPS rejects non-numeric and out-of-range values', () => {
+  const base = { FACILITATOR_SECRET: 'S123' };
+  for (const bad of ['abc', '12.5', '-100', '0', '99', '10000001']) {
+    assert.throws(
+      () => resolveConfig({ ...base, MAX_TX_FEE_STROOPS: bad }),
+      /MAX_TX_FEE_STROOPS must be a finite integer between 100 and 10000000/,
+      `MAX_TX_FEE_STROOPS=${JSON.stringify(bad)} should throw`,
+    );
+  }
+});
+
+test('resolveConfig: MAX_TX_FEE_STROOPS accepts range boundary values', () => {
+  const base = { FACILITATOR_SECRET: 'S123' };
+  assert.strictEqual(resolveConfig({ ...base, MAX_TX_FEE_STROOPS: '100' }).perNetwork[TESTNET].maxTransactionFeeStroops, 100);
+  assert.strictEqual(resolveConfig({ ...base, MAX_TX_FEE_STROOPS: '10000000' }).perNetwork[TESTNET].maxTransactionFeeStroops, 10000000);
+});
+
+test('resolveConfig: MAX_TX_FEE_STROOPS_PUBNET defaults to 50000 when unset', () => {
+  const env = {
+    FACILITATOR_SECRET: 'S123',
+    ENABLE_PUBNET: 'true',
+    FACILITATOR_SECRET_PUBNET: 'S456',
+    STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
+  };
+  const config = resolveConfig(env);
+  assert.strictEqual(config.perNetwork[PUBNET].maxTransactionFeeStroops, 50000);
+});
+
+test('resolveConfig: MAX_TX_FEE_STROOPS_PUBNET rejects non-numeric and out-of-range values', () => {
+  const base = {
+    FACILITATOR_SECRET: 'S123',
+    ENABLE_PUBNET: 'true',
+    FACILITATOR_SECRET_PUBNET: 'S456',
+    STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
+  };
+  for (const bad of ['abc', '12.5', '-100', '0', '99', '10000001']) {
+    assert.throws(
+      () => resolveConfig({ ...base, MAX_TX_FEE_STROOPS_PUBNET: bad }),
+      /MAX_TX_FEE_STROOPS_PUBNET must be a finite integer between 100 and 10000000/,
+      `MAX_TX_FEE_STROOPS_PUBNET=${JSON.stringify(bad)} should throw`,
+    );
+  }
+});
