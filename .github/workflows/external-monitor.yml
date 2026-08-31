@@ -41,6 +41,14 @@ jobs:
           FACILITATOR_SECRET: ${{ secrets.FACILITATOR_SECRET }}
           SYNTHETIC_PAYMENT: ${{ secrets.SYNTHETIC_PAYMENT }}
         run: |
+          # Without FACILITATOR_URL the probe falls back to http://localhost:3402
+          # and fails on every scheduled run — 96 red runs a day that mean nothing.
+          # No-op until an operator sets the secret. (secrets are not available
+          # to a job-level `if:`, so the guard lives here.)
+          if [ -z "${FACILITATOR_URL}" ]; then
+            echo "FACILITATOR_URL is not set — skipping external probe."
+            exit 0
+          fi
           node monitoring/probes.mjs
         continue-on-error: true
 
@@ -48,11 +56,12 @@ jobs:
         if: steps.probe.outcome == 'failure'
         env:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          FACILITATOR_URL: ${{ secrets.FACILITATOR_URL }}
         run: |
           if [ -n "${ALERT_WEBHOOK_URL}" ]; then
             curl -fsS -X POST "${ALERT_WEBHOOK_URL}" \
               -H 'content-type: application/json' \
-              -d "{\"text\":\"x402-facilitator-stellar external probe FAILED for ${FACILITOR_URL}: see monitoring/out/status.json\"}"
+              -d "{\"text\":\"x402-facilitator-stellar external probe FAILED for ${FACILITATOR_URL}: see monitoring/out/status.json\"}"
           fi
           echo "::error::External probe failed — see monitoring/out/status.json"
           exit 1
