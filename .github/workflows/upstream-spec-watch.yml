@@ -12,6 +12,7 @@ on:
   workflow_dispatch:
   # Re-check when the policy / tracked-file list itself changes.
   pull_request:
+    branches: ['main']
     paths:
       - 'docs/UPSTREAM.md'
 
