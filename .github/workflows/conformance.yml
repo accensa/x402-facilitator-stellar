@@ -31,6 +31,15 @@ on:
         description: 'Ref of x402-foundation/x402 to test against'
         required: false
         default: 'main'
+        # `workflow_call` inputs must declare a type; without it GitHub
+        # rejects the whole file and every push produces a startup failure.
+        type: string
+    secrets:
+      # Referenced by the "Give the payer and payee testnet USDC" step. A
+      # reusable workflow has to declare the secrets it reads, or the file
+      # fails validation. Optional: the step degrades to skipping the run.
+      TESTNET_USDC_TREASURY_SECRET:
+        required: false
 
 concurrency:
   group: conformance
