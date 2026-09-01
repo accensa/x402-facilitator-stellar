@@ -1,0 +1,38 @@
+# Integration CI for the `dev` branch.
+#
+# `dev` is where contributors land work, so it deliberately runs exactly one
+# check. The source is plain JavaScript with no build step, so the compile
+# equivalent is: do the locked dependencies install, and does every source
+# file parse? The full suite (lint, format, tests, audit, licenses, eval,
+# examples) stays scoped to `main` and runs on the `dev` -> `main` pull
+# request, which is what keeps `main` green.
+name: Dev CI
+
+on:
+  push:
+    branches: ['dev']
+  pull_request:
+    branches: ['dev']
+
+concurrency:
+  group: dev-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Syntax-check sources
+        run: |
+          find src test e2e examples scripts eval \( -name '*.mjs' -o -name '*.js' \) -print0 \
+            | xargs -0 -r -n1 node --check

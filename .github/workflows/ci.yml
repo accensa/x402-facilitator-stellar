@@ -4,6 +4,7 @@ on:
   push:
     branches: ['main']
   pull_request:
+    branches: ['main']
 
 # A second push to a PR cancels the first: the older run's result is about code
 # nobody will merge.
