@@ -1,0 +1,33 @@
+[package]
+name = "smart-account"
+version = "0.0.0"
+edition = "2021"
+publish = false
+rust-version = "1.89.0"
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+# Pinned to the current stable soroban-sdk (the protocol line testnet runs
+# today), so the CustomAccountInterface ABI this fixture speaks is exactly
+# what testnet dispatches for contract-account authentication. The source
+# follows the published soroban-examples "account" contract
+# (stellar/soroban-examples, Apache-2.0).
+soroban-sdk = { version = "27.0.6" }
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+ed25519-dalek = { version = "1.0.1" }
+rand = { version = "0.7.3" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
