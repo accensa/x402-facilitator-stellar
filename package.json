@@ -45,6 +45,7 @@
     "test:chaos:toxiproxy": "node --test test/integration/chaos/*.test.js",
     "test:chaos:all": "node --test test/chaos.test.js test/integration/chaos/*.test.js",
     "e2e": "node scripts/e2e.mjs",
+    "e2e:smart-account": "node scripts/e2e-smart-account.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
