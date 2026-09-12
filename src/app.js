@@ -686,23 +686,34 @@ export async function createApp(
     return handleRateLimit(reply, checkResult);
   }
 
+  /**
+   * Set RateLimit-* response headers only. Does not send a body.
+   * Safe to call once on the happy path after a successful check/record.
+   */
+  function setRateLimitHeaders(reply, checkResult) {
+    if (!checkResult) return;
+    reply.header('RateLimit-Limit', checkResult.limit);
+    reply.header('RateLimit-Remaining', checkResult.remaining);
+    reply.header('RateLimit-Reset', checkResult.resetAt);
+  }
+
+  /**
+   * Reject with 429 when the check is not allowed. Always sets headers first.
+   * Callers must `return` the result so a response is not started twice.
+   */
   function handleRateLimit(reply, checkResult) {
-    if (checkResult) {
-      reply.header('RateLimit-Limit', checkResult.limit);
-      reply.header('RateLimit-Remaining', checkResult.remaining);
-      reply.header('RateLimit-Reset', checkResult.resetAt);
-      if (!checkResult.allowed) {
-        reply.header(
-          'Retry-After',
-          Math.max(1, checkResult.resetAt - Math.floor(Date.now() / 1000)),
-        );
-        return reply.code(429).send({
-          isValid: false,
-          invalidReason: 'rate_limited',
-          invalidMessage: checkResult.reason,
-          reason: checkResult.reason,
-        });
-      }
+    setRateLimitHeaders(reply, checkResult);
+    if (checkResult && !checkResult.allowed) {
+      reply.header(
+        'Retry-After',
+        Math.max(1, checkResult.resetAt - Math.floor(Date.now() / 1000)),
+      );
+      return reply.code(429).send({
+        isValid: false,
+        invalidReason: 'rate_limited',
+        invalidMessage: checkResult.reason,
+        reason: checkResult.reason,
+      });
     }
     return null;
   }
@@ -713,8 +724,12 @@ export async function createApp(
    * back to the pre-record check if a limiter library does not return state.
    */
   function applyRateLimitHead(reply, recorded, check) {
-    if (recorded && Number.isFinite(recorded.remaining)) return handleRateLimit(reply, recorded);
-    return handleRateLimit(reply, check);
+    if (recorded && Number.isFinite(recorded.remaining)) {
+      setRateLimitHeaders(reply, recorded);
+      return null;
+    }
+    setRateLimitHeaders(reply, check);
+    return null;
   }
 
   /**
@@ -1000,7 +1015,7 @@ export async function createApp(
 
         if (existingRecord) {
           if (existingRecord.state === 'settled') {
-            handleRateLimit(reply, checkSettle);
+            setRateLimitHeaders(reply, checkSettle);
             if (existingRecord.response) {
               const respPayload =
                 typeof existingRecord.response === 'string'
@@ -1016,7 +1031,7 @@ export async function createApp(
             });
           }
           if (existingRecord.state === 'submitted' || existingRecord.state === 'unknown') {
-            handleRateLimit(reply, checkSettle);
+            setRateLimitHeaders(reply, checkSettle);
             return reply.send({
               success: false,
               errorReason: 'submitted_outcome_unknown',
@@ -1035,7 +1050,7 @@ export async function createApp(
               'request_timeout',
             ]);
             if (!RETRYABLE.has(existingRecord.error_reason)) {
-              handleRateLimit(reply, checkSettle);
+              setRateLimitHeaders(reply, checkSettle);
               if (existingRecord.response) {
                 const respPayload =
                   typeof existingRecord.response === 'string'
@@ -1077,7 +1092,7 @@ export async function createApp(
         };
         const replay = idempotency ? await idempotency.begin(idempotency.keyFor(idemReq)) : null;
         if (replay?.replayed) {
-          handleRateLimit(reply, checkSettle);
+          setRateLimitHeaders(reply, checkSettle);
           return reply.code(replay.statusCode).send(replay.response);
         }
         /**
@@ -1485,7 +1500,7 @@ export async function createApp(
     try {
       const result = await catalog.listResources(params);
       await rateLimiter.recordCatalogRead(req);
-      handleRateLimit(reply, checkCatalogRead);
+      setRateLimitHeaders(reply, checkCatalogRead);
 
       return reply.send({
         x402Version: 2,
@@ -1552,7 +1567,7 @@ export async function createApp(
     try {
       const result = await catalog.search(params);
       await rateLimiter.recordCatalogRead(req);
-      handleRateLimit(reply, checkCatalogRead);
+      setRateLimitHeaders(reply, checkCatalogRead);
 
       return reply.send({
         x402Version: 2,
