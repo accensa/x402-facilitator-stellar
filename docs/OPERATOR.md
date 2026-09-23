@@ -299,9 +299,9 @@ status page exists.
 
 ### Upgrading
 
-1. Check `docs/CONFORMANCE.md` and the diff of `package.json` for wire-format
-   changes before upgrading — a bump of `@x402/*` can change response shapes
-   (a CHANGELOG is tracked in [#212](https://github.com/accensa/x402-facilitator-stellar/issues/212)).
+1. Read [`CHANGELOG.md`](../CHANGELOG.md) and the diff of `package.json` for
+   wire-format changes before upgrading — a bump of `@x402/*` can change
+   response shapes. Also check `docs/CONFORMANCE.md` for the pinned behaviour.
 2. Rolling restart; both old and new must be able to serve `/verify` during the cutover.
 3. If a database migration shipped, verify forward compatibility (the repo's migrations
    are designed to be; verify the previous image can still read the schema).

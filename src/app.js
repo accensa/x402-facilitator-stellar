@@ -74,6 +74,7 @@ import { createReadinessChecker } from './readiness.js';
 import { validatePaymentBody, validatePaymentFields } from './request-validation.js';
 import { createRequestLog } from './log.js';
 import { createMetrics } from './metrics.js';
+import { createIpPseudonymizer } from './ip.js';
 
 import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
@@ -134,6 +135,8 @@ const PAYMENT_BODY_SCHEMA = {
  *   - readiness: readiness checker override
  *   - breakerStates: breaker-state reader for the readiness probe (#105)
  *   - failoverHealth (#126): region-aware failover health checker
+ *   - ipPseudonymizer (#204): maps a resolved client IP to a stable,
+ *     non-reversible digest before any bucket or audit record sees it
  * @returns {Promise<import('fastify').FastifyInstance>}
  */
 function annotateSpan(attrs) {
@@ -220,6 +223,10 @@ export async function createApp(
   const logger = extras.logger ?? createRequestLog({ level: config.logLevel ?? 'info' });
   const metrics = extras.metrics ?? createMetrics();
   const signers = extras.signers ?? {};
+  // #204: IP pseudonymisation is a single choke point. server.js passes a
+  // keyed hasher; a bare config (tests) falls back to a plain digest. Either
+  // way no raw address reaches a rate-limit bucket, an audit record or a log.
+  const ipPseudonymizer = extras.ipPseudonymizer ?? createIpPseudonymizer();
 
   // Seed the signer-inflight series at zero for every configured signer so the
   // gauge exists before the pool lands (#9). The settle path flips it to one
@@ -424,9 +431,29 @@ export async function createApp(
         .filter(Boolean);
       const chain = [...forwarded, req.socket.remoteAddress];
       const ip = chain[Math.max(0, chain.length - 1 - hops)] ?? req.socket.remoteAddress;
-      Object.defineProperty(req, 'ip', { value: ip });
+      // configurable so the #204 pseudonymisation hook below can replace it.
+      Object.defineProperty(req, 'ip', { value: ip, configurable: true });
     });
   }
+
+  /**
+   * Pseudonymise the resolved client IP (#204) before any downstream code can
+   * read it. This runs after the hop-count hook above so a numeric TRUST_PROXY
+   * resolves the real caller first, and after Fastify has populated `req.ip`
+   * for the string/array trust modes.
+   *
+   * Overriding `req.ip` itself — rather than every call site — is deliberate:
+   * the rate limiter (`req.keyId || req.ip`), the audit actor
+   * (`ip:${req.ip}`) and the ad-hoc warning all read this one property, so a
+   * single replacement is what makes the docs/PRIVACY.md claim true. No
+   * downstream code changes are needed, and none can forget to apply it.
+   */
+  app.addHook('onRequest', async req => {
+    const pseudonym = ipPseudonymizer(req.ip);
+    if (pseudonym !== undefined && pseudonym !== req.ip) {
+      Object.defineProperty(req, 'ip', { value: pseudonym, configurable: true });
+    }
+  });
 
   // Headers a browser client must be able to read but which are not
   // CORS-safelisted response headers: without naming them in
@@ -533,7 +560,10 @@ export async function createApp(
           outcome.status = 'rejected';
           outcome.code = 'catalog_rate_limited';
           outcome.reason = checkResult.reason;
-          console.warn(`[Catalog] Rate limit exceeded for IP ${req.ip}`);
+          // Never log the address (even pseudonymised) ad hoc — the audit
+          // record below carries the pseudonym, and stdout is not a place for
+          // caller identifiers (#204).
+          console.warn('[Catalog] Rate limit exceeded for caller');
           // Audited as a rejection but never allowed to shape the payment
           // response: the 429/headers belong to the payment limiter, not here.
           audit('rate_limit_rejected', {

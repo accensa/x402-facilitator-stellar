@@ -81,6 +81,9 @@ Actions tab (`workflow_dispatch`, optionally picking an `x402_ref`).
 ## Commit and PR conventions
 
 - Link the issue: `Closes #N` in the PR description.
+- Add an entry to [`CHANGELOG.md`](CHANGELOG.md) under `Unreleased` for any
+  change an integrator can observe (wire format, configuration, behaviour);
+  see [#212](https://github.com/accensa/x402-facilitator-stellar/issues/212).
 - Fill in the PR template's **"How it was verified"** with the actual commands
   you ran, and answer **"Wire format"** honestly — a field renamed by accident
   is a conformance failure that passes every local test, so it needs saying

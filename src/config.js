@@ -285,6 +285,15 @@ export function resolveConfig(env = process.env) {
     perNetwork,
     trustProxy,
 
+    /**
+     * HMAC key for client-IP pseudonymisation (#204). Unset (the default) means
+     * the server derives a key from the facilitator signer secret, so IPs are
+     * still pseudonymised with no new configuration. Set it when you want the
+     * key under your own rotation policy, independent of the signer. Changing
+     * it re-keys every rate-limit bucket — see docs/PRIVACY.md.
+     */
+    ipHashSecret: env.IP_HASH_SECRET || null,
+
     /** Optional shared stores. Unset means in-memory, single-instance. */
     redisUrl: env.REDIS_URL || null,
     databaseUrl: env.DATABASE_URL || null,

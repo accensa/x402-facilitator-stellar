@@ -88,7 +88,7 @@ Reference material: [Architecture](docs/ARCHITECTURE.md) ·
 [Business model](docs/BUSINESS-MODEL.md) · [Threat model](docs/THREAT-MODEL.md) ·
 [Audit readiness](docs/AUDIT.md) · [Privacy](docs/PRIVACY.md) ·
  main
-[Glossary](docs/GLOSSARY.md)
+[Glossary](docs/GLOSSARY.md) · [Changelog](CHANGELOG.md)
 
 Sibling repositories in the [Accensa organisation](https://github.com/accensa):
 [`accensa-app`](https://github.com/accensa/accensa-app) (merchant dashboard, indexer,

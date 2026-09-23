@@ -14,6 +14,8 @@ import { installHorizonClient } from './horizon-client.js';
 import { installRpcRetry } from './rpc-retry.js';
 import { createRequestLog } from './log.js';
 import { createMetrics } from './metrics.js';
+import { createIpPseudonymizer, deriveIpHashSecret } from './ip.js';
+import { installProcessErrorHandlers } from './process-handlers.js';
 import { RateLimiter } from './rate-limit.js';
 import { createRateLimitStore, MemoryStore } from './rate-limit-store.js';
 import { RedisRateLimiter } from './redis-rate-limit.js';
@@ -64,6 +66,21 @@ const rpc = installRpcRetry({
 });
 
 const config = resolveConfig();
+
+// Process-level error handlers (#205). Without these a listen failure or a
+// stray rejection killed the process with no diagnostic at all. Installed
+// before any listener is bound so a boot failure is attributable.
+installProcessErrorHandlers(process, {
+  log: msg => console.error(msg),
+});
+
+// #204: keyed IP pseudonymisation. IP_HASH_SECRET wins when set; otherwise the
+// key is derived from the (already secret) facilitator signer, so the default
+// deployment pseudonymises addresses with no new configuration. A bare config
+// cannot reach here — resolveConfig() above requires a signer secret.
+const ipPseudonymizer = createIpPseudonymizer({
+  secret: config.ipHashSecret ?? deriveIpHashSecret(config.perNetwork[config.networks[0]]?.secret),
+});
 
 // Vault-managed database pool (#127): when VAULT_ADDR is set, Postgres
 // credentials come from Vault's database secrets engine (AppRole login, lease
@@ -236,6 +253,7 @@ const app = await createApp(config, facilitator, rateLimiter, catalog, idempoten
   logger: createRequestLog({ level: config.logLevel }),
   metrics,
   signers,
+  ipPseudonymizer,
   // When METRICS_PORT is set the metrics listener below owns /metrics; keep it
   // off the public listener so it cannot be scraped by untrusted callers.
   serveMetrics: config.metricsPort == null,
@@ -257,7 +275,7 @@ const app = await createApp(config, facilitator, rateLimiter, catalog, idempoten
 // Set by the METRICS_PORT branch below; closed on shutdown when present.
 let metricsServerRef = null;
 
-app.listen({ port: config.port, host: '0.0.0.0' }, () => {
+function onListening() {
   console.log(`x402 Stellar facilitator listening on :${config.port}`);
   console.log(`  networks : ${config.networks.join(', ')}`);
   for (const network of config.networks) {
@@ -332,9 +350,24 @@ app.listen({ port: config.port, host: '0.0.0.0' }, () => {
     metricsServer.listen(config.metricsPort, '0.0.0.0', () => {
       console.log(`metrics listening on :${config.metricsPort} (METRICS_PORT)`);
     });
+    // #205: a metrics-listener bind failure must not be a silent death either.
+    metricsServer.on('error', err => {
+      console.error(`[Fatal] metrics listener failed on :${config.metricsPort}: ${err.message}`);
+      process.exit(1);
+    });
     // Track for graceful shutdown.
     metricsServerRef = metricsServer;
   }
+}
+
+// #205: a bind failure (EADDRINUSE, an unavailable port) is reported and the
+// process exits non-zero instead of dying with an unhandled 'error' event.
+app.listen({ port: config.port, host: '0.0.0.0' }, err => {
+  if (err) {
+    console.error(`[Fatal] failed to listen on :${config.port}: ${err.message}`);
+    process.exit(1);
+  }
+  onListening();
 });
 
 /**
