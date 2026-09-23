@@ -45,6 +45,7 @@ function hydrateRow(r) {
     ...resource,
     source: r.source,
     provisional: r.provisional,
+    schema_version: r.schema_version ?? 1,
     // int8 columns come back from node-postgres as strings.
     expires_at: r.expires_at == null ? null : Number(r.expires_at),
     first_seen_at: new Date(r.first_seen_at),
@@ -105,10 +106,16 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
             expires_at BIGINT,
             first_seen_at TIMESTAMPTZ NOT NULL,
             last_seen_at TIMESTAMPTZ NOT NULL,
-            embedding JSONB
+            embedding JSONB,
+            schema_version INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_catalog_resources_source ON catalog_resources(source);
         CREATE INDEX IF NOT EXISTS idx_catalog_resources_provisional ON catalog_resources(provisional);
+      `);
+      // Ensure existing tables are upgraded gracefully
+      await this.pool.query(`
+        ALTER TABLE catalog_resources 
+        ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
       `);
     } catch (err) {
       this._degrade(`failed to create schema: ${err.message}`);
@@ -118,7 +125,7 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
   async _hydrate() {
     if (!this.pool || this.degraded) return;
     const { rows } = await this.pool.query(
-      `SELECT key, resource, source, provisional, expires_at, first_seen_at, last_seen_at, embedding
+      `SELECT key, resource, source, provisional, expires_at, first_seen_at, last_seen_at, embedding, schema_version
        FROM catalog_resources`,
     );
     for (const row of rows) {
@@ -148,8 +155,8 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
   async _persistResource(entry) {
     await this.pool.query(
       `INSERT INTO catalog_resources
-         (key, resource, source, provisional, expires_at, first_seen_at, last_seen_at, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (key, resource, source, provisional, expires_at, first_seen_at, last_seen_at, embedding, schema_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (key) DO UPDATE SET
          resource = EXCLUDED.resource,
          source = EXCLUDED.source,
@@ -157,7 +164,8 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
          expires_at = EXCLUDED.expires_at,
          first_seen_at = catalog_resources.first_seen_at,
          last_seen_at = EXCLUDED.last_seen_at,
-         embedding = EXCLUDED.embedding`,
+         embedding = EXCLUDED.embedding,
+         schema_version = EXCLUDED.schema_version`,
       [
         this._key(entry),
         JSON.stringify(resourceLink(entry)),
@@ -167,6 +175,7 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
         entry.first_seen_at,
         entry.last_seen_at,
         entry.embedding ? JSON.stringify(entry.embedding) : null,
+        entry.schema_version ?? 1,
       ],
     );
   }

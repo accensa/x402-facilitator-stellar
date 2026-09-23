@@ -60,7 +60,7 @@ const metrics = createMetrics();
 const rpc = installRpcRetry({
   log: msg => console.warn(`  ${msg}`),
   onStateChange: msg => console.warn(`  [Breaker] ${msg}`),
-  onRetry: ({ code }) => metrics.incRpcRetry({ code }),
+  onRetry: ({ code, host }) => metrics.incRpcRetry({ code, host }),
 });
 
 const config = resolveConfig();

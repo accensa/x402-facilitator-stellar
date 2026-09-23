@@ -42,6 +42,11 @@ if (AGENT_PAYER_SECRET_KEY) {
   }
 }
 
+import { installRpcRetry } from '../rpc-retry.js';
+installRpcRetry({
+  log: msg => console.warn(`[MCP] ${msg}`),
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

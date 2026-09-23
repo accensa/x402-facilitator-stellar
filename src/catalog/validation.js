@@ -139,6 +139,22 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
     extensions: extracted.extensions,
     payTo: paymentRequirements.payTo,
   };
+
+  if (result.resource.url) {
+    try {
+      const parsedUrl = new URL(result.resource.url);
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        result.hardDrop = true;
+        result.reason = 'invalid_url_scheme';
+        return result;
+      }
+    } catch {
+      result.hardDrop = true;
+      result.reason = 'invalid_url';
+      return result;
+    }
+  }
+
   return result;
 }
 

@@ -142,7 +142,7 @@ Prometheus text format, unauthenticated. By default it is served on `PORT`; set 
 | `x402_request_duration_seconds` | histogram | `route`, `network` | verify/settle latency — the interactive-agent target | alert if p95 > 2s on `/verify` or `/settle` (SLO breach for agent use) |
 | `x402_settlements_total` | counter | `network`, `outcome` (`settled`/`failed`) | settlement success rate | alert if `outcome="failed"` rate > 1% over 10m |
 | `x402_settlement_fee_stroops` | histogram | `network` | **actual fee paid** — the number that shows whether `MAX_TX_FEE_STROOPS` is sane | alert if p95 fee approaches `MAX_TX_FEE_STROOPS` (fee ceiling about to throttle settlements) |
-| `x402_rpc_retries_total` | counter | `code` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
+| `x402_rpc_retries_total` | counter | `code`, `host` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
 | `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert if it sits at ≥ 1 persistently or climbs (signer pool needed before bursty traffic) |
 | `active_verifications` | gauge | none | process-wide number of verification calls waiting on Stellar Horizon | HPA target is 5 average active verifications per pod |
 

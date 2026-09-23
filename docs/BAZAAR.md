@@ -219,6 +219,8 @@ decodes to:
 | `invalid_declaration` | `rejected` | The declaration was not an object at all — the cataloging path received a null, a string, or a primitive where a discovery declaration was expected. | Send a JSON object shaped like the Seller Guide's example; validate offline with `npx validate-discovery metadata.json` before paying again. |
 | `invalid_extension_schema` | `rejected` | The `bazaar` extension in the payment payload does not conform to the upstream spec. | Validate offline with `npx validate-discovery metadata.json` and fix the extension shape, then pay again. |
 | `invalid_routeTemplate` | `rejected` | The `routeTemplate` is hostile: path traversal (`..`), protocol smuggling (`://`), or unparseable percent-encoding. This is a security boundary, not a quality nit. | Use a plain path template such as `/api/resource/{id}` and pay again. |
+| `invalid_url_scheme` | `rejected` | The resource URL uses a scheme other than `http` or `https`. | Change the resource URL to use a standard web protocol (`https` recommended) and pay again. |
+| `invalid_url` | `rejected` | The resource URL could not be parsed as a valid URL. | Fix the formatting of the resource URL and pay again. |
 | `missing_or_invalid_discovery_extension` | `not attempted` | No Bazaar discovery extension could be found or extracted from the payment. | If you want to be listed, declare discovery metadata (see the [Seller Guide](SELLER.md)); otherwise nothing to fix. |
 
 ### Soft-dropped fields (`catalog_partial`)

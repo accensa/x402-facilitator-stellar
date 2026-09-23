@@ -6,7 +6,7 @@ use rand::thread_rng;
 use soroban_sdk::auth::{Context, ContractContext};
 use soroban_sdk::symbol_short;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Symbol, Vec};
+use soroban_sdk::{vec, Address, BytesN, Env, IntoVal, Vec};
 
 use crate::{AccSignature, SmartAccountContract, SmartAccountContractClient, SmartAccountError};
 
@@ -30,7 +30,10 @@ fn create(env: &Env, cap: i128) -> (SmartAccountContractClient<'_>, ed25519_dale
 fn sign(e: &Env, kp: &ed25519_dalek::Keypair, payload: &BytesN<32>) -> AccSignature {
     AccSignature {
         public_key: owner_bytesn(e, kp),
-        signature: kp.sign(payload.to_array().as_slice()).to_bytes().into_val(e),
+        signature: kp
+            .sign(payload.to_array().as_slice())
+            .to_bytes()
+            .into_val(e),
     }
 }
 
@@ -95,7 +98,13 @@ fn check_auth_rejects_wrong_signer() {
     let payload = BytesN::from_array(&env, &[9u8; 32]);
     let impostor = owner_key();
     assert_eq!(
-        check_auth_error(&env, &client, &payload, vec![&env, sign(&env, &impostor, &payload)], 1000),
+        check_auth_error(
+            &env,
+            &client,
+            &payload,
+            vec![&env, sign(&env, &impostor, &payload)],
+            1000
+        ),
         SmartAccountError::UnknownSigner,
     );
 }
@@ -108,7 +117,13 @@ fn spend_cap_rejects_over_cap_and_allows_inside() {
 
     // 1000 > 500: rejected.
     assert_eq!(
-        check_auth_error(&env, &client, &payload, vec![&env, sign(&env, &kp, &payload)], 1000),
+        check_auth_error(
+            &env,
+            &client,
+            &payload,
+            vec![&env, sign(&env, &kp, &payload)],
+            1000
+        ),
         SmartAccountError::SpendCapExceeded,
     );
 
@@ -131,7 +146,10 @@ fn unlimited_cap_accepts_any_amount() {
         &client.address,
         &payload,
         vec![&env, sign(&env, &kp, &payload)].into(),
-        &vec![&env, transfer_context(&env, &Address::generate(&env), 1_000_000)],
+        &vec![
+            &env,
+            transfer_context(&env, &Address::generate(&env), 1_000_000),
+        ],
     )
     .unwrap();
 }

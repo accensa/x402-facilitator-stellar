@@ -180,7 +180,7 @@ export function createMetrics() {
   const rpcRetries = new Counter(
     'x402_rpc_retries_total',
     'Soroban RPC connection-level retries by error code.',
-    ['code'],
+    ['code', 'host'],
   );
   const signerInflight = new Gauge(
     'x402_signer_inflight',
@@ -206,7 +206,7 @@ export function createMetrics() {
       duration.observe({ route, network }, durationSeconds),
     incSettlements: labels => settlements.inc(labels),
     observeSettlementFee: ({ network, feeStroops }) => fee.observe({ network }, feeStroops),
-    incRpcRetry: ({ code }) => rpcRetries.inc({ code: code ?? 'unknown' }),
+    incRpcRetry: ({ code, host }) => rpcRetries.inc({ code: code ?? 'unknown', host: host ?? 'unknown' }),
     setSignerInflight: ({ network, signer, value }) =>
       signerInflight.set({ network, signer }, value),
     setDlqDepth: ({ status, value }) => dlqDepth.set({ status }, value),
