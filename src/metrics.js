@@ -206,7 +206,8 @@ export function createMetrics() {
       duration.observe({ route, network }, durationSeconds),
     incSettlements: labels => settlements.inc(labels),
     observeSettlementFee: ({ network, feeStroops }) => fee.observe({ network }, feeStroops),
-    incRpcRetry: ({ code, host }) => rpcRetries.inc({ code: code ?? 'unknown', host: host ?? 'unknown' }),
+    incRpcRetry: ({ code, host }) =>
+      rpcRetries.inc({ code: code ?? 'unknown', host: host ?? 'unknown' }),
     setSignerInflight: ({ network, signer, value }) =>
       signerInflight.set({ network, signer }, value),
     setDlqDepth: ({ status, value }) => dlqDepth.set({ status }, value),

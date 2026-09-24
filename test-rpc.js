@@ -12,7 +12,10 @@ installRpcRetry({
 async function run() {
   try {
     await fetch('http://localhost:59999'); // connection refused
-  } catch(e) {}
+  } catch {
+    // Expected: the script intentionally targets a dead endpoint to exercise
+    // the RPC retry path, so the fetch failure itself needs no handling.
+  }
   console.log(metrics.render());
 }
 run();
