@@ -1,7 +1,24 @@
-import { registerDlqRoutes } from './dlq/routes.js';
 /**
- * The HTTP surface: /verify, /settle, /supported, /usage, /discovery/resources,
- * /healthz, /health/ready.
+ * The HTTP surface. The full inventory, with each route's authentication and
+ * rate-limit posture, is the table in docs/AUTHENTICATION.md — and
+ * test/docs-routes.test.js fails if this file registers a route that table does
+ * not list, so the two are updated together:
+ *
+ *   - payments:      POST /verify, POST /settle (API key, metered)
+ *   - discovery:     GET /supported, GET /discovery/resources,
+ *                    GET /discovery/search (public reads)
+ *   - cataloging:    POST /discovery/resources (manual, API key), plus the
+ *                    automatic off-path cataloging of every successful
+ *                    /verify and /settle — see processCataloging
+ *   - settlements:   GET /settlements/:idempotencyKey (#10) and
+ *                    GET /settlements/:idempotencyKey/events (#130)
+ *   - metering:      GET /usage (API key, strict — the one route that refuses
+ *                    open mode)
+ *   - operational:   GET /healthz (liveness), GET /readyz (readiness),
+ *                    GET /metrics (Prometheus text)
+ *   - preflights:    OPTIONS on every CORS-enabled route above
+ *   - operator-only, registered only when a DeadLetterStore is configured:
+ *                    /admin/dlq* (see src/dlq/routes.js)
  *
  * @x402/core ships no facilitator router — it gives you x402Facilitator with
  * verify(), settle() and getSupported(), and the transport is yours. This file
@@ -34,12 +51,18 @@ import { registerDlqRoutes } from './dlq/routes.js';
  * binding a port, holding a real signer, or spawning a subprocess. server.js is
  * the process entrypoint and does nothing this file does.
  */
+import { registerDlqRoutes } from './dlq/routes.js';
 import crypto from 'node:crypto';
 
 /**
  * Stable, dependency-free serialization of the params that shape a discovery
  * response, so the ETag is stable across request encodings of the same filter.
  * Keys are sorted, arrays are sorted, and undefined/null are dropped.
+ *
+ * @param {object} params - the parsed query parameters that shape the response
+ *   (a repeated query key arrives as an array)
+ * @returns {string} canonical JSON; two encodings of the same filter always
+ *   produce the same string, which is what makes the ETag stable
  */
 function canonicalizeDiscoveryParams(params) {
   const out = {};
@@ -56,6 +79,13 @@ function canonicalizeDiscoveryParams(params) {
  * catalog version (any write changes it, so it invalidates every cached
  * variant at once) AND the full parameter set (different filters are different
  * representations and must never share a validator).
+ *
+ * @param {number} catalogVersion - the catalog's monotonic write counter; a
+ *   missing getVersion() falls back to 0, which still leaves the parameter
+ *   hash doing the filter isolation
+ * @param {object} params - response-shaping parameters, canonicalised before
+ *   hashing so key order never changes the validator
+ * @returns {string} a weak ETag of the form `W/"<version>-<hash>"`
  */
 function discoveryETag(catalogVersion, params) {
   const hash = crypto
@@ -111,33 +141,14 @@ const PAYMENT_BODY_SCHEMA = {
 };
 
 /**
- * Builds the Fastify app.
+ * Adds attributes to the span that is currently active and does nothing when
+ * there is none. The surrounding request span is opened by withRequestSpan (and
+ * the scheme call's own span by tracedSchemeCall), so this is the cheap way for
+ * a route to tag itself — route name, tenant id — without threading the span
+ * through every handler signature.
  *
- * Takes its collaborators rather than reaching for module state, which is what
- * makes the surface testable: a test can supply a facilitator that throws, a
- * rate limiter already at its ceiling, or a catalog that rejects a write,
- * without a network, a keypair or a subprocess.
- *
- * `signers` is deliberately not a parameter — no route reads it. The addresses
- * reach the wire through facilitator.getSupported(); server.js keeps them only
- * to print the boot banner.
- *
- * @param {object} config - resolved config from resolveConfig()
- * @param {{verify: Function, settle: Function, getSupported: Function}} facilitator
- * @param {object} rateLimiter - RateLimiter, or a stub with the same surface
- * @param {{upsertResource: Function, listResources: Function}} catalog
- * @param {{keyFor: Function, begin: Function, complete: Function}} [idempotency]
- *   optional idempotency store for /settle; absent means in-memory only
- * @param {object} [extras] - optional collaborators:
- *   - distributedLock (#116): Redlock-backed lock for state transitions
- *   - webhooks (#117): asynchronous webhook dispatcher
- *   - audit: audit writer override (default createAuditLogger)
- *   - readiness: readiness checker override
- *   - breakerStates: breaker-state reader for the readiness probe (#105)
- *   - failoverHealth (#126): region-aware failover health checker
- *   - ipPseudonymizer (#204): maps a resolved client IP to a stable,
- *     non-reversible digest before any bucket or audit record sees it
- * @returns {Promise<import('fastify').FastifyInstance>}
+ * @param {Record<string, string|number|boolean>} attrs - OpenTelemetry
+ *   attribute name/value pairs to set on the active span
  */
 function annotateSpan(attrs) {
   const span = trace.getActiveSpan();
@@ -147,6 +158,21 @@ function annotateSpan(attrs) {
   }
 }
 
+/**
+ * Runs `fn` inside a fresh span named for the request, so every handler in a
+ * route shares one parent span regardless of how many scheme calls it makes.
+ *
+ * The W3C trace context is extracted from the inbound headers first, so a
+ * caller that already has a trace (an agent SDK, a gateway) gets one continuous
+ * trace instead of a disconnected one. Errors mark the span failed and are
+ * re-thrown unchanged — this wrapper observes, it never swallows.
+ *
+ * @param {string} name - span name, e.g. `HTTP POST /settle`
+ * @param {object} req - Fastify request; headers supply the parent context and
+ *   method/route/tenant.id become span attributes
+ * @param {(span: object) => Promise<*>} fn - the request body
+ * @returns {Promise<*>} whatever `fn` resolves to
+ */
 async function withRequestSpan(name, req, fn) {
   const parentCtx = propagation.extract(context.active(), req.headers);
   return tracer.startActiveSpan(
@@ -175,6 +201,21 @@ async function withRequestSpan(name, req, fn) {
   );
 }
 
+/**
+ * Wraps one facilitator call (verify or settle) in its own child span, so the
+ * latency that belongs to Stellar/Horizon is separable from the time this
+ * process spends on authentication, metering and persistence.
+ *
+ * A successful settle/verify result carries the transaction id, which is
+ * recorded as `x402.transaction.id` — the join key between this span and the
+ * on-chain transaction a support engineer will look at next.
+ *
+ * @param {string} op - 'verify' or 'settle'
+ * @param {string} network - CAIP-2 network identifier, recorded as `x402.network`
+ * @param {() => Promise<object>} fn - the facilitator call itself
+ * @param {object} [extraAttrs] - additional span attributes (tenant id, ...)
+ * @returns {Promise<object>} the facilitator's response, passed through untouched
+ */
 async function tracedSchemeCall(op, network, fn, extraAttrs = {}) {
   return tracer.startActiveSpan(`facilitator.${op}`, async span => {
     span.setAttribute('x402.network', network);
@@ -200,6 +241,50 @@ async function tracedSchemeCall(op, network, fn, extraAttrs = {}) {
   });
 }
 
+/**
+ * Builds the Fastify app: hooks, auth, CORS, every route, and the single error
+ * boundary. Separated from server.js so the surface can be built and exercised
+ * without binding a port, holding a real signer or spawning a subprocess.
+ *
+ * Takes its collaborators rather than reaching for module state, which is what
+ * makes the surface testable: a test can supply a facilitator that throws, a
+ * rate limiter already at its ceiling, or a catalog that rejects a write,
+ * without a network, a keypair or a subprocess.
+ *
+ * `signers` is deliberately not a parameter — no route reads it. The addresses
+ * reach the wire through facilitator.getSupported(); server.js keeps them only
+ * to print the boot banner. (`extras.signers` is the separate fee-payer map
+ * used solely to label the signer-inflight gauge.)
+ *
+ * @param {object} config - resolved config from resolveConfig()
+ * @param {{verify: Function, settle: Function, getSupported: Function}} facilitator
+ * @param {object} rateLimiter - RateLimiter, or a stub with the same surface
+ * @param {{upsertResource: Function, listResources: Function}} catalog
+ * @param {{keyFor: Function, begin: Function, complete: Function}} [idempotency]
+ *   optional idempotency store for /settle; absent means in-memory only — the
+ *   response is then derived from the settlement record instead of replayed
+ * @param {object} [extras] - optional collaborators. Everything below has a
+ *   working default, which is what keeps a bare `createApp(config, ...)` usable
+ *   in tests:
+ *   - distributedLock (#116): Redlock-backed lock serialising state transitions
+ *   - webhooks (#117): asynchronous webhook dispatcher
+ *   - dlq: DeadLetterStore plus publish function; its operator routes are
+ *     registered only when present (src/dlq/routes.js)
+ *   - failoverHealth (#126): region-aware failover health checker
+ *   - settlementStore: overrides the store built from config (Postgres when
+ *     DATABASE_URL is set, in-memory otherwise)
+ *   - logger: request-log sink; injected so tests can capture the line
+ *   - metrics: metrics registry; injected so tests can read counters directly
+ *   - signers: per-network fee-payer map, used for signer-inflight metrics only
+ *   - audit: audit writer override (default createAuditLogger)
+ *   - readiness: readiness checker override
+ *   - breakerStates: breaker-state reader for the readiness probe (#105)
+ *   - ipPseudonymizer (#204): maps a resolved client IP to a stable,
+ *     non-reversible digest before any bucket or audit record sees it
+ *   - serveMetrics: false moves /metrics off this listener (server.js serves it
+ *     on a separate port when METRICS_PORT is set)
+ * @returns {Promise<import('fastify').FastifyInstance>}
+ */
 export async function createApp(
   config,
   facilitator,
@@ -296,6 +381,11 @@ export async function createApp(
    * exactly that as request.raw / reply.raw, so the same redaction choke point
    * serves both frameworks unchanged.
    */
+  // In-flight request gauge, decorated onto the instance rather than exported:
+  // server.js reads it from the forced-exit path to report how much work a
+  // shutdown deadline is about to cut off. Incremented in onRequest and
+  // decremented in onResponse, clamped at zero so a stray decrement cannot
+  // drive it negative.
   let activeRequestCount = 0;
   app.decorate('getInFlightCount', () => activeRequestCount);
 
@@ -317,11 +407,16 @@ export async function createApp(
    * left unset is derived from the status code so every request still yields one
    * complete line.
    *
-   * Operational endpoints (/metrics, /healthz, /health/ready) are logged but
-   * excluded from x402_requests_total so the payment-request counters stay
+   * Operational endpoints (/metrics, /healthz, /readyz) are logged but excluded
+   * from the request counter and duration histogram so the payment metrics stay
    * semantically about payments.
+   *
+   * Entries are registered route patterns — the value logger.begin() reads off
+   * req.routeOptions.url. A pattern that does not match what Fastify registered
+   * silently stops excluding anything, so keep these in step with the route
+   * declarations below.
    */
-  const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/health/ready']);
+  const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/readyz']);
   app.addHook('onResponse', (req, reply, done) => {
     activeRequestCount = Math.max(0, activeRequestCount - 1);
     const span = req.span;
@@ -363,6 +458,10 @@ export async function createApp(
     done?.();
   });
 
+  // Audit records — who did what (settlements, auth failures, catalog writes) —
+  // are a different artifact from the request log: every line carries a
+  // `channel: "audit"` marker and goes to stdout, plus AUDIT_LOG_FILE when one
+  // is configured. See src/audit.js and docs/AUDIT.md.
   const audit = extras.audit ?? createAuditLogger();
 
   // Readiness defaults to a real checker over the resolved config. A bare
@@ -378,6 +477,9 @@ export async function createApp(
         })
       : null);
 
+  // Decorated rather than kept local: server.js reads app.readiness during
+  // graceful shutdown to flip the probe into its shutting-down state, so the
+  // load balancer stops sending new work before the drain starts.
   app.decorate('readiness', readiness);
 
   /**
@@ -513,6 +615,16 @@ export async function createApp(
     };
   }
 
+  /**
+   * Terminates a CORS preflight with 204.
+   *
+   * Registered without an auth hook, because a preflight cannot carry an API
+   * key: the browser sends OPTIONS with no Authorization header, so gating it
+   * behind requireApiKey would fail every browser call to an authenticated
+   * route before the real request was ever attempted.
+   *
+   * @param {'public'|'authenticated'} policy - the route class being preflighted
+   */
   function preflight(policy) {
     return async (req, reply) => {
       cors(policy)(req, reply);
@@ -691,7 +803,14 @@ export async function createApp(
   }
 
   /**
-   * Require API key for usage (no open mode allowed for this).
+   * The strict variant of the gate above: refuses open mode instead of
+   * tolerating it.
+   *
+   * Used where the route only makes sense for an identified caller — GET /usage
+   * meters a specific key, and the DLQ operator API reads and discards in-flight
+   * settlement notifications. Open mode is answered with 401 and the distinct
+   * reason `open_mode_usage_forbidden`, so a caller can tell "this instance has
+   * no keys configured" from "my key was rejected".
    */
   async function requireApiKeyStrict(req, reply) {
     if (config.apiKeys.length === 0) {
@@ -705,7 +824,18 @@ export async function createApp(
     return requireApiKey(req, reply);
   }
 
-  /** Rate-limit rejections are auditable: they are abuse signals, not noise. */
+  /**
+   * Records a rate-limit rejection in the audit trail before answering it.
+   *
+   * Rejections are abuse signals rather than noise, so they are auditable — but
+   * the actor recorded is the authenticated keyId or the pseudonymised address,
+   * never the presented key material.
+   *
+   * @param {string} route - the route pattern the rejection belongs to
+   * @param {object} checkResult - limiter state; also shapes the 429 reply
+   * @param {object} [extra] - extra audit fields (e.g. a catalog outcome code)
+   * @returns {object|null} the 429 reply, already sent (see handleRateLimit)
+   */
   function rejectRateLimited(req, reply, route, checkResult, extra = {}) {
     audit('rate_limit_rejected', {
       actor: req.keyId ?? `ip:${req.ip}`,
@@ -716,6 +846,17 @@ export async function createApp(
     return handleRateLimit(reply, checkResult);
   }
 
+  /**
+   * Emits the RateLimit-* headers for a completed check and, when the check
+   * failed, the 429 body.
+   *
+   * The headers are written on allowed requests too, so a caller can pace
+   * itself against the budget instead of discovering the limit by hitting it.
+   *
+   * @param {object} checkResult - limiter state (limit/remaining/resetAt/allowed)
+   * @returns {object|null} the 429 reply when the request was rejected, null
+   *   when it was allowed so the caller falls through to its normal work
+   */
   function handleRateLimit(reply, checkResult) {
     if (checkResult) {
       reply.header('RateLimit-Limit', checkResult.limit);
@@ -802,6 +943,18 @@ export async function createApp(
     };
   }
 
+  /**
+   * Body reader for the manual catalog write (POST /discovery/resources).
+   *
+   * Same two validation layers as readPaymentBody — AJV shape first, then the
+   * network allowlist from request-validation.js — but a deliberately different
+   * rejection shape: this is a catalog operation, not a payment, so a failure is
+   * `{error, reason}` and carries no isValid/success field to confuse a client
+   * that is already handling the payment routes.
+   *
+   * @returns {{paymentPayload: object, paymentRequirements: object}|null} the
+   *   validated body, or null once the 400 response has been sent
+   */
   function readDiscoveryBody(req, reply) {
     let result;
     if (req.validationError) {
@@ -832,6 +985,15 @@ export async function createApp(
     };
   }
 
+  /**
+   * GET /healthz — liveness, and the one probe that never fails.
+   *
+   * It answers as long as the event loop is serving requests, which is exactly
+   * what an orchestrator needs to decide "restart this container" (see the
+   * Dockerfile HEALTHCHECK): a dependency outage must not be reported here, or a
+   * restart loop would make someone else's RPC outage worse. Dependency state
+   * belongs on /readyz below.
+   */
   app.get('/healthz', async () => ({ ok: true }));
 
   /**
@@ -874,6 +1036,12 @@ export async function createApp(
    */
   app.get('/supported', { onRequest: cors('public') }, async () => facilitator.getSupported());
 
+  /**
+   * GET /usage — the caller's own meter: spend, rate-limit budgets, remaining
+   * fee allowance. Read-only and never rate limited (it reads the meter rather
+   * than consuming a bucket), but it is the one route that refuses open mode
+   * (requireApiKeyStrict) because an unmetered caller has no meter to read.
+   */
   app.get('/usage', { preHandler: requireApiKeyStrict }, async req => {
     annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/usage' });
     return rateLimiter.getUsage(req.keyId);
@@ -894,6 +1062,27 @@ export async function createApp(
     });
   }
 
+  /**
+   * POST /verify — check a payment payload against its requirements without
+   * moving funds.
+   *
+   * The ordering is load-bearing, not incidental:
+   *   1. the rate-limit check runs before the body is even shaped, so the
+   *      cheapest rejection wins and a flooding caller cannot make us parse;
+   *   2. the body goes through both validation layers (see readPaymentBody);
+   *   3. the scheme call races a request timeout, so a stalled Horizon cannot
+   *      hold a worker open indefinitely;
+   *   4. the outcome is answered 200 with `isValid: false` rather than an HTTP
+   *      error — to an agent a 5xx is indistinguishable from the facilitator
+   *      being down, whereas a reason code is something it can branch on;
+   *   5. only a valid result is catalogued, and that cataloguing happens off the
+   *      hot path (a verify proves nothing was paid, so the entry stays
+   *      provisional — see processCataloging).
+   *
+   * An exception escaping the scheme call is mapped onto a reason code and still
+   * answered 200 with `isValid: false`, so an upstream failure never becomes
+   * indistinguishable from a failure of this transport.
+   */
   app.post(
     '/verify',
     {
@@ -1003,6 +1192,33 @@ export async function createApp(
     },
   );
 
+  /**
+   * POST /settle — settle a verified payment. This is the money-moving route,
+   * and the sequence below is part of its contract rather than an
+   * implementation detail:
+   *
+   *   1. the body is validated first (readPaymentBody), then the rate-limit check
+   *      runs against the settle bucket — note this is the reverse of /verify,
+   *      where the limiter gate is checked before the body is even shaped;
+   *   2. the settlement record is consulted next: a repeat of a *settled* key
+   *      replays the recorded response, and a *failed* key is only re-attempted
+   *      when its error_reason is retryable — a non-retryable failure stays
+   *      failed instead of letting a caller burn fees retrying it;
+   *   3. the request is recorded as 'submitted' BEFORE the scheme is called, so
+   *      a crash mid-flight leaves a traceable record instead of silence;
+   *   4. an idempotency-store replay short-circuits the scheme call entirely —
+   *      the key is the caller's when supplied and derived from the body
+   *      otherwise;
+   *   5. a distributed lock serialises concurrent settlement of the same payment
+   *      across pods (#116): the lock key is the payment, so unrelated payments
+   *      never contend;
+   *   6. the scheme call, the terminal state transition and the webhook enqueue
+   *      share one transaction where the store supports it (settleAndEnqueue);
+   *      where it does not, the event is handed to the dispatcher afterwards;
+   *   7. a timeout is reported as `submitted_outcome_unknown` when the request
+   *      had already reached the network, and `request_timeout` when it had not,
+   *      because only the caller can decide whether to reconcile or retry.
+   */
   app.post(
     '/settle',
     {
