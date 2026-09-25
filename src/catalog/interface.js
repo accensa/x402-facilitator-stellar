@@ -23,39 +23,39 @@ export class CatalogStore {
 
   /**
    * Upsert a resource in the catalog.
-   * @param {object} resource
-   * @param {'verify'|'settle'|'manual'|string} [source='manual']
+   * @param {object} _resource
+   * @param {'verify'|'settle'|'manual'|string} [_source='manual']
    * @returns {Promise<object>}
    */
-  async upsertResource(resource, source = 'manual') {
+  async upsertResource(_resource, _source = 'manual') {
     throw new Error('CatalogStore.upsertResource not implemented');
   }
 
   /**
    * Retrieve a single resource by URL and optional toolName.
-   * @param {string} url
-   * @param {string|null} [toolName=null]
+   * @param {string} _url
+   * @param {string|null} [_toolName=null]
    * @returns {Promise<object|null>}
    */
-  async getResource(url, toolName = null) {
+  async getResource(_url, _toolName = null) {
     throw new Error('CatalogStore.getResource not implemented');
   }
 
   /**
    * List catalog resources with optional filtering and pagination.
-   * @param {object} [params={}]
+   * @param {object} [_params={}]
    * @returns {Promise<{items: object[], total: number}>}
    */
-  async listResources(params = {}) {
+  async listResources(_params = {}) {
     throw new Error('CatalogStore.listResources not implemented');
   }
 
   /**
    * Search catalog resources with query matching and optional filters.
-   * @param {object} params
+   * @param {object} _params
    * @returns {Promise<{resources: object[], partialResults: boolean, total?: number}>}
    */
-  async search(params) {
+  async search(_params) {
     throw new Error('CatalogStore.search not implemented');
   }
 

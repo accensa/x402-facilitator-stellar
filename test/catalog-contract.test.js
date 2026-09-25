@@ -14,8 +14,12 @@ export function runCatalogStoreContractSuite(name, createStore) {
   describe(`CatalogStore Contract: ${name}`, () => {
     test('implements required interface methods', async () => {
       const store = await createStore();
+      assert.ok(store instanceof CatalogStore, 'store must extend CatalogStore');
       assert.ok(typeof store.getVersion === 'function', 'getVersion must be a function');
-      assert.ok(typeof store.getLastModified === 'function', 'getLastModified must be a function');
+      assert.ok(
+        typeof store.getLastModified === 'function',
+        'getLastModified must be a function',
+      );
       assert.ok(typeof store.upsertResource === 'function', 'upsertResource must be a function');
       assert.ok(typeof store.getResource === 'function', 'getResource must be a function');
       assert.ok(typeof store.listResources === 'function', 'listResources must be a function');
@@ -51,8 +55,14 @@ export function runCatalogStoreContractSuite(name, createStore) {
 
     test('listResources contract with pagination and filters', async () => {
       const store = await createStore();
-      await store.upsertResource({ url: 'http://example.com/1', type: 'http', payTo: 'GA' }, 'settle');
-      await store.upsertResource({ url: 'http://example.com/2', type: 'mcp', toolName: 'calc', payTo: 'GB' }, 'settle');
+      await store.upsertResource(
+        { url: 'http://example.com/1', type: 'http', payTo: 'GA' },
+        'settle',
+      );
+      await store.upsertResource(
+        { url: 'http://example.com/2', type: 'mcp', toolName: 'calc', payTo: 'GB' },
+        'settle',
+      );
 
       const listAll = await store.listResources({});
       assert.equal(listAll.total, 2);
@@ -81,7 +91,10 @@ export function runCatalogStoreContractSuite(name, createStore) {
 }
 
 // Instantiate contract suite for MemoryCatalogStore
-runCatalogStoreContractSuite('MemoryCatalogStore', async (opts) => new MemoryCatalogStore(opts));
+runCatalogStoreContractSuite('MemoryCatalogStore', async opts => new MemoryCatalogStore(opts));
 
 // Instantiate contract suite for PostgresCatalogStore (in-memory degraded/fallback mode when no DB pool)
-runCatalogStoreContractSuite('PostgresCatalogStore (degraded)', async (opts) => new PostgresCatalogStore(opts));
+runCatalogStoreContractSuite(
+  'PostgresCatalogStore (degraded)',
+  async opts => new PostgresCatalogStore(opts),
+);

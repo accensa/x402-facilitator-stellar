@@ -1170,8 +1170,6 @@ export async function createApp(
                   event,
                 );
 
-                await processCataloging(req, body, reply, 'settle');
-
                 if (
                   !enqueued.atomicallyEnqueued &&
                   enqueued.event &&
@@ -1242,6 +1240,10 @@ export async function createApp(
           const result = await Promise.race([resultPromise, timeoutPromise]).finally(() => {
             clearTimeout(timeoutTimer);
           });
+
+          if (result && result.success) {
+            await processCataloging(req, body, reply, 'settle');
+          }
           return reply.send(result);
         } catch (err) {
           // SettleResponse requires `transaction` and `network` even on failure, so

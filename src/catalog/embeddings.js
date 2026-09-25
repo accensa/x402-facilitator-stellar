@@ -2,7 +2,7 @@ let fetch = globalThis.fetch;
 try {
   const undici = await import('undici');
   if (undici.fetch) fetch = undici.fetch;
-} catch (_) {
+} catch {
   // Use native globalThis.fetch
 }
 
