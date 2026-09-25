@@ -477,6 +477,60 @@ describe('deadline enforcement and error propagation', () => {
     );
     assert.equal(stub.calls, 1, 'per-request deadline was enforced');
   });
+
+  test('ordinary attempts receive an AbortSignal bound to remaining deadline', async () => {
+    let capturedInit;
+    const stub = async (input, init) => {
+      capturedInit = init;
+      return new Response('ok');
+    };
+    globalThis.fetch = stub;
+
+    installFast({ deadlineMs: 5000 });
+    await globalThis.fetch('http://rpc.invalid');
+
+    assert.ok(capturedInit?.signal, 'ordinary attempt must receive a deadline signal');
+    assert.equal(capturedInit.signal.aborted, false);
+  });
+
+  test('sendTransaction calls are protected and do not receive a deadline signal', async () => {
+    let capturedInit;
+    const stub = async (input, init) => {
+      capturedInit = init;
+      return new Response('ok');
+    };
+    globalThis.fetch = stub;
+
+    installFast({ deadlineMs: 5000 });
+    await globalThis.fetch('http://rpc.invalid', {
+      method: 'POST',
+      body: JSON.stringify({ method: 'sendTransaction' }),
+    });
+
+    assert.equal(
+      capturedInit?.signal,
+      undefined,
+      'sendTransaction must remain un-aborted and receive no synthetic deadline signal',
+    );
+  });
+
+  test('retryable errors are recorded toward breaker exactly once per attempt', async () => {
+    const stub = scriptedFetch(transportError('ETIMEDOUT'), transportError('ETIMEDOUT'));
+    globalThis.fetch = stub;
+
+    const handle = installFast({
+      attempts: 2,
+      threshold: 5,
+    });
+
+    await assert.rejects(() => globalThis.fetch('http://rpc.invalid'), /simulated ETIMEDOUT/);
+    const state = handle.getBreakerStates()['http://rpc.invalid'];
+    assert.equal(
+      state.consecutive_failures,
+      2,
+      'two failed attempts must increment consecutive_failures by exactly 2',
+    );
+  });
 });
 
 describe('request-input handling', () => {

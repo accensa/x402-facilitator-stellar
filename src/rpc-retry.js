@@ -130,6 +130,46 @@ export function calculateBackoff(
 }
 
 /**
+ * Combines an optional user-provided AbortSignal with a timeout for the remaining deadline.
+ * Supports Node.js >= 20.0 with an AbortController fallback for environments without AbortSignal.any.
+ */
+function createDeadlineSignal(userSignal, remainingMs) {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    if (typeof AbortSignal.abort === 'function') {
+      return { signal: AbortSignal.abort(new Error('deadline exceeded')), cleanup: () => {} };
+    }
+    const c = new AbortController();
+    c.abort(new Error('deadline exceeded'));
+    return { signal: c.signal, cleanup: () => {} };
+  }
+
+  if (userSignal?.aborted) {
+    return { signal: userSignal, cleanup: () => {} };
+  }
+
+  const timeoutSignal = AbortSignal.timeout(remainingMs);
+  if (!userSignal) {
+    return { signal: timeoutSignal, cleanup: () => {} };
+  }
+
+  if (typeof AbortSignal.any === 'function') {
+    return { signal: AbortSignal.any([userSignal, timeoutSignal]), cleanup: () => {} };
+  }
+
+  const controller = new AbortController();
+  const onAbort = () => {
+    controller.abort(userSignal.aborted ? userSignal.reason : timeoutSignal.reason);
+  };
+  userSignal.addEventListener('abort', onAbort, { once: true });
+  timeoutSignal.addEventListener('abort', onAbort, { once: true });
+  const cleanup = () => {
+    userSignal.removeEventListener('abort', onAbort);
+    timeoutSignal.removeEventListener('abort', onAbort);
+  };
+  return { signal: controller.signal, cleanup };
+}
+
+/**
  * Installs the retrying, breaker-aware wrapper over the global fetch.
  *
  * @param {object} [options]
@@ -275,25 +315,36 @@ export function installRpcRetry({
       effectiveDeadlineMs && effectiveDeadlineMs > 0 && Number.isFinite(effectiveDeadlineMs)
         ? startTime + effectiveDeadlineMs
         : Infinity;
-
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       if (attempt > 1 && now() >= deadline) {
         break;
       }
 
+      let deadlineHandle;
       try {
-        const res = await call(input, init);
+        let callInit = init;
+        if (!protectedCall && Number.isFinite(deadline)) {
+          const remainingMs = deadline - now();
+          const userSignal =
+            init?.signal ?? (typeof input !== 'string' ? input?.signal : undefined);
+          deadlineHandle = createDeadlineSignal(userSignal, remainingMs);
+          callInit = { ...init, signal: deadlineHandle.signal };
+        }
+
+        const res = await call(input, callInit);
         recordSuccess(b, host);
         return res;
       } catch (err) {
         const code = err?.cause?.code ?? err?.code;
-        if (!RETRYABLE.has(code) || attempt === attempts) {
-          lastError = err;
+        lastError = err;
+        if (!RETRYABLE.has(code)) {
           break;
         }
-        lastError = err;
         recordFailure(b, host);
+        if (attempt === attempts) {
+          break;
+        }
 
         const currentTime = now();
         if (currentTime >= deadline) {
@@ -316,13 +367,11 @@ export function installRpcRetry({
         log(`rpc ${code} on ${url} — retry ${attempt}/${attempts - 1}`);
         onRetry({ code, attempt, host, url, delay });
         await sleep(delay);
+      } finally {
+        deadlineHandle?.cleanup();
       }
     }
-    // The final failure of the loop also counts toward the breaker: it is as
-    // real a connection failure as the intermediate ones, it just arrives
-    // without another retry after it.
-    const code = lastError?.cause?.code ?? lastError?.code;
-    if (RETRYABLE.has(code)) recordFailure(b, host);
+
     throw lastError;
   };
 
