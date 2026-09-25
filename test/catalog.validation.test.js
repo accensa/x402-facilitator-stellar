@@ -148,4 +148,25 @@ test('Hostile Inputs Validation', async t => {
     assert.ok(res.softDrops.includes('tags_filtered'));
     assert.ok(res.resource.tags.length <= 5);
   });
+
+  await t.test('Does not throw when every tag is filtered out (#235)', () => {
+    const payload = {
+      x402Version: 2,
+      resource: {
+        url: 'http://example.com',
+        tags: ['a'.repeat(40)], // exceeds upstream's per-tag length bound
+      },
+      extensions: {
+        bazaar: {
+          info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+          schema: { type: 'object' },
+          routeTemplate: '/a',
+        },
+      },
+    };
+    const res = validateForCatalog(payload, baseReq);
+    assert.equal(res.hardDrop, false);
+    assert.ok(res.softDrops.includes('tags_filtered'));
+    assert.deepEqual(res.resource.tags, []);
+  });
 });
