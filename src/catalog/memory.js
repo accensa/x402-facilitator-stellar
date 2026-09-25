@@ -9,6 +9,7 @@
  */
 import { scoreResource, toEpochMillis } from './search.js';
 import { EmbeddingClient } from './embeddings.js';
+import { CatalogStore } from './interface.js';
 
 /** Stable reason code for the catalog-flooding guard (#186). */
 export const MAX_RESOURCES_PER_PAYTO_CODE = 'maximum_resources_per_payto_exceeded';
@@ -39,8 +40,9 @@ function cosineSimilarity(vecA, vecB) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export class MemoryCatalogStore {
+export class MemoryCatalogStore extends CatalogStore {
   constructor(config = {}) {
+    super();
     this.resources = new Map();
     // Per-payTo count kept in lockstep with `resources` so the cap check is
     // O(1) instead of a full catalog scan on every insert (#186).

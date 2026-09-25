@@ -637,6 +637,10 @@ export async function createApp(
 
   /**
    * Caller authentication.
+   * Require API key for access (#206).
+   * Supports two Authorization header forms:
+   *  1. `Authorization: Bearer <secret>`
+   *  2. `Authorization: <secret>` (raw secret without scheme prefix)
    *
    * Unset means open. That is the correct default for a free testnet instance —
    * the RFP requires testnet be usable without friction — and it is documented
