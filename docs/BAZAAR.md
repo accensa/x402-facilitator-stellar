@@ -125,6 +125,7 @@ The validation rules for resources submitted to the catalog are as follows:
 **Catalog limits:**
 - **Rate Limit:** Catalog operations are limited per payer IP to 10 requests per minute (`catalog_rpm` in config).
 - **Resource Cap:** A single `payTo` address can have a maximum of 50 resources in the catalog (configurable via `CATALOG_MAX_RESOURCES_PER_PAYTO`). New inserts beyond this limit are rejected with the stable reason code `maximum_resources_per_payto_exceeded` — the same code on both the manual (`POST /discovery/resources`) and payment-cataloging paths.
+- **Overall Size Limit:** The catalog has a maximum size of 10,000 total resources (configurable via `CATALOG_MAX_SIZE`). New inserts beyond this limit are rejected with the stable reason code `maximum_catalog_size_exceeded`.
 - **PayTo changes:** If a resource is already cataloged and a subsequent payment reports a different `payTo`, a warning is logged.
 
 ## The `EXTENSION-RESPONSES` Header
@@ -218,9 +219,12 @@ decodes to:
 | `catalog_rate_limited` | `rejected` | Cataloging is metered per caller (default 10/min, `catalog_rpm` via `RATE_LIMIT_GLOBAL`). The payment itself still succeeded — only the cataloging was skipped. | Wait a minute, or raise `catalog_rpm` in the operator's config. |
 | `invalid_declaration` | `rejected` | The declaration was not an object at all — the cataloging path received a null, a string, or a primitive where a discovery declaration was expected. | Send a JSON object shaped like the Seller Guide's example; validate offline with `npx validate-discovery metadata.json` before paying again. |
 | `invalid_extension_schema` | `rejected` | The `bazaar` extension in the payment payload does not conform to the upstream spec. | Validate offline with `npx validate-discovery metadata.json` and fix the extension shape, then pay again. |
+| `invalid_pricing_amount` | `rejected` | The `pricing.amount` field is not a valid decimal numeric string (e.g., contains letters, exponent notation, or is a number type). | Use a decimal string like `"1.5"` or `"0.0000001"`; numbers lose precision before stroop conversion and are rejected. |
 | `invalid_routeTemplate` | `rejected` | The `routeTemplate` is hostile: path traversal (`..`), protocol smuggling (`://`), or unparseable percent-encoding. This is a security boundary, not a quality nit. | Use a plain path template such as `/api/resource/{id}` and pay again. |
 | `invalid_url_scheme` | `rejected` | The resource URL uses a scheme other than `http` or `https`. | Change the resource URL to use a standard web protocol (`https` recommended) and pay again. |
 | `invalid_url` | `rejected` | The resource URL could not be parsed as a valid URL. | Fix the formatting of the resource URL and pay again. |
+| `maximum_catalog_size_exceeded` | `rejected` | The catalog has reached its maximum size limit (default 10,000 resources). | Contact the operator to increase `CATALOG_MAX_SIZE` or prune expired entries. |
+| `maximum_resources_per_payto_exceeded` | `rejected` | A single `payTo` address has reached its maximum resource limit (default 50 resources). | Contact the operator to increase `CATALOG_MAX_RESOURCES_PER_PAYTO` or remove old listings. |
 | `missing_or_invalid_discovery_extension` | `not attempted` | No Bazaar discovery extension could be found or extracted from the payment. | If you want to be listed, declare discovery metadata (see the [Seller Guide](SELLER.md)); otherwise nothing to fix. |
 
 ### Soft-dropped fields (`catalog_partial`)
