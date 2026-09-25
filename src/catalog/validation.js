@@ -119,7 +119,9 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
 
   const rawTags = paymentPayload.resource?.tags;
   if (Array.isArray(rawTags)) {
-    const tags = sanitizeTags(rawTags);
+    // sanitizeTags returns undefined (not []) when every entry is filtered
+    // out, e.g. all tags are oversized or duplicates.
+    const tags = sanitizeTags(rawTags) ?? [];
     if (tags.length !== rawTags.length || JSON.stringify(tags) !== JSON.stringify(rawTags)) {
       result.softDrops.push('tags_filtered');
     }
