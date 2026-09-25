@@ -1,0 +1,11 @@
+{
+  "ignorePatterns": [
+    {
+      "comment": "mailto and tel links are not HTTP resources",
+      "pattern": "^(mailto|tel):"
+    }
+  ],
+  "timeout": "10s",
+  "retryCount": 2,
+  "aliveStatusCodes": [200, 206, 301, 302, 403, 429]
+}

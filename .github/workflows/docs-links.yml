@@ -1,0 +1,34 @@
+name: docs-links
+
+# Issue #214: nothing verified the links in docs/, so a renamed page could
+# leave the rest of the tree pointing at nothing. This workflow checks every
+# .md file under docs/ with the community markdown-link-check action. 403 and
+# 429 are treated as alive because many documentation hosts (npm, opensource
+# license registries) answer automated checkers with a block rather than an
+# HTML page even though the URL is valid.
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: docs links
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: 'yes'
+          use-verbose-mode: 'no'
+          checkout: 'yes'
+          base-branch: 'main'
+          config-file: '.github/markdown-link-check.json'
+          folder-path: 'docs'
+          file-extension: '.md'
+          check-modified-files-only: 'no'
