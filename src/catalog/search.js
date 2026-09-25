@@ -3,7 +3,7 @@
  * value is not a Date, a number, or a parseable ISO string. Called at the
  * scorer boundary so a ranking helper can never throw on a stored value.
  */
-function toEpochMillis(value) {
+export function toEpochMillis(value) {
   if (value === null || value === undefined) return null;
   if (value instanceof Date) {
     const ms = value.getTime();

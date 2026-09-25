@@ -6,6 +6,7 @@ import {
   extractDiscoveryInfo,
   validateDiscoveryExtension,
 } from '@x402/extensions';
+import { validateAmount } from '../sdk/validation.js';
 
 /**
  * Distinguishes a hostile routeTemplate (path traversal, protocol smuggling,
@@ -74,6 +75,15 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
       result.hardDrop = true;
       result.reason = 'invalid_extension_schema';
       return result;
+    }
+    // Validate pricing.amount format (#225) to prevent toStroops from throwing later
+    if (rawBazaar.pricing?.amount !== undefined) {
+      const amountErrors = validateAmount(rawBazaar.pricing.amount);
+      if (amountErrors.length > 0) {
+        result.hardDrop = true;
+        result.reason = 'invalid_pricing_amount';
+        return result;
+      }
     }
   }
 
