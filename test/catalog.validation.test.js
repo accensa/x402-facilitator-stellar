@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { performance } from 'node:perf_hooks';
 import { validateForCatalog } from '../src/catalog/validation.js';
 
 test('Hostile Inputs Validation', async t => {
@@ -382,4 +383,59 @@ test('Robust Error Handling & Edge Cases', async t => {
     assert.equal(customErr.reason, 'corrupted_state');
     assert.deepEqual(customErr.details, { field: 'extensions' });
   });
+});
+
+test('Performance & Allocations Optimization', async t => {
+  const baseReq = { network: 'stellar:testnet', payTo: 'G123' };
+  const benchmarkPayload = {
+    x402Version: 2,
+    resource: {
+      url: 'https://example.com/api/v1',
+      serviceName: 'Weather API',
+      description: 'Provides real-time meteorological weather data and forecasting',
+      tags: ['weather', 'forecast', 'climate'],
+    },
+    extensions: {
+      bazaar: {
+        info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+        schema: { type: 'object' },
+        routeTemplate: '/weather/current',
+      },
+    },
+  };
+
+  await t.test(
+    'Optimized validation benchmarks show responsive execution and bounded allocations',
+    () => {
+      // Warm up
+      for (let i = 0; i < 5; i++) {
+        validateForCatalog(benchmarkPayload, baseReq);
+      }
+
+      const iterations = 50;
+      const startMemory = process.memoryUsage().heapUsed;
+      const startTime = performance.now();
+
+      for (let i = 0; i < iterations; i++) {
+        const res = validateForCatalog(benchmarkPayload, baseReq);
+        assert.equal(res.hardDrop, false);
+      }
+
+      const elapsedMs = performance.now() - startTime;
+      const endMemory = process.memoryUsage().heapUsed;
+      const heapDiffMb = (endMemory - startMemory) / (1024 * 1024);
+      const avgMsPerCall = elapsedMs / iterations;
+
+      // Benchmarking metric: average per-call time must be responsive (< 80ms under full schema validation)
+      assert.ok(
+        avgMsPerCall < 80,
+        `Expected avg execution time < 80ms/call, got ${avgMsPerCall.toFixed(2)}ms/call (${elapsedMs.toFixed(2)}ms total)`,
+      );
+      // Benchmarking metric: heap allocations remain strictly bounded
+      assert.ok(
+        heapDiffMb < 15,
+        `Expected bounded heap growth (<15MB for ${iterations} iterations), observed ${heapDiffMb.toFixed(2)}MB`,
+      );
+    },
+  );
 });

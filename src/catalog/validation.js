@@ -8,6 +8,10 @@ import {
 } from '@x402/extensions';
 import { validateAmount } from '../sdk/validation.js';
 
+// Pre-compiled regex patterns to avoid recompilation overhead and garbage collection pressure
+const ROUTE_PARAM_REGEX = /\{([^}]+)\}/g;
+const HTML_TAG_REGEX = /<[^>]*>?/gm;
+
 /**
  * Distinguishes a hostile routeTemplate (path traversal, protocol smuggling,
  * unparseable percent-encoding) from one that is merely low-quality, such as
@@ -15,6 +19,15 @@ import { validateAmount } from '../sdk/validation.js';
  */
 function isHostileRouteTemplate(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
+  // Fast path: avoid expensive decodeURIComponent native call when no encoded characters or path traversal markers exist
+  if (
+    !value.includes('%') &&
+    !value.includes('..') &&
+    !value.includes('://') &&
+    !value.includes('\\')
+  ) {
+    return false;
+  }
   let decoded;
   try {
     decoded = decodeURIComponent(value);
@@ -41,7 +54,7 @@ function addAdvisories(result, declaration) {
 
   const matches =
     typeof declaration.routeTemplate === 'string'
-      ? declaration.routeTemplate.match(/\{([^}]+)\}/g)
+      ? declaration.routeTemplate.match(ROUTE_PARAM_REGEX)
       : null;
   if (matches) {
     for (const match of matches) {
@@ -129,7 +142,9 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
 
   const rawDescription = paymentPayload.resource?.description;
   if (typeof rawDescription === 'string') {
-    let description = rawDescription.replace(/<[^>]*>?/gm, '').trim();
+    let description = rawDescription.includes('<')
+      ? rawDescription.replace(HTML_TAG_REGEX, '').trim()
+      : rawDescription.trim();
     if (description.length > 200) {
       description = description.substring(0, 200);
       result.softDrops.push('description_truncated');
@@ -142,7 +157,16 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
     // sanitizeTags returns undefined (not []) when every entry is filtered
     // out, e.g. all tags are oversized or duplicates.
     const tags = sanitizeTags(rawTags) ?? [];
-    if (tags.length !== rawTags.length || JSON.stringify(tags) !== JSON.stringify(rawTags)) {
+    let isFiltered = tags.length !== rawTags.length;
+    if (!isFiltered) {
+      for (let i = 0; i < tags.length; i++) {
+        if (tags[i] !== rawTags[i]) {
+          isFiltered = true;
+          break;
+        }
+      }
+    }
+    if (isFiltered) {
       result.softDrops.push('tags_filtered');
     }
     extracted.tags = tags;
