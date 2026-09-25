@@ -16,10 +16,7 @@ export function runCatalogStoreContractSuite(name, createStore) {
       const store = await createStore();
       assert.ok(store instanceof CatalogStore, 'store must extend CatalogStore');
       assert.ok(typeof store.getVersion === 'function', 'getVersion must be a function');
-      assert.ok(
-        typeof store.getLastModified === 'function',
-        'getLastModified must be a function',
-      );
+      assert.ok(typeof store.getLastModified === 'function', 'getLastModified must be a function');
       assert.ok(typeof store.upsertResource === 'function', 'upsertResource must be a function');
       assert.ok(typeof store.getResource === 'function', 'getResource must be a function');
       assert.ok(typeof store.listResources === 'function', 'listResources must be a function');
@@ -91,10 +88,10 @@ export function runCatalogStoreContractSuite(name, createStore) {
 }
 
 // Instantiate contract suite for MemoryCatalogStore
-runCatalogStoreContractSuite('MemoryCatalogStore', async (opts) => new MemoryCatalogStore(opts));
+runCatalogStoreContractSuite('MemoryCatalogStore', async opts => new MemoryCatalogStore(opts));
 
 // Instantiate contract suite for PostgresCatalogStore (in-memory degraded/fallback mode when no DB pool)
 runCatalogStoreContractSuite(
   'PostgresCatalogStore (degraded)',
-  async (opts) => new PostgresCatalogStore(opts),
+  async opts => new PostgresCatalogStore(opts),
 );
