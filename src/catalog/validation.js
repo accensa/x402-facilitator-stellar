@@ -24,11 +24,39 @@ function isHostileRouteTemplate(value) {
   return decoded.includes('..') || decoded.includes('://');
 }
 
+/** Longest description the catalog stores. */
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/**
+ * Markup in a description (#217).
+ *
+ * A tag-ish angle-bracket sequence, or a character entity that decodes to one.
+ * Angle brackets that cannot begin markup ("rates < 5%") are allowed, so this
+ * refuses markup without refusing arithmetic.
+ *
+ * This is a refusal, not a sanitiser. The previous code ran a tag-stripping
+ * regex (`replace(/<[^>]*>?/gm, '')`) and stored the remainder, which is not a
+ * security boundary: the regex is defeated by a nested or malformed sequence
+ * (`<scr<script>ipt>` leaves `<script>` behind), and entity-encoded markup
+ * survives it untouched. Anything a consumer later decoded or rendered could
+ * therefore reintroduce markup we had claimed to remove. A description is now
+ * stored only when it contains nothing that could be read as markup at all,
+ * which is a property we can actually assert.
+ */
+const MARKUP_PATTERN = /<[a-zA-Z/!]|&(?:lt|gt|#0*6[02]|#x0*3[cC]);/;
+
 function createResult() {
   return {
     hardDrop: false,
     reason: null,
     softDrops: [],
+    /**
+     * Fields that were kept but shortened (#219). Deliberately separate from
+     * `softDrops`: a truncated field is still present, so reporting it as
+     * *dropped* told the caller a field had vanished that had not, and leaked
+     * the internal token `description_truncated` as if it were a field name.
+     */
+    truncations: [],
     advisories: [],
     resource: null,
   };
@@ -119,12 +147,20 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
 
   const rawDescription = paymentPayload.resource?.description;
   if (typeof rawDescription === 'string') {
-    let description = rawDescription.replace(/<[^>]*>?/gm, '').trim();
-    if (description.length > 200) {
-      description = description.substring(0, 200);
-      result.softDrops.push('description_truncated');
+    const description = rawDescription.trim();
+    if (MARKUP_PATTERN.test(description)) {
+      result.softDrops.push('description');
+      // The previous code always overwrote this, so a refused value must be
+      // deleted rather than merely not assigned: `extractDiscoveryInfo` may
+      // have populated description from the discovery extension, and leaving
+      // that in place would store a value we just refused.
+      delete extracted.description;
+    } else if (description.length > MAX_DESCRIPTION_LENGTH) {
+      extracted.description = description.slice(0, MAX_DESCRIPTION_LENGTH);
+      result.truncations.push('description');
+    } else {
+      extracted.description = description;
     }
-    extracted.description = description;
   }
 
   const rawTags = paymentPayload.resource?.tags;

@@ -18,8 +18,14 @@ try {
     process.exit(1);
   }
 
+  // Dropped and shortened are different fates and get different warnings
+  // (#219): a dropped field is absent from the listing, a truncated one is
+  // present but ends early.
   for (const field of result.softDrops) {
-    console.warn(`Warning: ${field} will be dropped or sanitized by the catalog.`);
+    console.warn(`Warning: ${field} will be dropped by the catalog.`);
+  }
+  for (const field of result.truncations) {
+    console.warn(`Warning: ${field} will be kept but shortened by the catalog.`);
   }
   for (const advisory of result.advisories) {
     console.warn(`Advisory: ${advisory}`);

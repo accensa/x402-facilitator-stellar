@@ -69,6 +69,10 @@ function discoveryETag(catalogVersion, params) {
 import Fastify from 'fastify';
 import compress from '@fastify/compress';
 import { validateForCatalog } from './catalog/validation.js';
+import {
+  encodeExtensionResponses,
+  MAX_EXTENSION_RESPONSES_HEADER_BYTES,
+} from './catalog/extension-responses.js';
 import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
 import { validatePaymentBody, validatePaymentFields } from './request-validation.js';
@@ -585,6 +589,14 @@ export async function createApp(
             outcome.code = 'catalog_success';
           }
 
+          // #219: a shortened description is reported as a truncation, not as a
+          // dropped field, and it does not change the status — nothing was
+          // removed from the listing, so the caller should not be told a field
+          // is missing and then hunt for one that is not.
+          if (validation.truncations.length > 0) {
+            outcome.truncated = [...validation.truncations];
+          }
+
           await rateLimiter.recordCatalog(req);
 
           // Off the hot path. Cataloging must never delay or fail a payment.
@@ -612,10 +624,7 @@ export async function createApp(
         }
       }
 
-      reply.header(
-        'EXTENSION-RESPONSES',
-        Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
-      );
+      writeExtensionResponses(reply, outcome);
     } catch (err) {
       // Cataloging must never fail a payment, so the exception is logged but
       // never re-thrown. It must also never leave the caller without their
@@ -625,14 +634,32 @@ export async function createApp(
       // than silently omitting the header entirely.
       console.error('[Catalog] Unhandled error during processCataloging:', err);
       try {
-        reply.header(
-          'EXTENSION-RESPONSES',
-          Buffer.from(JSON.stringify({ bazaar: { status: 'not attempted' } })).toString('base64'),
-        );
+        writeExtensionResponses(reply, { status: 'not attempted' });
       } catch (headerErr) {
         console.error('[Catalog] Failed to write EXTENSION-RESPONSES fallback:', headerErr);
       }
     }
+  }
+
+  /**
+   * Writes the cataloging outcome as an EXTENSION-RESPONSES header (#202).
+   *
+   * The envelope is bounded by `encodeExtensionResponses`, which sheds free
+   * text rather than emitting a header an intermediary would reject or truncate
+   * — a truncated base64 blob does not decode, which would leave the seller
+   * with no outcome at all. When detail is shed, say so in the log, because a
+   * caller cannot see the difference between a short outcome and a shortened
+   * one.
+   */
+  function writeExtensionResponses(reply, outcome) {
+    const { header, omitted } = encodeExtensionResponses(outcome);
+    if (omitted) {
+      console.warn(
+        `[Catalog] EXTENSION-RESPONSES exceeded ${MAX_EXTENSION_RESPONSES_HEADER_BYTES} bytes; ` +
+          (omitted === 'reason' ? "dropped 'reason' to fit." : 'carried status and code only.'),
+      );
+    }
+    reply.header('EXTENSION-RESPONSES', header);
   }
 
   /**
@@ -1410,7 +1437,14 @@ export async function createApp(
           tool_name: validation.resource.toolName ?? null,
           overwritten: Boolean(existing),
         });
-        return reply.send({ ok: true, resource: entry, softDrops: validation.softDrops });
+        return reply.send({
+          ok: true,
+          resource: entry,
+          softDrops: validation.softDrops,
+          // #219: kept separate from softDrops so a shortened field is never
+          // reported as a missing one.
+          truncations: validation.truncations,
+        });
       } catch (err) {
         console.error(`[Catalog] manual upsert error: ${err.message}`);
         const code = err && err.code ? err.code : 'catalog_error';

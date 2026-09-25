@@ -53,6 +53,7 @@
     "env:check": "node scripts/check-env-doc.mjs",
     "smoke:examples": "node scripts/smoke-examples.mjs",
     "bench": "node scripts/bench-http.mjs",
+    "bench:signer": "node scripts/bench-signer-contention.mjs",
     "eval": "node eval/runner.js",
     "testnet:fund": "node scripts/fund-testnet-accounts.mjs",
     "testnet:usdc": "node scripts/prepare-testnet-usdc.mjs",

@@ -778,3 +778,83 @@ describe('HTTP surface audit: headers carry their contracts', () => {
     }
   });
 });
+
+/**
+ * #202 and #219, over real HTTP.
+ *
+ * The unit tests pin the encoder and the validator; these pin the WIRING —
+ * that a truncated description reaches the wire as `truncated` and not as a
+ * dropped field, that a refused one names the field it refused, and that the
+ * header stays decodable and bounded rather than arriving as a blob a client
+ * cannot parse.
+ */
+describe('HTTP surface audit: description handling is reported honestly over the wire', () => {
+  /** A valid discovery body carrying a description on the resource. */
+  function bodyWithDescription(description) {
+    const body = discoveryBody();
+    body.paymentPayload.resource.description = description;
+    return body;
+  }
+
+  test('a truncated description lands, and is reported as truncated not dropped', async () => {
+    const app = await serve({ catalog: stubCatalog() });
+    try {
+      const res = await app.post('/verify', bodyWithDescription('A'.repeat(300)), AUTH);
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(res.status, 200);
+      const bazaar = decodeExtension(res.headers.get('EXTENSION-RESPONSES'));
+      // The listing is live: nothing was dropped, so the status is not
+      // 'partially landed' and the description is not named as missing.
+      assert.equal(bazaar.status, 'landed');
+      assert.equal(bazaar.code, 'catalog_success');
+      assert.deepEqual(bazaar.truncated, ['description']);
+      assert.equal(bazaar.reason, undefined);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a description containing markup is refused, and the field is named', async () => {
+    const app = await serve({ catalog: stubCatalog() });
+    try {
+      const res = await app.post(
+        '/verify',
+        bodyWithDescription('Hello <script>alert(1)</script> world'),
+        AUTH,
+      );
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(res.status, 200);
+      const bazaar = decodeExtension(res.headers.get('EXTENSION-RESPONSES'));
+      assert.equal(bazaar.status, 'partially landed');
+      assert.equal(bazaar.code, 'catalog_partial');
+      assert.match(bazaar.reason, /description/);
+      // The old internal token must never reach a caller.
+      assert.doesNotMatch(bazaar.reason, /description_truncated/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('the header stays decodable and bounded for a pathological outcome', async () => {
+    // A description far past the limit, and markup, exercise both the
+    // truncation and refusal paths through the real transport. The envelope
+    // must still decode to a documented status.
+    const app = await serve({ catalog: stubCatalog() });
+    try {
+      for (const description of ['B'.repeat(50_000), '<script>'.repeat(5_000)]) {
+        const res = await app.post('/verify', bodyWithDescription(description), AUTH);
+        await new Promise(r => setTimeout(r, 20));
+        assert.equal(res.status, 200);
+        const header = res.headers.get('EXTENSION-RESPONSES');
+        assert.ok(header.length <= 4096, `header was ${header.length} bytes`);
+        const bazaar = decodeExtension(header);
+        assert.ok(
+          ['not attempted', 'landed', 'partially landed', 'rejected'].includes(bazaar.status),
+          `unexpected status ${bazaar.status}`,
+        );
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});
