@@ -587,28 +587,28 @@ export async function createApp(
 
           await rateLimiter.recordCatalog(req);
 
-          // Off the hot path. Cataloging must never delay or fail a payment.
-          Promise.resolve().then(async () => {
-            try {
-              const existing = await catalog.getResource?.(
-                validation.resource.url,
-                validation.resource.toolName ?? null,
-              );
-              await catalog.upsertResource(validation.resource, source);
-              // A public listing being created or overwritten is public state
-              // changing — recorded so a spoofed listing can be investigated
-              // after the fact.
-              audit('catalog_write', {
-                actor: req.keyId ?? `ip:${req.ip}`,
-                source,
-                url: validation.resource.url,
-                tool_name: validation.resource.toolName ?? null,
-                overwritten: Boolean(existing),
-              });
-            } catch (err) {
-              console.warn(`[Catalog] Async cataloging failed: ${err.message}`);
-            }
-          });
+          try {
+            const existing = await catalog.getResource?.(
+              validation.resource.url,
+              validation.resource.toolName ?? null,
+            );
+            await catalog.upsertResource(validation.resource, source);
+            // A public listing being created or overwritten is public state
+            // changing — recorded so a spoofed listing can be investigated
+            // after the fact.
+            audit('catalog_write', {
+              actor: req.keyId ?? `ip:${req.ip}`,
+              source,
+              url: validation.resource.url,
+              tool_name: validation.resource.toolName ?? null,
+              overwritten: Boolean(existing),
+            });
+          } catch (err) {
+            console.warn(`[Catalog] Async cataloging failed: ${err.message}`);
+            outcome.status = 'rejected';
+            outcome.code = err.code ?? 'catalog_error';
+            outcome.reason = err.message;
+          }
         }
       }
 
@@ -637,6 +637,10 @@ export async function createApp(
 
   /**
    * Caller authentication.
+   * Require API key for access (#206).
+   * Supports two Authorization header forms:
+   *  1. `Authorization: Bearer <secret>`
+   *  2. `Authorization: <secret>` (raw secret without scheme prefix)
    *
    * Unset means open. That is the correct default for a free testnet instance —
    * the RFP requires testnet be usable without friction — and it is documented

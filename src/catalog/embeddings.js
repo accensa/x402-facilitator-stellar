@@ -1,4 +1,10 @@
-import { fetch } from 'undici';
+let fetch = globalThis.fetch;
+try {
+  const undici = await import('undici');
+  if (undici.fetch) fetch = undici.fetch;
+} catch (_) {
+  // Use native globalThis.fetch
+}
 
 /** Default outbound timeout for embedding/rerank calls (ms). */
 const DEFAULT_EMBEDDINGS_TIMEOUT_MS = 3000;
