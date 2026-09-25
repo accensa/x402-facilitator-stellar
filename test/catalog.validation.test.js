@@ -62,12 +62,12 @@ test('Hostile Inputs Validation', async t => {
     assert.equal(res.resource.url, 'http://example.com/weather/paris');
   });
 
-  await t.test('Soft drops script in description and truncates', () => {
+  await t.test('Drops a description containing markup rather than stripping it (#217)', () => {
     const payload = {
       x402Version: 2,
       resource: {
         url: 'http://example.com',
-        description: 'Hello <script>alert(1)</script> world! ' + 'A'.repeat(300),
+        description: 'Hello <script>alert(1)</script> world!',
       },
       extensions: {
         bazaar: {
@@ -79,12 +79,110 @@ test('Hostile Inputs Validation', async t => {
     };
     const res = validateForCatalog(payload, baseReq);
     assert.equal(res.hardDrop, false);
-    assert.ok(res.softDrops.includes('description_truncated'));
-    // script tags stripped
-    assert.ok(!res.resource.description.includes('<script>'));
-    // truncated to 200
-    assert.equal(res.resource.description.length, 200);
+    assert.ok(res.softDrops.includes('description'));
+    // Refused, not rewritten: nothing is stored for a consumer to render.
+    assert.equal(res.resource.description, undefined);
   });
+
+  await t.test('Drops entity-encoded markup too, which the old regex let through (#217)', () => {
+    for (const description of [
+      'Click &lt;script&gt;alert(1)&lt;/script&gt; now',
+      'ends with a tag </div>',
+      '<!-- comment -->hidden',
+      '&#60;script&#62;',
+      '&#x3c;script&#x3e;',
+    ]) {
+      const payload = {
+        x402Version: 2,
+        resource: { url: 'http://example.com', description },
+        extensions: {
+          bazaar: {
+            info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+            schema: { type: 'object' },
+            routeTemplate: '/a',
+          },
+        },
+      };
+      const res = validateForCatalog(payload, baseReq);
+      assert.ok(
+        res.softDrops.includes('description'),
+        `expected ${JSON.stringify(description)} to be refused`,
+      );
+      assert.equal(res.resource.description, undefined);
+    }
+  });
+
+  await t.test('Keeps angle brackets that cannot begin markup (#217)', () => {
+    const description = 'Flat rates < 5% per call and > 99.9% uptime';
+    const payload = {
+      x402Version: 2,
+      resource: { url: 'http://example.com', description },
+      extensions: {
+        bazaar: {
+          info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+          schema: { type: 'object' },
+          routeTemplate: '/a',
+        },
+      },
+    };
+    const res = validateForCatalog(payload, baseReq);
+    assert.equal(res.resource.description, description);
+    assert.deepEqual(res.softDrops, []);
+    assert.deepEqual(res.truncations, []);
+  });
+
+  await t.test(
+    'Reports a shortened description as a truncation, not a dropped field (#219)',
+    () => {
+      const payload = {
+        x402Version: 2,
+        resource: {
+          url: 'http://example.com',
+          description: 'A'.repeat(300),
+        },
+        extensions: {
+          bazaar: {
+            info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+            schema: { type: 'object' },
+            routeTemplate: '/a',
+          },
+        },
+      };
+      const res = validateForCatalog(payload, baseReq);
+      assert.equal(res.hardDrop, false);
+      assert.equal(res.resource.description.length, 200);
+      assert.ok(res.truncations.includes('description'));
+      // The field is present and shortened. Reporting it as dropped told the
+      // caller a field had vanished, and leaked 'description_truncated' as if it
+      // were a field name.
+      assert.deepEqual(res.softDrops, []);
+      assert.ok(!res.softDrops.includes('description_truncated'));
+    },
+  );
+
+  await t.test(
+    'A refused description cannot sneak back in via the discovery extension (#217)',
+    () => {
+      // extractDiscoveryInfo populates `description` from resource.description, so
+      // refusing the caller's value has to delete the extracted copy too —
+      // otherwise the refused text is stored by the line that reads it.
+      const payload = {
+        x402Version: 2,
+        resource: { url: 'http://example.com', description: '<img src=x onerror=alert(1)>' },
+        extensions: {
+          bazaar: {
+            info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+            schema: { type: 'object' },
+            routeTemplate: '/a',
+          },
+        },
+      };
+      const res = validateForCatalog(payload, baseReq);
+      assert.ok(res.softDrops.includes('description'));
+      assert.equal(res.resource.description, undefined);
+      assert.ok(!JSON.stringify(res.resource).includes('onerror'));
+    },
+  );
 
   await t.test('Soft drops oversized fields', () => {
     const payload = {

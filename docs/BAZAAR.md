@@ -238,8 +238,50 @@ live listing:
 | `routeTemplate` | A wildcard or malformed-but-not-hostile template (e.g. the bare `*` the stock SDK registers by default). | Provide a concrete template with named parameters. |
 | `serviceName` | Invalid or oversized service name. | A short, plain-text name. |
 | `iconUrl` | Invalid or private-IP URL. | A public HTTPS icon URL. |
-| `description_truncated` | Description contained HTML or exceeded 200 characters. | Short, plain text. |
+| `description` | The description contained markup. | Plain text. Angle brackets that cannot begin markup (`Flat rates < 5%`) are accepted. |
 | `tags_filtered` | Invalid or oversized tags were dropped. | Fewer, well-formed tags. |
+
+A description is **refused, not sanitised**. The catalog does not strip tags:
+a tag-stripping regex is not a security boundary, because a nested or malformed
+sequence defeats it (`<scr<script>ipt>` leaves `<script>` behind) and
+entity-encoded markup (`&lt;script&gt;`) passes through untouched. Text that
+merely looks harmless after a strip can still be markup to whatever renders it
+later, so a description containing anything that could be read as markup is
+dropped whole and named here. The refusal is a property we can assert; a strip
+is not.
+
+### Truncated fields (reported separately from drops)
+
+A field that is kept but *shortened* is not a dropped field, and is not reported
+as one. A description longer than 200 characters is truncated, and the outcome
+carries `truncated: ["description"]` alongside the usual `status`:
+
+```json
+{ "bazaar": { "status": "landed", "code": "catalog_success", "truncated": ["description"] } }
+```
+
+The status stays `landed`: the listing is live and complete apart from a
+description that ends early. `POST /discovery/resources` reports the same thing
+as a top-level `truncations` array, separate from `softDrops`.
+
+This distinction matters because the two were previously conflated — the
+internal token `description_truncated` was reported as a *dropped field*, so a
+seller was told a field had vanished, and left to hunt for one that was present
+the whole time.
+
+### Header size
+
+The envelope is bounded (4096 bytes) before it is written. Every value in it
+comes from the vocabulary documented above, so a healthy envelope is under 200
+bytes; the cap exists so that a caller-derived field added later cannot push the
+header past what an intermediary will accept. A header that is rejected or
+truncated is worse than a short one, because truncated base64 does not decode at
+all and the seller is left with no outcome.
+
+If free text has to be shed to fit, `reason` is dropped, `detail_omitted: true`
+is set, and the server logs it. If the envelope still does not fit, only
+`status` and `code` are carried, with `code: "extension_response_omitted"`. The
+status is never lost: a seller always learns whether their listing landed.
 
 The codes above are extracted from `src/catalog/validation.js` and
 `src/app.js`, and `test/extension-responses-doc.test.js` fails if a code is

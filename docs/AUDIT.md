@@ -64,10 +64,10 @@ An auditor should attempt to break the following invariants:
 2. A single request cannot consume more than `MAX_TX_FEE_STROOPS` in sponsored fees.
 3. Replayed or duplicated `verify` / `settle` payloads are rejected.
 4. API keys cannot be bypassed or brute-forced via timing attacks.
-5. Catalog entries cannot contain cross-site scripting (XSS) payloads or path traversals.
+5. Catalog entries cannot contain cross-site scripting (XSS) payloads or path traversals. Markup in a description is **refused, not stripped** (#217): a tag-stripping regex is defeatable by nested or malformed sequences and blind to entity-encoded markup, so what it left behind could still be markup to a consumer. Nothing that could be read as markup is stored at all.
 
 ## Known Issues and Accepted Risks
-- **Single Signer Contention:** Currently, only a single signer is used. Under high load, sequence number contention may occur. This is an accepted risk for this conformance spike.
+- **Single Signer Contention:** Currently, only a single signer is used, and settlements on one account serialize. For the modelled default this is a ceiling of **3.2 settlements/sec (192/min)**, reached at **8 concurrent in-flight settlements** — past that, throughput is flat and queue depth grows without bound. This is an accepted risk for this conformance spike; the numbers and the model behind them are in [OPERATIONS.md](./OPERATIONS.md#where-a-single-signer-stops-keeping-up-203), and `scripts/bench-signer-contention.mjs` reproduces them.
 - **RPC Outage Dependency:** The service will fail if the upstream Stellar RPC goes down.
 - **Database Access:** Operators with physical access to the DB can view settlement history up to the retention limit.
 

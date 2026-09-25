@@ -66,6 +66,13 @@ cataloguing outcome. Verified over real HTTP (see
 | rejected | `{ "bazaar": { "status": "rejected", "code": "catalog_rate_limited" | "invalid_routeTemplate" | … } }` | hard drop (hostile routeTemplate, invalid schema) or catalog write rate-limited |
 | not attempted | `{ "bazaar": { "status": "not attempted" } }` | no discovery extension, or (post-F2) a malformed extension that previously dropped the header |
 
+A shortened field is reported by the envelope's `truncated` array and does not
+change the status (a truncated description still yields `landed`), and the
+envelope is size-bounded before it is written — free text is shed down to
+`{ "status", "code" }` rather than emitting a header an intermediary would
+truncate, because truncated base64 does not decode. Both are documented in
+[BAZAAR.md](./BAZAAR.md#truncated-fields-reported-separately-from-drops).
+
 ## Headers, per route
 
 - **`RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset`**: set on

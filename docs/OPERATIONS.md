@@ -143,7 +143,7 @@ Prometheus text format, unauthenticated. By default it is served on `PORT`; set 
 | `x402_settlements_total` | counter | `network`, `outcome` (`settled`/`failed`) | settlement success rate | alert if `outcome="failed"` rate > 1% over 10m |
 | `x402_settlement_fee_stroops` | histogram | `network` | **actual fee paid** — the number that shows whether `MAX_TX_FEE_STROOPS` is sane | alert if p95 fee approaches `MAX_TX_FEE_STROOPS` (fee ceiling about to throttle settlements) |
 | `x402_rpc_retries_total` | counter | `code`, `host` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
-| `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert if it sits at ≥ 1 persistently or climbs (signer pool needed before bursty traffic) |
+| `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert at or above the measured knee (see [Where a single signer stops keeping up](#where-a-single-signer-stops-keeping-up-203)); past it a signer's queue only grows |
 | `active_verifications` | gauge | none | process-wide number of verification calls waiting on Stellar Horizon | HPA target is 5 average active verifications per pod |
 
 Operational endpoints (`/metrics`, `/healthz`, `/health/ready`) are logged but excluded from `x402_requests_total` so the payment counters stay semantically about payments.
@@ -151,6 +151,27 @@ Operational endpoints (`/metrics`, `/healthz`, `/health/ready`) are logged but e
 ## Multi-Signer Pool Management (#9)
 
 Agent payment traffic is naturally bursty. When multiple settlement requests arrive concurrently, submitting them using a single Stellar account causes sequence-number contention and transaction serialization. To achieve higher throughput, configure a multi-signer pool.
+
+### Where a single signer stops keeping up (#203)
+
+A Stellar account signs with strictly increasing sequence numbers, so settlements on one signer serialize: at most `sequenceWindow` submissions can be in flight against the account before the next must wait for a confirmation. Offered concurrency above that window buys no throughput — it only queues, and the queue never drains.
+
+`npm run bench:signer` (`scripts/bench-signer-contention.mjs`) sweeps offered concurrency and reports the shape and the numbers:
+
+| Modelled input | Default | Where it comes from |
+|---|---|---|
+| `sequenceWindow` | 8 | How many submissions one account keeps in flight. **The free parameter** — the ceiling scales linearly with it, and this repo does not control or observe it. |
+| `submitMs` | 2500 | One submission round trip. Anchored on the 5s settlement latency this document already uses for pool sizing, halved because a round trip is one attempt, not a whole settlement. |
+| `sloMs` | 2000 | The `/verify` and `/settle` p95 alert above. |
+
+At the defaults the single-signer ceiling is **3.2 settlements/sec (192/min)**, reached at **8 concurrent in-flight settlements** — the knee is the window, which is the whole content of the result. Above it, throughput is flat and queue depth grows without bound; that instability, not a larger steady-state latency, is what oversubscription actually produces.
+
+**This is a model, not a Stellar measurement.** The number is a property of the window and the round trip above, and it moves linearly with the window. It is useful for the two things it pins down — the shape, and the alert threshold — not as a network constant. When the sweep never oversubscribes the window, the harness reports no knee rather than the largest value it tried.
+
+Two consequences worth acting on:
+
+- **Alert on the knee, not on `≥ 1`.** A single concurrent settlement is normal; the signal that matters is `x402_signer_inflight` at or above 8 on any one signer, meaning that signer is oversubscribed and its queue is growing.
+- **The `/settle` p95 alert and the pool-sizing latency disagree.** Pool sizing uses a 5s settlement latency while the latency alert fires above 2s. One modelled round trip is already 2500ms, so `/settle` cannot meet a 2s p95 at any concurrency. Reconcile the two before treating either as an SLO.
 
 ### Sizing the Pool
 
