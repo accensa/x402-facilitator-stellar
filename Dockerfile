@@ -21,6 +21,15 @@ USER facilitator
 
 COPY --from=builder /app/src ./src
 
+# #211: scripts/ and migrations/ ship in the image. The documented container
+# entrypoint is `node scripts/db-migrate.js up && node src/server.js` (see
+# docs/DEPLOYMENT.md), and scripts/db-migrate.js resolves `../migrations`
+# relative to its own location. Without both directories the image starts and
+# serves, but can never provision or migrate its own schema — every migration
+# command in the deployment runbook fails on a missing path.
+COPY --chown=facilitator:facilitator scripts/ ./scripts/
+COPY --chown=facilitator:facilitator migrations/ ./migrations/
+
 # HEALTHCHECK is a LIVENESS probe, so it targets /healthz, not /health/ready.
 # /health/ready can fail on a downstream Soroban RPC outage; failing the
 # Docker-level check on that would restart-loop the container and make the

@@ -1,6 +1,26 @@
 import { createInterface } from 'readline';
 
 /**
+ * Protocol revisions this server will negotiate, oldest first (#169).
+ *
+ * Every one of them is a *handshake-era* revision: the client names a version
+ * in `initialize` and the server answers with the revision the connection will
+ * use. The tool surface this server implements (`initialize`, `tools/list`,
+ * `tools/call`, `ping`) is unchanged across them, so echoing the client's
+ * revision is an honest claim rather than an optimistic one. The modern
+ * (no-handshake) era is out of scope here: those clients never send
+ * `initialize`, and a server for them would be a different transport.
+ *
+ * Extend this list in one place — the initialize handler reads it, and so do
+ * the tests and docs/MCP.md.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
+
+/** Newest handshake-era revision: the counter-offer for anything else. */
+export const LATEST_PROTOCOL_VERSION =
+  SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
+
+/**
  * Minimal MCP Stdio Server.
  *
  * Speaks newline-delimited JSON-RPC 2.0 over stdin/stdout, as the MCP stdio
@@ -152,8 +172,22 @@ export class McpServer {
 
   async _handleRequest(req) {
     if (req.method === 'initialize') {
+      // #169: negotiate rather than hardcode. The client names the revision it
+      // wants; per the spec the server answers with that same revision when it
+      // supports it, and otherwise counter-offers one it does support (the
+      // newest handshake-era revision) for the client to accept or refuse.
+      // `null` is used for "the client named a version we do not implement" so
+      // a counter-offer is never mistaken for agreement.
+      const requested = req.params?.protocolVersion;
+      const agreed = SUPPORTED_PROTOCOL_VERSIONS.find(v => v === requested) ?? null;
+      if (requested !== undefined && !agreed) {
+        this.logger.warn?.(
+          `mcp: client requested unsupported protocol version ${JSON.stringify(requested)}; ` +
+            `answering with ${LATEST_PROTOCOL_VERSION} (supported: ${SUPPORTED_PROTOCOL_VERSIONS.join(', ')})`,
+        );
+      }
       this._sendResult(req.id, {
-        protocolVersion: '2024-11-05',
+        protocolVersion: agreed ?? LATEST_PROTOCOL_VERSION,
         serverInfo: { name: this.name, version: this.version },
         capabilities: { tools: {} },
       });
