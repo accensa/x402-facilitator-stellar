@@ -99,11 +99,46 @@ function isSendTransaction(input, init) {
 }
 
 /**
+ * Calculates exponential backoff with bounded jitter.
+ *
+ * @param {number} attempt - current 1-based attempt index (1 for the first failure)
+ * @param {object} [options]
+ * @param {number} [options.baseDelayMs] - base delay in milliseconds (default 800)
+ * @param {number} [options.maxDelayMs] - maximum delay cap (default 10_000)
+ * @param {boolean|number} [options.jitter] - whether to add jitter, or a specific max jitter value (default true)
+ * @param {number} [options.maxJitterMs] - upper bound for jitter addition (default 1_000)
+ * @param {() => number} [options.random] - RNG returning [0, 1) (default Math.random)
+ * @returns {number} total delay in milliseconds
+ */
+export function calculateBackoff(
+  attempt,
+  {
+    baseDelayMs = 800,
+    maxDelayMs = 10_000,
+    jitter = true,
+    maxJitterMs = 1_000,
+    random = Math.random,
+  } = {},
+) {
+  const expDelay = Math.min(maxDelayMs, baseDelayMs * 2 ** (Math.max(1, attempt) - 1));
+  if (!jitter) {
+    return expDelay;
+  }
+  const jitterBound = typeof jitter === 'number' ? jitter : Math.min(expDelay, maxJitterMs);
+  const jitterVal = jitterBound > 0 ? Math.floor(random() * jitterBound) : 0;
+  return Math.min(maxDelayMs, expDelay + jitterVal);
+}
+
+/**
  * Installs the retrying, breaker-aware wrapper over the global fetch.
  *
  * @param {object} [options]
  * @param {number} [options.attempts] - total attempts including the first
- * @param {number} [options.baseDelayMs] - linear backoff step
+ * @param {number} [options.baseDelayMs] - base exponential backoff step (ms)
+ * @param {number} [options.maxDelayMs] - maximum delay cap for backoff (ms)
+ * @param {number} [options.maxJitterMs] - upper bound for jitter added to backoff (ms)
+ * @param {boolean|number} [options.jitter] - whether to add bounded jitter (or a fixed max jitter)
+ * @param {number} [options.deadlineMs] - overall deadline for the entire retry loop (ms)
  * @param {number} [options.threshold] - consecutive connection failures per
  *   host before the breaker opens. Deliberately high default: opening too
  *   eagerly on a slow-but-working RPC is worse than a few slow failures.
@@ -111,15 +146,22 @@ function isSendTransaction(input, init) {
  *   letting a single probe through (half-open)
  * @param {(msg: string) => void} [options.log]
  * @param {(msg: string) => void} [options.onStateChange]
- * @param {(info: { code: string|undefined, attempt: number, host: string, url: string }) => void} [options.onRetry]
+ * @param {(info: { code: string|undefined, attempt: number, host: string, url: string, delay?: number }) => void} [options.onRetry]
  *   structured hook for observability — feeds x402_rpc_retries_total from the
  *   metrics layer rather than parsing a log string.
+ * @param {() => number} [options.random] - RNG returning [0, 1) (defaults to Math.random)
+ * @param {() => number} [options.now] - timestamp getter (defaults to Date.now)
+ * @param {(ms: number) => Promise<void>} [options.sleep] - sleep helper (defaults to setTimeout promise)
  * @returns {{ getBreakerStates: Function }} readable breaker state, surfaced
  *   on the readiness endpoint (issue #100)
  */
 export function installRpcRetry({
   attempts = 5,
-  baseDelayMs = 800,
+  baseDelayMs = Number(process.env.RPC_RETRY_BASE_DELAY_MS ?? 800),
+  maxDelayMs = Number(process.env.RPC_RETRY_MAX_DELAY_MS ?? 10_000),
+  maxJitterMs = Number(process.env.RPC_RETRY_MAX_JITTER_MS ?? 1_000),
+  deadlineMs = Number(process.env.RPC_RETRY_DEADLINE_MS ?? 30_000),
+  jitter = true,
   threshold = Number(process.env.RPC_BREAKER_THRESHOLD ?? 10),
   cooldownMs = Number(process.env.RPC_BREAKER_COOLDOWN_MS ?? 30_000),
   log = () => {},
@@ -127,6 +169,9 @@ export function installRpcRetry({
   onRetry = () => {},
   forceIpv4,
   rpcForceIpv4,
+  random = Math.random,
+  now = Date.now,
+  sleep = ms => new Promise(r => setTimeout(r, ms)),
 } = {}) {
   const builtinFetch = globalThis.fetch;
   const effectiveForceIpv4 = rpcForceIpv4 ?? forceIpv4 ?? process.env.RPC_FORCE_IPV4 !== 'false';
@@ -224,8 +269,19 @@ export function installRpcRetry({
       throw new RpcBreakerOpenError(host);
     }
 
+    const effectiveDeadlineMs = init?.deadlineMs ?? deadlineMs;
+    const startTime = now();
+    const deadline =
+      effectiveDeadlineMs && effectiveDeadlineMs > 0 && Number.isFinite(effectiveDeadlineMs)
+        ? startTime + effectiveDeadlineMs
+        : Infinity;
+
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (attempt > 1 && now() >= deadline) {
+        break;
+      }
+
       try {
         const res = await call(input, init);
         recordSuccess(b, host);
@@ -238,10 +294,28 @@ export function installRpcRetry({
         }
         lastError = err;
         recordFailure(b, host);
+
+        const currentTime = now();
+        if (currentTime >= deadline) {
+          break;
+        }
+
+        const delay = calculateBackoff(attempt, {
+          baseDelayMs,
+          maxDelayMs,
+          jitter,
+          maxJitterMs,
+          random,
+        });
+
+        if (currentTime + delay > deadline) {
+          break;
+        }
+
         const url = typeof input === 'string' ? input : (input?.url ?? '');
         log(`rpc ${code} on ${url} — retry ${attempt}/${attempts - 1}`);
-        onRetry({ code, attempt, host, url });
-        await new Promise(r => setTimeout(r, baseDelayMs * attempt));
+        onRetry({ code, attempt, host, url, delay });
+        await sleep(delay);
       }
     }
     // The final failure of the loop also counts toward the breaker: it is as
