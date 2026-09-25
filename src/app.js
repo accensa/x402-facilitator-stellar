@@ -587,28 +587,28 @@ export async function createApp(
 
           await rateLimiter.recordCatalog(req);
 
-          try {
-            const existing = await catalog.getResource?.(
-              validation.resource.url,
-              validation.resource.toolName ?? null,
-            );
-            await catalog.upsertResource(validation.resource, source);
-            // A public listing being created or overwritten is public state
-            // changing — recorded so a spoofed listing can be investigated
-            // after the fact.
-            audit('catalog_write', {
-              actor: req.keyId ?? `ip:${req.ip}`,
-              source,
-              url: validation.resource.url,
-              tool_name: validation.resource.toolName ?? null,
-              overwritten: Boolean(existing),
-            });
-          } catch (err) {
-            console.warn(`[Catalog] Async cataloging failed: ${err.message}`);
-            outcome.status = 'rejected';
-            outcome.code = err.code ?? 'catalog_error';
-            outcome.reason = err.message;
-          }
+          // Off the hot path. Cataloging must never delay or fail a payment.
+          Promise.resolve().then(async () => {
+            try {
+              const existing = await catalog.getResource?.(
+                validation.resource.url,
+                validation.resource.toolName ?? null,
+              );
+              await catalog.upsertResource(validation.resource, source);
+              // A public listing being created or overwritten is public state
+              // changing — recorded so a spoofed listing can be investigated
+              // after the fact.
+              audit('catalog_write', {
+                actor: req.keyId ?? `ip:${req.ip}`,
+                source,
+                url: validation.resource.url,
+                tool_name: validation.resource.toolName ?? null,
+                overwritten: Boolean(existing),
+              });
+            } catch (err) {
+              console.warn(`[Catalog] Async cataloging failed: ${err.message}`);
+            }
+          });
         }
       }
 
@@ -1170,6 +1170,8 @@ export async function createApp(
                   event,
                 );
 
+                await processCataloging(req, body, reply, 'settle');
+
                 if (
                   !enqueued.atomicallyEnqueued &&
                   enqueued.event &&
@@ -1240,10 +1242,6 @@ export async function createApp(
           const result = await Promise.race([resultPromise, timeoutPromise]).finally(() => {
             clearTimeout(timeoutTimer);
           });
-
-          if (result && result.success) {
-            await processCataloging(req, body, reply, 'settle');
-          }
           return reply.send(result);
         } catch (err) {
           // SettleResponse requires `transaction` and `network` even on failure, so

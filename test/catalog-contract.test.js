@@ -91,10 +91,10 @@ export function runCatalogStoreContractSuite(name, createStore) {
 }
 
 // Instantiate contract suite for MemoryCatalogStore
-runCatalogStoreContractSuite('MemoryCatalogStore', async opts => new MemoryCatalogStore(opts));
+runCatalogStoreContractSuite('MemoryCatalogStore', async (opts) => new MemoryCatalogStore(opts));
 
 // Instantiate contract suite for PostgresCatalogStore (in-memory degraded/fallback mode when no DB pool)
 runCatalogStoreContractSuite(
   'PostgresCatalogStore (degraded)',
-  async opts => new PostgresCatalogStore(opts),
+  async (opts) => new PostgresCatalogStore(opts),
 );
