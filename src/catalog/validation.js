@@ -21,7 +21,7 @@ function isHostileRouteTemplate(value) {
   } catch {
     return true;
   }
-  return decoded.includes('..') || decoded.includes('://');
+  return decoded.includes('..') || decoded.includes('://') || decoded.includes('\\');
 }
 
 function createResult() {
@@ -61,7 +61,17 @@ function addAdvisories(result, declaration) {
 }
 
 function validatePolicy(paymentPayload, paymentRequirements, result) {
-  const extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
+  let extracted;
+  try {
+    extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
+  } catch (err) {
+    result.hardDrop = true;
+    result.reason =
+      err?.code === 'ERR_INVALID_URL' || err?.message?.includes('Invalid URL')
+        ? 'invalid_url'
+        : 'missing_or_invalid_discovery_extension';
+    return result;
+  }
   if (!extracted) {
     result.hardDrop = true;
     result.reason = 'missing_or_invalid_discovery_extension';
@@ -183,7 +193,20 @@ export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
     return result;
   }
 
-  if (input.paymentPayload && input.paymentRequirements) {
+  if (
+    Object.prototype.hasOwnProperty.call(input, 'paymentPayload') ||
+    Object.prototype.hasOwnProperty.call(input, 'paymentRequirements')
+  ) {
+    if (!input.paymentPayload || typeof input.paymentPayload !== 'object') {
+      result.hardDrop = true;
+      result.reason = 'missing_or_invalid_discovery_extension';
+      return result;
+    }
+    if (!input.paymentRequirements || typeof input.paymentRequirements !== 'object') {
+      result.hardDrop = true;
+      result.reason = 'invalid_declaration';
+      return result;
+    }
     return validatePolicy(input.paymentPayload, input.paymentRequirements, result);
   }
 
