@@ -23,7 +23,7 @@
  */
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { installRpcRetry, RpcBreakerOpenError } from '../src/rpc-retry.js';
+import { installRpcRetry, RpcBreakerOpenError, calculateBackoff } from '../src/rpc-retry.js';
 import { transportError, scriptedFetch, failingFetch } from './helpers/rpc-fetch.js';
 import { requestState } from '../src/request-state.js';
 
@@ -279,6 +279,256 @@ describe('error surfacing', () => {
     assert.ok(
       states.some(s => /open/.test(s) && /rpc\.invalid/.test(s)),
       'the exhausted last attempt must open the breaker',
+    );
+  });
+});
+
+describe('backoff progression and jitter', () => {
+  test('calculateBackoff produces exponential progression without jitter', () => {
+    const baseDelayMs = 100;
+    const maxDelayMs = 2000;
+    assert.equal(calculateBackoff(1, { baseDelayMs, maxDelayMs, jitter: false }), 100);
+    assert.equal(calculateBackoff(2, { baseDelayMs, maxDelayMs, jitter: false }), 200);
+    assert.equal(calculateBackoff(3, { baseDelayMs, maxDelayMs, jitter: false }), 400);
+    assert.equal(calculateBackoff(4, { baseDelayMs, maxDelayMs, jitter: false }), 800);
+    assert.equal(calculateBackoff(5, { baseDelayMs, maxDelayMs, jitter: false }), 1600);
+    assert.equal(calculateBackoff(6, { baseDelayMs, maxDelayMs, jitter: false }), 2000);
+  });
+
+  test('calculateBackoff respects maxDelayMs cap even with jitter', () => {
+    const maxDelayMs = 500;
+    const delay = calculateBackoff(5, {
+      baseDelayMs: 200,
+      maxDelayMs,
+      jitter: true,
+      random: () => 0.99,
+    });
+    assert.equal(delay, 500);
+  });
+
+  test('calculateBackoff bounds jitter between expDelay and expDelay + jitterBound', () => {
+    const baseDelayMs = 200;
+    const maxJitterMs = 100;
+    // With random returning 0
+    const minDelay = calculateBackoff(1, {
+      baseDelayMs,
+      maxJitterMs,
+      jitter: true,
+      random: () => 0,
+    });
+    assert.equal(minDelay, 200);
+
+    // With random returning 0.5
+    const midDelay = calculateBackoff(1, {
+      baseDelayMs,
+      maxJitterMs,
+      jitter: true,
+      random: () => 0.5,
+    });
+    assert.equal(midDelay, 250);
+
+    // With random returning ~1
+    const maxDelay = calculateBackoff(1, {
+      baseDelayMs,
+      maxJitterMs,
+      jitter: true,
+      random: () => 0.999,
+    });
+    assert.equal(maxDelay, 299);
+  });
+
+  test('installRpcRetry applies exponential backoff delays to sleep', async () => {
+    const delays = [];
+    const stub = scriptedFetch(
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+      new Response('recovered'),
+    );
+    globalThis.fetch = stub;
+
+    installFast({
+      attempts: 4,
+      baseDelayMs: 50,
+      jitter: false,
+      sleep: ms => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    });
+
+    const res = await globalThis.fetch('http://rpc.invalid');
+    assert.equal(await res.text(), 'recovered');
+    assert.equal(stub.calls, 4);
+    assert.deepEqual(delays, [50, 100, 200]);
+  });
+
+  test('installRpcRetry surfaces delay on structured onRetry hook', async () => {
+    const retries = [];
+    const stub = scriptedFetch(
+      transportError('ETIMEDOUT'),
+      transportError('ECONNRESET'),
+      new Response('ok'),
+    );
+    globalThis.fetch = stub;
+
+    installFast({
+      attempts: 3,
+      baseDelayMs: 100,
+      jitter: false,
+      sleep: () => Promise.resolve(),
+      onRetry: info => retries.push(info),
+    });
+
+    await globalThis.fetch('http://rpc.invalid/soroban');
+    assert.equal(retries.length, 2);
+    assert.equal(retries[0].delay, 100);
+    assert.equal(retries[1].delay, 200);
+  });
+});
+
+describe('deadline enforcement and error propagation', () => {
+  test('overall deadline terminates retries early before exhausting attempts', async () => {
+    const stub = scriptedFetch(
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+      new Response('never reached'),
+    );
+    globalThis.fetch = stub;
+
+    let mockTime = 1000;
+    installFast({
+      attempts: 5,
+      baseDelayMs: 100,
+      deadlineMs: 250,
+      jitter: false,
+      now: () => mockTime,
+      sleep: ms => {
+        mockTime += ms;
+        return Promise.resolve();
+      },
+    });
+
+    await assert.rejects(
+      () => globalThis.fetch('http://rpc.invalid'),
+      err => {
+        assert.equal(err.code, 'ETIMEDOUT');
+        return true;
+      },
+    );
+    assert.equal(stub.calls, 2, 'retries stopped when next backoff would exceed overall deadline');
+  });
+
+  test('deadline expiration rethrows exact original error with code intact', async () => {
+    const boom = transportError('ECONNREFUSED');
+    const stub = scriptedFetch(boom, boom, boom);
+    globalThis.fetch = stub;
+
+    let mockTime = 0;
+    installFast({
+      attempts: 4,
+      baseDelayMs: 50,
+      deadlineMs: 30,
+      jitter: false,
+      now: () => mockTime,
+      sleep: ms => {
+        mockTime += ms;
+        return Promise.resolve();
+      },
+    });
+
+    await assert.rejects(
+      () => globalThis.fetch('http://rpc.invalid'),
+      err => {
+        assert.equal(err, boom, 'propagated error must be the exact original error');
+        assert.equal(err.code, 'ECONNREFUSED');
+        return true;
+      },
+    );
+    assert.equal(stub.calls, 1, 'cannot retry when backoff exceeds deadline immediately');
+  });
+
+  test('per-request deadline in init overrides default deadlineMs', async () => {
+    const stub = scriptedFetch(
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+      transportError('ETIMEDOUT'),
+    );
+    globalThis.fetch = stub;
+
+    let mockTime = 0;
+    installFast({
+      attempts: 5,
+      baseDelayMs: 50,
+      deadlineMs: 10_000,
+      jitter: false,
+      now: () => mockTime,
+      sleep: ms => {
+        mockTime += ms;
+        return Promise.resolve();
+      },
+    });
+
+    await assert.rejects(
+      () => globalThis.fetch('http://rpc.invalid', { deadlineMs: 40 }),
+      /simulated ETIMEDOUT/,
+    );
+    assert.equal(stub.calls, 1, 'per-request deadline was enforced');
+  });
+
+  test('ordinary attempts receive an AbortSignal bound to remaining deadline', async () => {
+    let capturedInit;
+    const stub = async (input, init) => {
+      capturedInit = init;
+      return new Response('ok');
+    };
+    globalThis.fetch = stub;
+
+    installFast({ deadlineMs: 5000 });
+    await globalThis.fetch('http://rpc.invalid');
+
+    assert.ok(capturedInit?.signal, 'ordinary attempt must receive a deadline signal');
+    assert.equal(capturedInit.signal.aborted, false);
+  });
+
+  test('sendTransaction calls are protected and do not receive a deadline signal', async () => {
+    let capturedInit;
+    const stub = async (input, init) => {
+      capturedInit = init;
+      return new Response('ok');
+    };
+    globalThis.fetch = stub;
+
+    installFast({ deadlineMs: 5000 });
+    await globalThis.fetch('http://rpc.invalid', {
+      method: 'POST',
+      body: JSON.stringify({ method: 'sendTransaction' }),
+    });
+
+    assert.equal(
+      capturedInit?.signal,
+      undefined,
+      'sendTransaction must remain un-aborted and receive no synthetic deadline signal',
+    );
+  });
+
+  test('retryable errors are recorded toward breaker exactly once per attempt', async () => {
+    const stub = scriptedFetch(transportError('ETIMEDOUT'), transportError('ETIMEDOUT'));
+    globalThis.fetch = stub;
+
+    const handle = installFast({
+      attempts: 2,
+      threshold: 5,
+    });
+
+    await assert.rejects(() => globalThis.fetch('http://rpc.invalid'), /simulated ETIMEDOUT/);
+    const state = handle.getBreakerStates()['http://rpc.invalid'];
+    assert.equal(
+      state.consecutive_failures,
+      2,
+      'two failed attempts must increment consecutive_failures by exactly 2',
     );
   });
 });
