@@ -47,8 +47,19 @@ export class MemoryCatalogStore {
     this.verifyTtlMs = config.catalogVerifyTtlMs ?? 24 * 60 * 60 * 1000;
     this.embeddingClient = new EmbeddingClient(config.embeddingsUrl, {
       timeoutMs: config.embeddingsTimeoutMs,
+      rerankUrl: config.rerankUrl,
     });
-    this.enableReranking = config.enableReranking;
+    // Reranking needs a real endpoint (#170): the flag on its own used to fall
+    // back to a guessed `${EMBEDDINGS_URL}/rerank` path that no provider serves,
+    // so "reranking enabled" and "reranking happening" were different things.
+    // resolveConfig refuses that combination in a real deployment; a store built
+    // directly (tests, the eval harness) degrades loudly instead of silently.
+    this.enableReranking = Boolean(config.enableReranking && config.rerankUrl);
+    if (config.enableReranking && !config.rerankUrl) {
+      console.warn(
+        '[Catalog] ENABLE_RERANKING is on but no RERANK_URL is configured — reranking stays off and results are served in fused order',
+      );
+    }
     // Track in-flight background embedding promises so callers can await
     // all of them via flush() instead of relying on a hardcoded sleep.
     this._pendingEmbeddings = new Set();
@@ -361,6 +372,10 @@ export class MemoryCatalogStore {
 
     let paginatedItems = combinedItems.slice(startIndex, startIndex + limit).map(s => s.item);
 
+    // Second pass over the page only — reranking reorders the fused page, it
+    // never adds candidates (#170). The client returns the page unchanged when
+    // the provider is unconfigured, down, or answers with something other than
+    // the documented contract, and logs why in each of those cases.
     if (this.enableReranking && paginatedItems.length > 0) {
       paginatedItems = await this.embeddingClient.rerank(params.query, paginatedItems);
     }

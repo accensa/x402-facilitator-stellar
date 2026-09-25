@@ -258,6 +258,27 @@ export function resolveConfig(env = process.env) {
     .map(o => o.trim())
     .filter(Boolean);
 
+  /**
+   * Reranking requires an explicit endpoint (#170).
+   *
+   * `ENABLE_RERANKING=true` with no `RERANK_URL` is the configuration that made
+   * search quality unmeasurable: the code guessed `${EMBEDDINGS_URL}/rerank` — a
+   * path no rerank provider serves — and treated every failure as "carry on in
+   * fused order". An instance that believes it is reranking and is not is worse
+   * than one that never claimed to, so this fails at boot, where it costs a
+   * restart, instead of silently at query time.
+   */
+  const rerankUrl = env.RERANK_URL?.trim() || null;
+  if (env.ENABLE_RERANKING === 'true' && !rerankUrl) {
+    throw new Error(
+      'ENABLE_RERANKING=true but RERANK_URL is unset. RERANK_URL is the full URL of the ' +
+        'rerank endpoint (nothing is inferred from EMBEDDINGS_URL). Set it, or unset ENABLE_RERANKING.',
+    );
+  }
+  if (rerankUrl && !/^https?:\/\//i.test(rerankUrl)) {
+    throw new Error(`RERANK_URL must be an absolute http(s) URL, got "${rerankUrl}".`);
+  }
+
   return {
     port: parsePositiveInt(env.PORT, { name: 'PORT', defaultValue: 3402, min: 1, max: 65535 }),
 
@@ -453,6 +474,16 @@ export function resolveConfig(env = process.env) {
      * money, so a listing it creates must not live forever.
      */
     catalogVerifyTtlMs: Number(env.CATALOG_VERIFY_TTL_MS ?? 24 * 60 * 60 * 1000),
+
+    /**
+     * Cross-encoder rerank endpoint (#170). A FULL URL to a rerank service —
+     * deliberately not derived from EMBEDDINGS_URL: the previous code POSTed to
+     * `${EMBEDDINGS_URL}/rerank`, a path invented for a hypothetical provider,
+     * and swallowed every failure. Unset means no reranking; set it and
+     * ENABLE_RERANKING=true to run the second pass. The accepted request and
+     * response shapes are documented in docs/BAZAAR.md.
+     */
+    rerankUrl,
     enableReranking: env.ENABLE_RERANKING === 'true',
 
     /**

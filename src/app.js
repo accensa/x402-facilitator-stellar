@@ -716,35 +716,59 @@ export async function createApp(
     return handleRateLimit(reply, checkResult);
   }
 
-  function handleRateLimit(reply, checkResult) {
-    if (checkResult) {
-      reply.header('RateLimit-Limit', checkResult.limit);
-      reply.header('RateLimit-Remaining', checkResult.remaining);
-      reply.header('RateLimit-Reset', checkResult.resetAt);
-      if (!checkResult.allowed) {
-        reply.header(
-          'Retry-After',
-          Math.max(1, checkResult.resetAt - Math.floor(Date.now() / 1000)),
-        );
-        return reply.code(429).send({
-          isValid: false,
-          invalidReason: 'rate_limited',
-          invalidMessage: checkResult.reason,
-          reason: checkResult.reason,
-        });
-      }
+  /**
+   * The ONE place RateLimit-* headers are written and the ONE place a 429 is
+   * sent (#209).
+   *
+   * Two things went wrong when this logic was spread over two wrappers
+   * (`rejectRateLimited` and `applyRateLimitHead`) with eight call sites:
+   *
+   *   1. A request could reach the header logic twice — once from the
+   *      pre-record check and again from the post-record state — so the
+   *      advertised remaining was written, overwritten and re-derived per
+   *      request instead of being decided once.
+   *   2. The post-record call sites discarded the return value. When the
+   *      limiter's post-record state is a refusal, that reply IS the response;
+   *      ignoring it and carrying on to `reply.send(...)` is a double send, and
+   *      Fastify answers a double send with a 500 — the caller gets neither the
+   *      allowed response nor the 429.
+   *
+   * So: exactly one call per request path, and the caller MUST honour the
+   * result —
+   *
+   *   const limited = handleRateLimit(reply, recorded, check);
+   *   if (limited) return limited;
+   *
+   * `states` are candidate limiter states in preference order. The first one
+   * with a finite `remaining` wins, which is the post-record state when the
+   * limiter returns one (#141: it reflects this request already counted) and
+   * the pre-record check when it does not (a limiter whose record call returns
+   * nothing). A state that is itself null is skipped, so passing both is safe.
+   *
+   * @returns {object|null} the reply when this call answered (a 429 was sent),
+   *   null when the caller may continue.
+   */
+  function handleRateLimit(reply, ...states) {
+    const state =
+      states.find(candidate => candidate && Number.isFinite(candidate.remaining)) ??
+      states.find(candidate => candidate != null) ??
+      null;
+    if (!state) return null;
+
+    reply.header('RateLimit-Limit', state.limit);
+    reply.header('RateLimit-Remaining', state.remaining);
+    reply.header('RateLimit-Reset', state.resetAt);
+
+    if (!state.allowed) {
+      reply.header('Retry-After', Math.max(1, state.resetAt - Math.floor(Date.now() / 1000)));
+      return reply.code(429).send({
+        isValid: false,
+        invalidReason: 'rate_limited',
+        invalidMessage: state.reason,
+        reason: state.reason,
+      });
     }
     return null;
-  }
-
-  /**
-   * Prefer the limiter state returned by a record call (which reflects the
-   * current request already being counted) for the RateLimit-* headers, falling
-   * back to the pre-record check if a limiter library does not return state.
-   */
-  function applyRateLimitHead(reply, recorded, check) {
-    if (recorded && Number.isFinite(recorded.remaining)) return handleRateLimit(reply, recorded);
-    return handleRateLimit(reply, check);
   }
 
   /**
@@ -917,7 +941,8 @@ export async function createApp(
 
         try {
           const recorded = await rateLimiter.recordVerify(req);
-          applyRateLimitHead(reply, recorded, check);
+          const limited = handleRateLimit(reply, recorded, check);
+          if (limited) return limited;
 
           const timeoutMs = config.requestTimeoutMs ?? 30_000;
           let timeoutTimer;
@@ -1030,7 +1055,8 @@ export async function createApp(
 
         if (existingRecord) {
           if (existingRecord.state === 'settled') {
-            handleRateLimit(reply, checkSettle);
+            const limited = handleRateLimit(reply, checkSettle);
+            if (limited) return limited;
             if (existingRecord.response) {
               const respPayload =
                 typeof existingRecord.response === 'string'
@@ -1046,7 +1072,8 @@ export async function createApp(
             });
           }
           if (existingRecord.state === 'submitted' || existingRecord.state === 'unknown') {
-            handleRateLimit(reply, checkSettle);
+            const limited = handleRateLimit(reply, checkSettle);
+            if (limited) return limited;
             return reply.send({
               success: false,
               errorReason: 'submitted_outcome_unknown',
@@ -1065,7 +1092,8 @@ export async function createApp(
               'request_timeout',
             ]);
             if (!RETRYABLE.has(existingRecord.error_reason)) {
-              handleRateLimit(reply, checkSettle);
+              const limited = handleRateLimit(reply, checkSettle);
+              if (limited) return limited;
               if (existingRecord.response) {
                 const respPayload =
                   typeof existingRecord.response === 'string'
@@ -1107,7 +1135,8 @@ export async function createApp(
         };
         const replay = idempotency ? await idempotency.begin(idempotency.keyFor(idemReq)) : null;
         if (replay?.replayed) {
-          handleRateLimit(reply, checkSettle);
+          const limited = handleRateLimit(reply, checkSettle);
+          if (limited) return limited;
           return reply.code(replay.statusCode).send(replay.response);
         }
         /**
@@ -1145,7 +1174,8 @@ export async function createApp(
                 req.span.feeStroops = actualFee;
               }
 
-              applyRateLimitHead(reply, recorded, checkSettle);
+              const limited = handleRateLimit(reply, recorded, checkSettle);
+              if (limited) return limited;
 
               if (result.success) {
                 const event = webhooks
@@ -1396,7 +1426,9 @@ export async function createApp(
         return reply.code(400).send({ error: 'invalid_resource', reason: validation.reason });
       }
 
-      await rateLimiter.recordCatalog(req);
+      const recorded = await rateLimiter.recordCatalog(req);
+      const limited = handleRateLimit(reply, recorded, checkCatalog);
+      if (limited) return limited;
       try {
         const existing = await catalog.getResource?.(
           validation.resource.url,
@@ -1514,8 +1546,9 @@ export async function createApp(
 
     try {
       const result = await catalog.listResources(params);
-      await rateLimiter.recordCatalogRead(req);
-      handleRateLimit(reply, checkCatalogRead);
+      const recorded = await rateLimiter.recordCatalogRead(req);
+      const limited = handleRateLimit(reply, recorded, checkCatalogRead);
+      if (limited) return limited;
 
       return reply.send({
         x402Version: 2,
@@ -1581,8 +1614,9 @@ export async function createApp(
 
     try {
       const result = await catalog.search(params);
-      await rateLimiter.recordCatalogRead(req);
-      handleRateLimit(reply, checkCatalogRead);
+      const recorded = await rateLimiter.recordCatalogRead(req);
+      const limited = handleRateLimit(reply, recorded, checkCatalogRead);
+      if (limited) return limited;
 
       return reply.send({
         x402Version: 2,

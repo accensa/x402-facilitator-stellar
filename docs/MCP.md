@@ -88,6 +88,34 @@ agent should `tools/list` again and pick a real tool. `isError: true` results
 are a successful tool *call* that failed in the tool's own logic — business
 failure, not protocol failure.
 
+## Protocol Version Negotiation
+
+The server speaks the **handshake-era** revisions of MCP, oldest first:
+
+| Revision | Status |
+| --- | --- |
+| `2024-11-05` | supported |
+| `2025-03-26` | supported |
+| `2025-06-18` | supported |
+| `2025-11-25` | supported — the newest revision reachable via `initialize`, and therefore the server's counter-offer |
+
+The tools surface this server implements (`initialize`, `tools/list`,
+`tools/call`, `ping`, `notifications/initialized`) is the same in all four, so
+the revision the client asked for is the revision it gets back. The rules
+(`initialize` follows the spec's negotiation section):
+
+| Client sends in `params.protocolVersion` | Server answers with |
+| --- | --- |
+| a revision in the table above | **that same revision** — the connection will use it |
+| a revision the server does not implement (including a malformed, non-string value) | `2025-11-25`, plus a warning on stderr naming the requested version and the list above, so the negotiation attempt is visible rather than silent |
+| nothing at all | `2025-11-25` |
+
+The revision is *negotiated*, not asserted: a client that cannot speak the
+counter-offer is expected to disconnect rather than continue, and the warning
+line is what tells an operator which revision was asked for. The modern
+(no-handshake) era of MCP is out of scope for this stdio server — those clients
+never send `initialize`, so there is nothing here to negotiate with them.
+
 ## Transport behavior
 
 The stdio transport is newline-delimited JSON-RPC 2.0. Around the error

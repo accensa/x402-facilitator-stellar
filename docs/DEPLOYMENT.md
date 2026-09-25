@@ -369,6 +369,12 @@ npm run db:migrate
 node scripts/db-migrate.js up && node src/server.js
 ```
 
+**What the image ships:** `scripts/` and `migrations/` are copied into the
+image at the same paths as the checkout, so the entrypoint above works as
+printed (#211). `scripts/db-migrate.js` resolves `../migrations` relative to its
+own location and applies the `.js` files there; the legacy `.sql` files are
+shipped as well, for the `psql` path below.
+
 **For databases that already have the original SQL tables:**
 
 If the database was provisioned with the original `.sql` migration files,

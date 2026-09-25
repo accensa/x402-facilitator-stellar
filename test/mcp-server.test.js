@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { McpServer } from '../src/mcp/server.js';
+import {
+  McpServer,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  LATEST_PROTOCOL_VERSION,
+} from '../src/mcp/server.js';
 
 /**
  * Regression test for the MCP protocol-error contract (#196).
@@ -134,4 +138,83 @@ test('MCP: missing tool name parameter is invalid params (-32602)', async () => 
   assert.equal(kind, 'error');
   assert.equal(error.code, -32602, 'a missing name parameter is invalid params');
   assert.equal(error.message, 'Unknown tool: (missing name)');
+});
+
+/**
+ * Protocol version negotiation (#169).
+ *
+ * The server used to answer every `initialize` with a hardcoded `2024-11-05`,
+ * including when the client had asked for something else — so a client could
+ * not tell whether the server agreed with it or was ignoring it. Per the spec
+ * the server answers with the requested revision when it supports it, and
+ * otherwise counter-offers a revision it does support. Each of the three
+ * outcomes is pinned here.
+ */
+function negotiationServer() {
+  const warnings = [];
+  const server = new McpServer({
+    name: 'negotiation-test',
+    version: '0.0.1',
+    logger: { error: () => {}, warn: message => warnings.push(message) },
+  });
+  const sent = [];
+  server._sendResult = (id, result) => sent.push({ id, result });
+  server._sendError = (id, code, message) => sent.push({ id, code, message });
+  return { server, sent, warnings };
+}
+
+const initialize = (server, protocolVersion) =>
+  server._handleRequest({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion },
+  });
+
+test('MCP (#169): a supported protocol version is echoed back, without a warning', async () => {
+  for (const version of SUPPORTED_PROTOCOL_VERSIONS) {
+    const { server, sent, warnings } = negotiationServer();
+    await initialize(server, version);
+
+    assert.equal(sent.length, 1);
+    assert.equal(
+      sent[0].result.protocolVersion,
+      version,
+      `${version} is supported, so the client's own revision must come back`,
+    );
+    assert.deepEqual(warnings, [], `no warning for a version we support (${version})`);
+  }
+});
+
+test('MCP (#169): an unsupported version gets a counter-offer and a warning, not silence', async () => {
+  const { server, sent, warnings } = negotiationServer();
+  await initialize(server, '1999-01-01');
+
+  assert.equal(sent.length, 1, 'a client that reached the handshake always gets an answer');
+  assert.equal(
+    sent[0].result.protocolVersion,
+    LATEST_PROTOCOL_VERSION,
+    'the counter-offer is the newest revision we implement, for the client to accept or refuse',
+  );
+  assert.equal(warnings.length, 1, 'the mismatch is logged, so negotiation is observable');
+  assert.match(warnings[0], /1999-01-01/, 'the warning names the version the client asked for');
+  assert.ok(
+    SUPPORTED_PROTOCOL_VERSIONS.every(v => warnings[0].includes(v)),
+    'the warning lists what the client could have asked for instead',
+  );
+});
+
+test('MCP (#169): naming no version at all gets the newest supported revision', async () => {
+  const { server, sent } = negotiationServer();
+  await server._handleRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+
+  assert.equal(sent[0].result.protocolVersion, LATEST_PROTOCOL_VERSION);
+});
+
+test('MCP (#169): a malformed version is treated as unsupported, never echoed', async () => {
+  const { server, sent, warnings } = negotiationServer();
+  await initialize(server, { protocolVersion: '2025-06-18' });
+
+  assert.equal(sent[0].result.protocolVersion, LATEST_PROTOCOL_VERSION);
+  assert.equal(warnings.length, 1, 'a non-string version is a mismatch worth logging');
 });

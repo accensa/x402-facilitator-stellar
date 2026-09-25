@@ -7,6 +7,22 @@ function dcg(scores) {
   return scores.reduce((sum, score, i) => sum + score / Math.log2(i + 2), 0);
 }
 
+/**
+ * Deterministic token-overlap relevance for the mock cross-encoder (#170).
+ *
+ * The mock used to answer every document with 1.0, which preserved the order it
+ * was handed — so the eval exercised the rerank call without ever measuring its
+ * effect, and a reranker that was silently not wired would have produced
+ * identical numbers. Scoring the query's tokens makes a broken or missing
+ * second pass move the metrics.
+ */
+function rerankScore(query, document) {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return 0;
+  const text = document.toLowerCase();
+  return tokens.filter(token => text.includes(token)).length / tokens.length;
+}
+
 // Calculate nDCG for a list of actual relevance scores vs ideal relevance scores
 function ndcg(actualScores, idealScores) {
   const idcg = dcg(idealScores.sort((a, b) => b - a));
@@ -39,11 +55,16 @@ async function runEval() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ embedding: vec }));
         } else if (req.url === '/rerank') {
-          const { documents } = JSON.parse(body);
-          // Mock reranker: just return 1.0 for everything, preserving order
-          const scores = documents.map(() => 1.0);
+          const { query, documents } = JSON.parse(body);
+          // Documented contract (#170): { results: [{ index, relevance_score }] }.
+          // The scores reorder — a constant would make the second pass
+          // unmeasurable, which is the bug this harness had.
+          const results = documents.map((document, index) => ({
+            index,
+            relevance_score: rerankScore(query, document),
+          }));
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ scores }));
+          res.end(JSON.stringify({ results }));
         } else {
           res.writeHead(404);
           res.end();
@@ -59,7 +80,13 @@ async function runEval() {
   const port = server.address().port;
   const embeddingsUrl = `http://localhost:${port}/embed`;
 
-  const store = new MemoryCatalogStore({ embeddingsUrl, enableReranking: true });
+  const store = new MemoryCatalogStore({
+    embeddingsUrl,
+    enableReranking: true,
+    // #170: the rerank endpoint is configured explicitly. Enable was reaching
+    // for `${EMBEDDINGS_URL}/rerank`, which the memory store no longer guesses.
+    rerankUrl: `http://localhost:${port}/rerank`,
+  });
 
   // Load fixtures into memory store
   const now = Date.now();
