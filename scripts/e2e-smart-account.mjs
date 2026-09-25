@@ -93,7 +93,10 @@ import { installRpcRetry } from '../src/rpc-retry.js';
 
 // The client makes its own RPC calls to build and simulate the payment. Install
 // the wrapper at the fetch layer (see scripts/e2e.mjs for why).
-installRpcRetry({ log: msg => console.log(`    ${msg}`) });
+installRpcRetry({
+  log: msg => console.log(`    ${msg}`),
+  rpcForceIpv4: process.env.RPC_FORCE_IPV4 !== 'false',
+});
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
