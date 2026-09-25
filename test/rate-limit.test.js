@@ -1,43 +1,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RateLimiter } from '../src/rate-limit.js';
-import { stubRateLimiter, testConfig, VALID_BODY, serve } from './helpers/app.js';
+import { stubRateLimiter } from './helpers/rate-limiter.js';
 
-test('rate limiter honors global limits', async () => {
-  const config = {
-    global: { verifyRpm: 2, settleRpm: 1, settleRph: 10, settleRpd: 100, feeSpd: 50500 },
-    keys: {},
-  };
-  const limiter = new RateLimiter(config);
+/**
+ * Global limits loose enough that none of them trips unless a test lowers it.
+ * Each test overrides only the dimensions it exercises.
+ */
+const DEFAULT_LIMITS = { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 500 };
+
+/**
+ * Builds a RateLimiter over the in-memory store and closes it when the test
+ * ends. Every RateLimiter starts a 60s sweep interval; without close() each
+ * test left one behind for the life of the process.
+ */
+function newLimiter(t, { global = {}, keys = {} } = {}) {
+  const limiter = new RateLimiter({ global: { ...DEFAULT_LIMITS, ...global }, keys });
+  t.after(() => limiter.close());
+  return limiter;
+}
+
+/**
+ * Asserts `check<kind>` allows `req`, then consumes one unit with
+ * `record<kind>` — the check-then-record order the HTTP routes use.
+ */
+async function admit(limiter, kind, req, ...recordArgs) {
+  const res = await limiter[`check${kind}`](req);
+  assert.equal(res.allowed, true, `check${kind} should allow before recording`);
+  await limiter[`record${kind}`](req, ...recordArgs);
+}
+
+/** Asserts `check<kind>` refuses `req`, and with `reason` when one is given. */
+async function assertRefused(limiter, kind, req, reason) {
+  const res = await limiter[`check${kind}`](req);
+  assert.equal(res.allowed, false, `check${kind} should refuse`);
+  if (reason) assert.equal(res.reason, reason);
+}
+
+test('rate limiter honors global limits', async t => {
+  const limiter = newLimiter(t, {
+    global: { verifyRpm: 2, settleRpm: 1, settleRpd: 100, feeSpd: 50500 },
+  });
   const req = { keyId: 'TEST_KEY' };
 
-  // Verify
-  assert.equal((await limiter.checkVerify(req)).allowed, true);
-  await limiter.recordVerify(req);
-  assert.equal((await limiter.checkVerify(req)).allowed, true);
-  await limiter.recordVerify(req);
-  assert.equal((await limiter.checkVerify(req)).allowed, false);
+  await admit(limiter, 'Verify', req);
+  await admit(limiter, 'Verify', req);
+  await assertRefused(limiter, 'Verify', req);
 
-  // Settle
-  assert.equal((await limiter.checkSettle(req)).allowed, true);
-  await limiter.recordSettle(req, 500);
-  assert.equal((await limiter.checkSettle(req)).allowed, false); // RPM exceeded
+  await admit(limiter, 'Settle', req, 500);
+  await assertRefused(limiter, 'Settle', req); // RPM exceeded
 
-  // Check usage
   const usage = await limiter.getUsage('TEST_KEY');
   assert.equal(usage.verify_rpm, 2);
   assert.equal(usage.settle_rpm, 1);
   assert.equal(usage.fee_spd, 500);
 });
 
-test('rate limiter honors per-key overrides', async () => {
-  const config = {
-    global: { verifyRpm: 1, settleRpm: 1, settleRph: 10, settleRpd: 100, feeSpd: 1000 },
-    keys: {
-      TEST_KEY: { verifyRpm: 5, settleRpm: 1, settleRph: 10, settleRpd: 100, feeSpd: 1000 },
-    },
-  };
-  const limiter = new RateLimiter(config);
+test('rate limiter honors per-key overrides', async t => {
+  const tight = { verifyRpm: 1, settleRpm: 1, settleRpd: 100, feeSpd: 1000 };
+  const limiter = newLimiter(t, {
+    global: tight,
+    keys: { TEST_KEY: { ...DEFAULT_LIMITS, ...tight, verifyRpm: 5 } },
+  });
   const req = { keyId: 'TEST_KEY' };
 
   await limiter.recordVerify(req);
@@ -45,60 +69,38 @@ test('rate limiter honors per-key overrides', async () => {
   assert.equal((await limiter.checkVerify(req)).allowed, true); // Since limit is 5
 });
 
-test('rate limiter halts on fee ceiling', async () => {
+test('rate limiter halts on fee ceiling', async t => {
   // checkSettle reserves the worst-case max fee (50000 stroops by default)
   // against feeSpd before every settlement (Option B), so the ceiling must
   // sit just above the reservation to let the first checks through.
-  const config = {
-    global: { verifyRpm: 10, settleRpm: 10, settleRph: 10, settleRpd: 10, feeSpd: 50500 },
-    keys: {},
-  };
-  const limiter = new RateLimiter(config);
+  const limiter = newLimiter(t, { global: { feeSpd: 50500 } });
   const req = { keyId: 'TEST_KEY' };
 
-  assert.equal((await limiter.checkSettle(req)).allowed, true);
-  await limiter.recordSettle(req, 400);
-  assert.equal((await limiter.checkSettle(req)).allowed, true);
-
+  await admit(limiter, 'Settle', req, 400);
   // 400 + 200 = 600 consumed; 600 + 50000 reservation clears 50500.
-  await limiter.recordSettle(req, 200);
+  await admit(limiter, 'Settle', req, 200);
 
-  // Now consumed is 600. Next check should fail.
-  const res = await limiter.checkSettle(req);
-  assert.equal(res.allowed, false);
-  assert.equal(res.reason, 'fee_ceiling_exceeded');
+  await assertRefused(limiter, 'Settle', req, 'fee_ceiling_exceeded');
 });
 
-test('rate limiter falls back to IP in open mode', async () => {
-  const config = {
-    global: { verifyRpm: 1, settleRpm: 1, settleRph: 10, settleRpd: 100, feeSpd: 1000 },
-    keys: {},
-  };
-  const limiter = new RateLimiter(config);
+test('rate limiter falls back to IP in open mode', async t => {
+  const limiter = newLimiter(t, {
+    global: { verifyRpm: 1, settleRpm: 1, settleRpd: 100, feeSpd: 1000 },
+  });
   const req1 = { ip: '192.168.1.1' };
   const req2 = { ip: '192.168.1.2' };
 
-  assert.equal((await limiter.checkVerify(req1)).allowed, true);
-  await limiter.recordVerify(req1);
-  assert.equal((await limiter.checkVerify(req1)).allowed, false);
+  await admit(limiter, 'Verify', req1);
+  await assertRefused(limiter, 'Verify', req1);
 
   // req2 should still be allowed since it's a different IP
   assert.equal((await limiter.checkVerify(req2)).allowed, true);
 });
 
-test('rate limiter sweeps expired buckets', async () => {
-  const config = {
-    global: {
-      verifyRpm: 1,
-      settleRpm: 1,
-      settleRph: 10,
-      settleRpd: 100,
-      feeSpd: 1000,
-      catalogRpm: 1,
-    },
-    keys: {},
-  };
-  const limiter = new RateLimiter(config);
+test('rate limiter sweeps expired buckets', async t => {
+  const limiter = newLimiter(t, {
+    global: { verifyRpm: 1, settleRpm: 1, settleRpd: 100, feeSpd: 1000, catalogRpm: 1 },
+  });
   const now = Math.floor(Date.now() / 1000);
 
   // Directly inject an expired bucket
@@ -107,19 +109,18 @@ test('rate limiter sweeps expired buckets', async () => {
   assert.equal(limiter.store.map.has('catalog:127.0.0.1:60'), false);
 });
 
-test('stubRateLimiter matches the real limiter surface and return shapes', async () => {
-  const real = new RateLimiter({
-    global: {
-      verifyRpm: 10,
-      settleRpm: 10,
-      settleRph: 10,
-      settleRpd: 10,
-      feeSpd: 500,
-      catalogRpm: 10,
-      catalogReadRpm: 10,
-    },
-    keys: {},
-  });
+test('close() stops the sweep interval and is safe to call twice', t => {
+  const limiter = newLimiter(t);
+  assert.ok(limiter._sweepInterval, 'the constructor should start the sweep interval');
+
+  limiter.close();
+  assert.equal(limiter._sweepInterval, null);
+  // newLimiter's teardown closes it again; that second call must be a no-op.
+  assert.doesNotThrow(() => limiter.close());
+});
+
+test('stubRateLimiter matches the real limiter surface and return shapes', async t => {
+  const real = newLimiter(t, { global: { catalogRpm: 10, catalogReadRpm: 10 } });
   const stub = stubRateLimiter();
 
   // Derived from the stub, never hardcoded: a literal list here goes stale the
@@ -155,18 +156,12 @@ test('stubRateLimiter matches the real limiter surface and return shapes', async
   }
 });
 
-test('real RateLimiter serves all payment and discovery routes', async () => {
-  const rateLimiter = new RateLimiter({
-    global: {
-      verifyRpm: 10,
-      settleRpm: 10,
-      settleRph: 10,
-      settleRpd: 10,
-      feeSpd: 500000,
-      catalogRpm: 10,
-    },
-    keys: {},
-  });
+test('real RateLimiter serves all payment and discovery routes', async t => {
+  // Loaded here, not at the top: the app graph (Fastify, Stellar SDK, ...) is
+  // by far the most expensive import in this file and only this test needs it,
+  // so a filtered run of the unit tests above never pays for it.
+  const { serve, testConfig, VALID_BODY } = await import('./helpers/app.js');
+  const rateLimiter = newLimiter(t, { global: { feeSpd: 500000, catalogRpm: 10 } });
   const app = await serve({
     config: testConfig(),
     rateLimiter,
@@ -186,37 +181,20 @@ test('real RateLimiter serves all payment and discovery routes', async () => {
   }
 });
 
-test('catalog limiter enforces limits', async () => {
-  const config = {
-    global: {
-      verifyRpm: 10,
-      settleRpm: 10,
-      settleRph: 10,
-      settleRpd: 10,
-      feeSpd: 500,
-      catalogRpm: 2,
-    },
-    keys: {
-      CUSTOM_KEY: { catalogRpm: 1 },
-    },
-  };
-  const limiter = new RateLimiter(config);
+test('catalog limiter enforces limits', async t => {
+  const limiter = newLimiter(t, {
+    global: { catalogRpm: 2 },
+    keys: { CUSTOM_KEY: { catalogRpm: 1 } },
+  });
 
   // Test global limit (2 RPM)
   const req1 = { ip: '127.0.0.1' };
-  assert.equal((await limiter.checkCatalog(req1)).allowed, true);
-  await limiter.recordCatalog(req1);
-  assert.equal((await limiter.checkCatalog(req1)).allowed, true);
-  await limiter.recordCatalog(req1);
-  const res1 = await limiter.checkCatalog(req1);
-  assert.equal(res1.allowed, false);
-  assert.equal(res1.reason, 'catalog_rate_limited');
+  await admit(limiter, 'Catalog', req1);
+  await admit(limiter, 'Catalog', req1);
+  await assertRefused(limiter, 'Catalog', req1, 'catalog_rate_limited');
 
   // Test per-key limit (1 RPM)
   const req2 = { keyId: 'CUSTOM_KEY', ip: '127.0.0.1' };
-  assert.equal((await limiter.checkCatalog(req2)).allowed, true);
-  await limiter.recordCatalog(req2);
-  const res2 = await limiter.checkCatalog(req2);
-  assert.equal(res2.allowed, false);
-  assert.equal(res2.reason, 'catalog_rate_limited');
+  await admit(limiter, 'Catalog', req2);
+  await assertRefused(limiter, 'Catalog', req2, 'catalog_rate_limited');
 });
