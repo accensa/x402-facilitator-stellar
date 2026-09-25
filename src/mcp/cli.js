@@ -45,6 +45,7 @@ if (AGENT_PAYER_SECRET_KEY) {
 import { installRpcRetry } from '../rpc-retry.js';
 installRpcRetry({
   log: msg => console.warn(`[MCP] ${msg}`),
+  rpcForceIpv4: process.env.RPC_FORCE_IPV4 !== 'false',
 });
 
 // ---------------------------------------------------------------------------
