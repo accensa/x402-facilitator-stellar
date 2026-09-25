@@ -42,6 +42,9 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config({ quiet: true });
 }
 
+// Resolve configuration at boot so any misconfiguration fails early.
+const config = resolveConfig();
+
 // OpenTelemetry tracing: must run BEFORE installHorizonClient /
 // installRpcRetry so the undici instrumentation patches the npm `undici` client they
 // dial through, and before the http server starts so inbound span + traceparent
@@ -53,19 +56,21 @@ const otel = initTracing();
 // RPC breaker (#105). The two breakers are complementary layers, not
 // duplicates: #105 counts connection-level failures per RPC host; #120 also
 // bounds sockets and trips on slow responses for every backend origin.
-const horizon = installHorizonClient({ log: msg => console.log(`  ${msg}`) });
+const horizon = installHorizonClient({
+  rpcForceIpv4: config.rpcForceIpv4,
+  log: msg => console.log(`  ${msg}`),
+});
 
 // Retries connection-level failures only; see rpc-retry.js for what that
 // deliberately excludes. The returned handle exposes circuit-breaker state
 // for the readiness probe (#100). onRetry feeds x402_rpc_retries_total.
 const metrics = createMetrics();
 const rpc = installRpcRetry({
+  rpcForceIpv4: config.rpcForceIpv4,
   log: msg => console.warn(`  ${msg}`),
   onStateChange: msg => console.warn(`  [Breaker] ${msg}`),
   onRetry: ({ code, host }) => metrics.incRpcRetry({ code, host }),
 });
-
-const config = resolveConfig();
 
 // Process-level error handlers (#205). Without these a listen failure or a
 // stray rejection killed the process with no diagnostic at all. Installed

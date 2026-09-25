@@ -284,6 +284,7 @@ export function resolveConfig(env = process.env) {
     networks,
     perNetwork,
     trustProxy,
+    rpcForceIpv4: env.RPC_FORCE_IPV4 !== 'false',
 
     /**
      * HMAC key for client-IP pseudonymisation (#204). Unset (the default) means

@@ -125,16 +125,18 @@ export function installRpcRetry({
   log = () => {},
   onStateChange = () => {},
   onRetry = () => {},
-  forceIpv4 = process.env.RPC_FORCE_IPV4 !== 'false',
+  forceIpv4,
+  rpcForceIpv4,
 } = {}) {
   const builtinFetch = globalThis.fetch;
+  const effectiveForceIpv4 = rpcForceIpv4 ?? forceIpv4 ?? true;
 
   // undici's fetch is used rather than the built-in one because only the former
   // accepts a dispatcher. Note the npm `undici` and Node's bundled copy are
   // separate module instances, so `setGlobalDispatcher` from the package does
   // NOT affect `globalThis.fetch` — the dispatcher has to travel with the call.
   let call = builtinFetch;
-  if (forceIpv4) {
+  if (effectiveForceIpv4) {
     const { Agent, fetch: undiciFetch } = require('undici');
     const agent = new Agent({ connect: { family: 4 } });
     call = (input, init) => undiciFetch(input, { ...init, dispatcher: agent });

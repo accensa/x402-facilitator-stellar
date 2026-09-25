@@ -65,6 +65,7 @@ export function installHorizonClient({
   breakerTimeoutMs = Number(process.env.BREAKER_TIMEOUT_MS ?? 15_000),
   breakerErrorThreshold = Number(process.env.BREAKER_ERROR_THRESHOLD_PERCENTAGE ?? 50),
   breakerResetTimeoutMs = Number(process.env.BREAKER_RESET_TIMEOUT_MS ?? 30_000),
+  rpcForceIpv4 = true,
   log = () => {},
   warn = msg => console.warn(msg),
 } = {}) {
@@ -82,7 +83,7 @@ export function installHorizonClient({
     keepAliveTimeout: keepAliveTimeoutMs,
     keepAliveMaxTimeout: keepAliveMaxTimeoutMs,
     headersTimeout: headersTimeoutMs,
-    connect: { family: process.env.RPC_FORCE_IPV4 === 'false' ? undefined : 4 },
+    connect: { family: rpcForceIpv4 ? 4 : undefined },
   });
 
   const Opossum = require('opossum');

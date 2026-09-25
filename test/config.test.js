@@ -98,6 +98,13 @@ test('resolveConfig: PORT defaults to 3402 when unset', () => {
   assert.strictEqual(config.port, 3402);
 });
 
+test('resolveConfig: rpcForceIpv4 defaults to true and parses RPC_FORCE_IPV4', () => {
+  const base = { FACILITATOR_SECRET: 'S123' };
+  assert.strictEqual(resolveConfig(base).rpcForceIpv4, true);
+  assert.strictEqual(resolveConfig({ ...base, RPC_FORCE_IPV4: 'false' }).rpcForceIpv4, false);
+  assert.strictEqual(resolveConfig({ ...base, RPC_FORCE_IPV4: 'true' }).rpcForceIpv4, true);
+});
+
 test('resolveConfig: PORT rejects non-numeric and out-of-range values', () => {
   const base = { FACILITATOR_SECRET: 'S123' };
   for (const bad of ['abc', '12.5', '-1', '0', '65536', '']) {
