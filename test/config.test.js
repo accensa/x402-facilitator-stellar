@@ -811,10 +811,32 @@ test('resolveConfig: handles ENABLE_RERANKING', () => {
   const env = {
     FACILITATOR_SECRET: 'S123',
     ENABLE_RERANKING: 'true',
-    RERANK_URL: 'https://rerank.example.com/v1/rerank',
+    RERANK_URL: 'https://rerank.example/v1/rerank',
   };
   const config = resolveConfig(env);
   assert.strictEqual(config.enableReranking, true);
+  assert.strictEqual(config.rerankUrl, 'https://rerank.example/v1/rerank');
+});
+
+test('resolveConfig: ENABLE_RERANKING without RERANK_URL is refused at boot (#170)', () => {
+  // Reranking must never be claimed but not wired: nothing is inferred from
+  // EMBEDDINGS_URL, so enabling it with no explicit endpoint fails at boot.
+  assert.throws(
+    () => resolveConfig({ FACILITATOR_SECRET: 'S123', ENABLE_RERANKING: 'true' }),
+    /RERANK_URL is unset/,
+  );
+});
+
+test('resolveConfig: RERANK_URL must be an absolute http(s) URL', () => {
+  assert.throws(
+    () =>
+      resolveConfig({
+        FACILITATOR_SECRET: 'S123',
+        ENABLE_RERANKING: 'true',
+        RERANK_URL: 'not-a-url',
+      }),
+    /absolute http\(s\) URL/,
+  );
 });
 
 test('resolveConfig: handles ENABLE_RERANKING falsy value', () => {

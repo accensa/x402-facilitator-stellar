@@ -38,6 +38,12 @@ import { MemoryCatalogStore, CatalogError } from '../src/catalog/memory.js';
 import { MemorySettlementStore } from '../src/store/memory.js';
 import { requestState } from '../src/request-state.js';
 
+/**
+ * GET /healthz — liveness probe.
+ *
+ * The cheapest possible signal that the process is up and routing: it must
+ * answer 200 with `{ ok: true }` without touching any collaborator.
+ */
 describe('GET /healthz', () => {
   let app;
   before(async () => {
@@ -52,6 +58,14 @@ describe('GET /healthz', () => {
   });
 });
 
+/**
+ * GET /supported — scheme and extension discovery.
+ *
+ * Asserts the transport relays getSupported() byte-for-byte (including the
+ * Stellar `extra` block) and that discovery stays unauthenticated even when
+ * API keys are configured, because a client reads it before any relationship
+ * with us exists.
+ */
 describe('GET /supported', () => {
   test('passes getSupported() through untouched, extra block and all', async () => {
     // The Stellar extra block carrying areFeesSponsored is an explicit
@@ -91,6 +105,15 @@ describe('GET /supported', () => {
   });
 });
 
+/**
+ * Request validation for POST /verify and POST /settle.
+ *
+ * Every malformed body must produce a 400 carrying a non-null reason code so
+ * agents branch on codes rather than prose. Also documents the deliberate
+ * shape divergence: /verify answers `{isValid, invalidReason,
+ * invalidMessage}` while /settle keeps `{transaction, network}` for
+ * attribution even on transport-level rejections.
+ */
 describe('malformed bodies always carry a reason', () => {
   let app;
   before(async () => {
@@ -193,6 +216,14 @@ describe('malformed bodies always carry a reason', () => {
   }
 });
 
+/**
+ * POST /verify — transport contract.
+ *
+ * Proves the payload and requirements reach the facilitator verbatim, that
+ * facilitator throws become 200 verification failures with a reason code
+ * (never bare 500s), and that the scheme's own rejection vocabulary passes
+ * through untranslated.
+ */
 describe('POST /verify', () => {
   test('passes the payload and requirements through unmodified', async () => {
     const facilitator = stubFacilitator();
@@ -281,6 +312,14 @@ describe('POST /verify', () => {
   });
 });
 
+/**
+ * POST /settle — transport contract and fee reporting.
+ *
+ * Proves scheme results pass through untouched, failures still carry
+ * transaction/network for out-of-band attribution, and the settle path
+ * reports the sponsored fee to the real RateLimiter so the fee ceiling
+ * (feeSpd) actually bounds spend.
+ */
 describe('POST /settle', () => {
   test('passes the scheme result through untouched', async () => {
     const app = await serve();
@@ -408,6 +447,14 @@ describe('POST /settle', () => {
   });
 });
 
+/**
+ * Rate-limit wiring on /verify and /settle.
+ *
+ * Covers the RateLimit-* header contract on allowed requests, the 429 +
+ * Retry-After + reason shape on refusals, that refusals short-circuit before
+ * the facilitator (bounding work, not just responses), and that malformed
+ * bodies never consume caller budget.
+ */
 describe('rate limiting', () => {
   test('an allowed request carries the RateLimit headers', async () => {
     const app = await serve();
@@ -465,6 +512,13 @@ describe('rate limiting', () => {
   });
 });
 
+/**
+ * GET /usage — per-key usage reporting.
+ *
+ * Usage is scoped to the presented API key (id uppercased at auth); in open
+ * mode there is no caller identity, so the route is refused with a distinct
+ * reason instead of leaking instance-wide numbers.
+ */
 describe('GET /usage', () => {
   test('is refused in open mode with a distinct reason', async () => {
     // With no keys there is no caller identity, so there is no usage to scope.
@@ -502,6 +556,14 @@ describe('GET /usage', () => {
   });
 });
 
+/**
+ * Automatic cataloging side effects of /verify and /settle.
+ *
+ * Cataloging must never delay or fail a payment: asserts that throwing,
+ * slow, and synchronously-crashing collaborators leave the payment response
+ * intact and JSON-shaped, and that only successful, catalogable outcomes
+ * are recorded.
+ */
 describe('automatic cataloging', () => {
   /** Cataloging is enqueued, so give the microtask queue a turn before asserting. */
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
@@ -611,6 +673,13 @@ describe('automatic cataloging', () => {
   });
 });
 
+/**
+ * RateLimit-Remaining header semantics (issue #141).
+ *
+ * The current request is counted before headers are emitted, so a budget of
+ * 3 yields remaining 2 → 1 → 0 and the fourth request is refused with a 429
+ * that still reports 0. Exercises the real RateLimiter for both routes.
+ */
 describe('RateLimit-Remaining reflects the post-count state (issue #141)', () => {
   test('/verify decrements to zero and refuses exactly the request after the budget runs out', async () => {
     const { RateLimiter } = await import('../src/rate-limit.js');
@@ -687,6 +756,14 @@ describe('RateLimit-Remaining reflects the post-count state (issue #141)', () =>
   });
 });
 
+/**
+ * Catalog provenance and provisional lifecycle (issue #140).
+ *
+ * A verify-only pass records a provisional listing with an expiry; settle
+ * promotes it to permanent public state (`source: 'settle'`, no expiry);
+ * unsettled provisional listings disappear from discovery once the TTL
+ * lapses and are pruned by pruneExpired().
+ */
 describe('catalog provenance and provisional lifecycle (issue #140)', () => {
   test('a verify without settle catalogues a provisional, expiring listing', async () => {
     const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 600_000 });
@@ -809,6 +886,10 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 // would make, and assert on status, reason code and headers.
 // ---------------------------------------------------------------------------
 
+/**
+ * Security headers and proxy trust: HSTS/nosniff policy, X-Forwarded-For hop
+ * counting under TRUST_PROXY, and the 404 reason shape.
+ */
 describe('transport hardening', () => {
   test('HSTS is sent only when NODE_ENV=production; nosniff always', async () => {
     await withApp({ nodeEnv: 'production' }, async app => {
@@ -857,6 +938,13 @@ describe('transport hardening', () => {
   });
 });
 
+/**
+ * Error boundary around body parsing and collaborator failures.
+ *
+ * Malformed JSON is rejected in each route's own shape, oversized bodies hit
+ * the 256 KB cap as 413 payload_too_large, and a limiter crash surfaces as a
+ * structured 500 rather than an unhandled fault.
+ */
 describe('error boundary', () => {
   test('malformed JSON keeps each route’s own rejection shape', async () => {
     await withApp({}, async app => {
@@ -904,6 +992,14 @@ describe('error boundary', () => {
   });
 });
 
+/**
+ * CORS preflight (OPTIONS) policy.
+ *
+ * Public routes default to `*` with no allowlist; once an allowlist exists,
+ * only listed origins get a grant, unlisted origins get a 204 without
+ * access-control-allow-origin (so the browser blocks the real request), and
+ * public routes stop defaulting to `*`.
+ */
 describe('CORS preflight', () => {
   const origin = 'https://agent.example';
 
@@ -943,6 +1039,13 @@ describe('CORS preflight', () => {
   });
 });
 
+/**
+ * API key Authorization header forms.
+ *
+ * Table-driven coverage of accepted vs malformed header syntax: a bare key
+ * is tolerated, every structurally invalid Bearer form maps to
+ * malformed_auth_header, and an unknown key maps to invalid_api_key.
+ */
 describe('API key header forms', () => {
   const config = testConfig({ apiKeys: ['alice:a-secret'] });
 
@@ -964,6 +1067,14 @@ describe('API key header forms', () => {
   }
 });
 
+/**
+ * GET /readyz — readiness probe contract.
+ *
+ * Without a checker it reports readiness_not_configured (503) while still
+ * exposing failover state; with one it relays the report (200/503), maps a
+ * throwing probe to a 503 carrying the error message, and per-network config
+ * builds the real checker at boot.
+ */
 describe('GET /readyz', () => {
   test('without a readiness checker it reports not_ready, with failover state', async () => {
     const failoverHealth = { getState: () => ({ region: 'eu-west' }) };
@@ -1012,6 +1123,13 @@ describe('GET /readyz', () => {
   });
 });
 
+/**
+ * GET /metrics — Prometheus exposition.
+ *
+ * Asserts the exposition content type, the seeded signer gauges (and that a
+ * network with no signer gets no series), and that the listener omits the
+ * route entirely when serveMetrics is false.
+ */
 describe('GET /metrics', () => {
   test('serves Prometheus text with seeded signer gauges', async () => {
     const extras = { signers: { 'stellar:testnet': 'GSIGNER', 'stellar:pubnet': null } };
@@ -1036,6 +1154,14 @@ describe('GET /metrics', () => {
   });
 });
 
+/**
+ * POST /verify scheme failure mapping.
+ *
+ * Table-driven: a timeout, an open RPC breaker, and an unregistered
+ * scheme/network each map to a distinct invalidReason while still answering
+ * 200, and every non-generic failure is audited as rpc_unreachable with
+ * op=verify.
+ */
 describe('POST /verify scheme failures map to distinct reason codes', () => {
   for (const [label, verify, config, reason] of [
     [
@@ -1085,8 +1211,29 @@ describe('POST /verify scheme failures map to distinct reason codes', () => {
   }
 });
 
+/**
+ * POST /settle scheme failure mapping.
+ *
+ * Each misbehaving collaborator maps to a distinct errorReason and a
+ * settlement-store state (failed/unknown), lock timeouts and open breakers
+ * stay distinguishable, submitted-after-wire timeouts report
+ * submitted_outcome_unknown, and failures are audited.
+ */
 describe('POST /settle scheme failures map to distinct reason codes', () => {
-  /** Settles once and returns the JSON body plus the stored record. */
+  /**
+   * Settles once against a throwaway settlement store and returns the parsed
+   * response body alongside the persisted record.
+   *
+   * Boots an app per call so each scenario gets exactly one collaborator
+   * misbehaving, keys the request on `k-fail` so the record can be read back.
+   *
+   * @param {object} options
+   * @param {object} options.facilitator - Facilitator stub driving the outcome.
+   * @param {object} [options.config] - Config overrides merged over testConfig().
+   * @param {object} [options.extras] - Extra collaborators (audit, lock, ...).
+   * @param {object} [options.body] - Request body, defaulting to VALID_BODY.
+   * @returns {Promise<{json: object, record: object|undefined}>} Response body and stored record.
+   */
   async function settleWith({ facilitator, config = {}, extras = {}, body = VALID_BODY }) {
     const settlementStore = new MemorySettlementStore();
     let json;
@@ -1190,13 +1337,28 @@ describe('POST /settle scheme failures map to distinct reason codes', () => {
   });
 });
 
+/**
+ * POST /settle idempotent replay from the settlement store.
+ *
+ * Proves a prior record short-circuits settlement without touching the
+ * facilitator: stored responses replay verbatim (stringified JSON parsed
+ * first), bare records rebuild from their fields, in-flight and terminal
+ * failures replay their state, and only retryable failures settle again.
+ */
 describe('POST /settle idempotent replay from the settlement store', () => {
   const NETWORK = 'stellar:testnet';
 
   /**
-   * Seeds a store with one record under `key`, walked to `state`, and serves an
+   * Seeds a store with one record under `k1`, walked to `state`, and serves an
    * app over it. The facilitator counts calls so a test can prove a replay never
    * touched the chain.
+   *
+   * @param {'settled'|'submitted'|'failed'} state - State to walk the record to
+   *   before the request (`submitted` is the seeded default and is not updated).
+   * @param {object} [details={}] - Extra column values: `response`,
+   *   `error_reason`, `error_message`, `tx_hash`.
+   * @returns {Promise<{json: object, settleCalls: number}>} The parsed response
+   *   body and the number of times the facilitator settle path actually ran.
    */
   async function replay(state, details = {}) {
     const settlementStore = new MemorySettlementStore();
@@ -1283,6 +1445,14 @@ describe('POST /settle idempotent replay from the settlement store', () => {
   });
 });
 
+/**
+ * POST /settle optional collaborators — idempotency, webhooks, lock.
+ *
+ * Each collaborator is optional: when present it must be used (replay
+ * short-circuits, complete() records both outcomes, webhooks enqueue
+ * settlement.completed, the distributed lock serializes under the payment
+ * key), and when absent the route still works.
+ */
 describe('POST /settle optional collaborators', () => {
   test('a replayed idempotency key returns the recorded status and body', async () => {
     const idempotency = recordingIdempotency({
@@ -1343,6 +1513,14 @@ describe('POST /settle optional collaborators', () => {
   });
 });
 
+/**
+ * GET /settlements/:idempotencyKey and its /events sub-route.
+ *
+ * Reads are tenant-scoped: the owning key reads the record and its event
+ * log, any other key (or an unknown key) gets a 404 so settlement existence
+ * never leaks across tenants. Stores exposing getConsistent are read
+ * through it.
+ */
 describe('GET /settlements/:idempotencyKey', () => {
   const config = testConfig({ apiKeys: ['alice:a-secret', 'bob:b-secret'] });
   const alice = { authorization: 'Bearer a-secret' };
@@ -1394,6 +1572,15 @@ describe('GET /settlements/:idempotencyKey', () => {
   });
 });
 
+/**
+ * POST /discovery/resources — manual registration.
+ *
+ * Documents the rejection ladder: catalog budget is checked before body
+ * validation (429 + Retry-After + audit), structural problems are 400
+ * invalid_resource, a missing discovery extension is a hard drop, and
+ * CatalogError codes surface verbatim while uncoded errors collapse to
+ * catalog_error.
+ */
 describe('POST /discovery/resources (manual registration)', () => {
   test('a structurally invalid body → 400 invalid_resource', async () => {
     await withApp({}, async app => {
@@ -1467,6 +1654,14 @@ describe('POST /discovery/resources (manual registration)', () => {
   });
 });
 
+/**
+ * EXTENSION-RESPONSES header reporting for automatic cataloging.
+ *
+ * The bazaar outcome declared alongside a successful payment describes what
+ * cataloging did: hostile declarations hard-dropped with their code, budget
+ * refusals that still let the payment succeed (plus audit), soft-dropped
+ * fields named individually, and overwrite audits on re-cataloguing.
+ */
 describe('automatic cataloging outcomes (EXTENSION-RESPONSES)', () => {
   const verifying = stubFacilitator({ verify: async () => ({ isValid: true }) });
 
@@ -1531,6 +1726,14 @@ describe('automatic cataloging outcomes (EXTENSION-RESPONSES)', () => {
   });
 });
 
+/**
+ * Public discovery reads — /discovery/resources and /discovery/search.
+ *
+ * Covers query parsing (clamped limits, split extensions), search requiring
+ * a query, conditional GETs (ETag/If-None-Match answering 304 without
+ * re-running the catalog), and JSON-shaped failures when the catalog or the
+ * read budget breaks.
+ */
 describe('public discovery reads', () => {
   test('listing pagination is clamped and extensions are split', async () => {
     const { calls, catalog } = recordingCatalog();
@@ -1630,11 +1833,15 @@ describe('public discovery reads', () => {
   });
 });
 
+/**
+ * Cataloging failures during a genuinely catalogable payment.
+ *
+ * Distinct from 'automatic cataloging' above: those bodies are hard-dropped
+ * by validateForCatalog before any collaborator runs, so these use
+ * CATALOGABLE_BODY to force the failure inside processCataloging itself and
+ * prove the payment is still untouched.
+ */
 describe('cataloging failures on a catalogable payment', () => {
-  // The two "does not fail the payment" tests in 'automatic cataloging' above
-  // send VALID_BODY, which validateForCatalog hard-drops before the limiter or
-  // the catalog is ever called. These send a body that is actually catalogued,
-  // so the failure really happens inside processCataloging.
   const verifying = stubFacilitator({ verify: async () => ({ isValid: true }) });
 
   test('an async catalog write that rejects is logged, and the payment is untouched', async () => {
@@ -1670,6 +1877,12 @@ describe('cataloging failures on a catalogable payment', () => {
   });
 });
 
+/**
+ * RateLimit header fallback when the store records nothing.
+ *
+ * record* returning no state must not cost the caller its headers: they are
+ * rebuilt from the pre-record check so limit/remaining/reset still arrive.
+ */
 describe('RateLimit headers fall back to the pre-record check', () => {
   test('a limiter whose record call returns no state still yields headers', async () => {
     const rateLimiter = stubRateLimiter();
@@ -1685,6 +1898,12 @@ describe('RateLimit headers fall back to the pre-record check', () => {
   });
 });
 
+/**
+ * /admin/dlq operator routes.
+ *
+ * Registration is conditional: the routes exist only when a dead-letter
+ * store is wired in; otherwise they 404 even for an authenticated operator.
+ */
 describe('DLQ operator routes', () => {
   test('are registered only when a dead-letter store is supplied', async () => {
     const config = testConfig({ apiKeys: ['ops:o-secret'] });
@@ -1704,6 +1923,14 @@ describe('DLQ operator routes', () => {
   });
 });
 
+/**
+ * Unit tests for the shared test helpers themselves (test/helpers/app.js).
+ *
+ * Guards the fixture semantics the rest of the suite depends on: deep-copy
+ * isolation of overrides, ordered audit capture, error shaping, recording
+ * stubs, and withApp's guarantee that the app is closed even when the
+ * callback throws.
+ */
 describe('modular app test helpers and edge cases', () => {
   test('catalogableWith creates deep-copied overrides without mutating baseline fixture', () => {
     const custom = catalogableWith({ url: 'http://custom.ex/route', description: 'customized' });
