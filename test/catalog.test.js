@@ -156,6 +156,20 @@ async function captureDiagnostics(fn) {
 }
 
 /**
+ * Renders a rejected value for a diagnostic without assuming it is an Error.
+ * A promise can reject with a string, or with no value at all, and reading
+ * `.name` off those would raise a second, less useful error in place of the one
+ * this file is trying to name.
+ *
+ * @param {unknown} thrown - The rejection value.
+ * @returns {string} One line naming the type and, for an Error, its message.
+ */
+function describeThrown(thrown) {
+  if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`;
+  return `a non-Error rejection (${typeof thrown}: ${String(thrown)})`;
+}
+
+/**
  * Awaits a catalog call that must fail with a typed CatalogError, and reports
  * every other outcome as a CatalogFailureModeError:
  *
@@ -192,7 +206,7 @@ async function assertCatalogRejection(operation, call, { code, messageIncludes }
   if (!(thrown instanceof CatalogError)) {
     throw new CatalogFailureModeError(operation, {
       expected: `a CatalogError carrying ${code}`,
-      actual: `${thrown.name}: ${thrown.message}`,
+      actual: describeThrown(thrown),
     });
   }
   if (thrown.code !== code) {
@@ -584,6 +598,14 @@ test('MemoryCatalogStore Comprehensive Suite', async t => {
           url: 'http://search.ex/weather1',
           serviceName: 'Weather Daily',
           description: 'Global forecast service',
+          // The tag lifts this listing a full 8 points clear of the other one.
+          // Without it both match "weather" only in the service name, so their
+          // scores differ by nothing but the scorer's recency decay — and that
+          // decay is computed from `Date.now()` per item at millisecond
+          // resolution, so a millisecond boundary falling between the two
+          // searches below could swap them. This test then returned the same
+          // listing on page one and page two about once in 35 runs.
+          tags: ['weather'],
         }),
       );
 
@@ -594,15 +616,6 @@ test('MemoryCatalogStore Comprehensive Suite', async t => {
           description: 'Live precipitation map',
         }),
       );
-
-      // Both listings match "weather" in the service name and nowhere else, so
-      // their only score difference is the recency decay the scorer applies —
-      // and two listings written in the same millisecond are separated by a
-      // factor of ~1 - 3e-10. That is small enough for a millisecond boundary
-      // between the two searches below to swap them, which made this test fail
-      // intermittently with the same listing on both pages. The delay makes the
-      // decay difference real, so page 2 is deterministically the other one.
-      await new Promise(r => setTimeout(r, 5));
 
       const page1 = await store.search({ query: 'weather', limit: 1 });
       assert.equal(page1.resources.length, 1);
