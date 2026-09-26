@@ -211,10 +211,10 @@ export function resolveConfig(env = process.env) {
         min: 100,
         max: 10_000_000,
       }),
-keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
-   keyManagerPollIntervalMs: Number(
-     env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
-   ),
+      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
+      keyManagerPollIntervalMs: Number(
+        env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
+      ),
     };
   }
 
@@ -401,18 +401,18 @@ keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
      * store for region-aware rate limiting that survives partitions.
      */
     region: env.REGION || null,
-regions: (env.REGIONS ?? '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
-  .map(entry => {
-    const parts = entry.split(':');
-    return { 
-      region: parts[0], 
-      priority: Number(parts[1]) || 1, 
-      url: parts.slice(2).join(':') || null 
-    };
-  }),
+    regions: (env.REGIONS ?? '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(entry => {
+        const parts = entry.split(':');
+        return {
+          region: parts[0],
+          priority: Number(parts[1]) || 1,
+          url: parts.slice(2).join(':') || null,
+        };
+      }),
 
     /**
      * Kafka (#117). Brokers unset means webhooks are delivered directly,

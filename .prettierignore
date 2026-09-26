@@ -5,3 +5,13 @@ package-lock.json
 # produces large diffs that hide the change being reviewed, and formatting
 # markdown is not what this check is for.
 *.md
+
+# Ignore files that prettier cannot parse
+.env.*
+*.env
+*.sh
+*.sql
+*.rs
+*.wasm
+migrations/
+test/fixtures/
