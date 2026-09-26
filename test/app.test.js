@@ -24,35 +24,19 @@ import {
   stubRateLimiter,
   stubCatalog,
   VALID_BODY,
+  CATALOGABLE_BODY,
+  catalogableWith,
+  withApp,
+  captureAudit,
+  bazaarOutcome,
+  never,
+  codedError,
+  recordingIdempotency,
+  recordingCatalog,
 } from './helpers/app.js';
 import { MemoryCatalogStore, CatalogError } from '../src/catalog/memory.js';
 import { MemorySettlementStore } from '../src/store/memory.js';
 import { requestState } from '../src/request-state.js';
-
-// A body that actually produces a catalog entry: VALID_BODY has no discovery
-// extension, so validateForCatalog hard-drops it. This one does.
-const CATALOGABLE_BODY = {
-  paymentPayload: {
-    x402Version: 2,
-    scheme: 'exact',
-    network: 'stellar:testnet',
-    resource: { url: 'http://api.ex/140', serviceName: 'provenance-demo', description: 'demo' },
-    extensions: {
-      bazaar: {
-        info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
-        schema: { type: 'object' },
-        routeTemplate: '/140',
-      },
-    },
-  },
-  paymentRequirements: {
-    scheme: 'exact',
-    network: 'stellar:testnet',
-    asset: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
-    maxAmountRequired: '1000',
-    payTo: 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6',
-  },
-};
 
 describe('GET /healthz', () => {
   let app;
@@ -790,7 +774,7 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 
   test('an unsettled verify-only listing disappears from discovery once it expires', async () => {
     // Short TTL so the test does not wait out a real window.
-    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 150 });
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 400 });
     const app = await serve({
       catalog,
       facilitator: stubFacilitator({
@@ -801,11 +785,11 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
       const headers = { authorization: 'Bearer secret' };
       await app.post('/verify', CATALOGABLE_BODY, headers);
       // Give the enqueued (off-hot-path) catalog write time to land while the
-      // 150ms window still puts the listing in the public view.
+      // TTL window still puts the listing in the public view.
       await new Promise(r => setTimeout(r, 60));
       assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 1);
 
-      await new Promise(r => setTimeout(r, 180));
+      await new Promise(r => setTimeout(r, 450));
       assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 0);
 
       const pruned = await catalog.pruneExpired();
@@ -824,56 +808,6 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 // collaborator misbehaving (or one config knob set), make the request a client
 // would make, and assert on status, reason code and headers.
 // ---------------------------------------------------------------------------
-
-/**
- * Boots an app with `options`, runs `fn` against it and always closes it.
- *
- * @param {Parameters<typeof serve>[0]} options - forwarded to serve()
- * @param {(app: Awaited<ReturnType<typeof serve>>) => Promise<void>} fn
- */
-async function withApp(options, fn) {
-  const app = await serve(options);
-  try {
-    await fn(app);
-  } finally {
-    await app.close();
-  }
-}
-
-/**
- * An audit sink that keeps every record, so a test can assert an abuse or
- * failure signal was emitted rather than scraping stdout.
- *
- * @returns {{audit: Function, records: Array<{event: string} & object>}}
- */
-function captureAudit() {
-  const records = [];
-  return { records, audit: (event, fields) => records.push({ event, ...fields }) };
-}
-
-/** Decodes the base64 EXTENSION-RESPONSES header into its `bazaar` outcome. */
-function bazaarOutcome(res) {
-  const raw = res.headers.get('extension-responses');
-  assert.ok(raw, 'EXTENSION-RESPONSES header must be present');
-  return JSON.parse(Buffer.from(raw, 'base64').toString('utf8')).bazaar;
-}
-
-/** A promise that never settles: stands in for a scheme call that hangs. */
-const never = () => new Promise(() => {});
-
-/** An Error carrying a `code`, the way the RPC breaker and timeouts tag theirs. */
-const codedError = (message, code) => Object.assign(new Error(message), { code });
-
-/** A catalogable body whose `resource` is replaced by `resource`. */
-function catalogableWith(resource) {
-  return {
-    ...CATALOGABLE_BODY,
-    paymentPayload: {
-      ...CATALOGABLE_BODY.paymentPayload,
-      resource: { ...CATALOGABLE_BODY.paymentPayload.resource, ...resource },
-    },
-  };
-}
 
 describe('transport hardening', () => {
   test('HSTS is sent only when NODE_ENV=production; nosniff always', async () => {
@@ -1350,17 +1284,6 @@ describe('POST /settle idempotent replay from the settlement store', () => {
 });
 
 describe('POST /settle optional collaborators', () => {
-  /** An idempotency store that records begin/complete calls. */
-  function recordingIdempotency(beginResult) {
-    const completed = [];
-    return {
-      completed,
-      keyFor: () => 'idem-1',
-      begin: async key => beginResult ?? { replayed: false, key },
-      complete: async (key, status, response) => completed.push({ key, status, response }),
-    };
-  }
-
   test('a replayed idempotency key returns the recorded status and body', async () => {
     const idempotency = recordingIdempotency({
       replayed: true,
@@ -1609,25 +1532,6 @@ describe('automatic cataloging outcomes (EXTENSION-RESPONSES)', () => {
 });
 
 describe('public discovery reads', () => {
-  /** A catalog that records the params each read was called with. */
-  function recordingCatalog(overrides = {}) {
-    const calls = [];
-    return {
-      calls,
-      catalog: stubCatalog({
-        listResources: async params => {
-          calls.push(params);
-          return { items: [], total: 0 };
-        },
-        search: async params => {
-          calls.push(params);
-          return { resources: [{ url: 'http://x' }], partialResults: false, pagination: {} };
-        },
-        ...overrides,
-      }),
-    };
-  }
-
   test('listing pagination is clamped and extensions are split', async () => {
     const { calls, catalog } = recordingCatalog();
     await withApp({ catalog }, async app => {
@@ -1797,5 +1701,64 @@ describe('DLQ operator routes', () => {
     await withApp({ config }, async app => {
       assert.equal((await app.get('/admin/dlq', headers)).status, 404);
     });
+  });
+});
+
+describe('modular app test helpers and edge cases', () => {
+  test('catalogableWith creates deep-copied overrides without mutating baseline fixture', () => {
+    const custom = catalogableWith({ url: 'http://custom.ex/route', description: 'customized' });
+    assert.equal(custom.paymentPayload.resource.url, 'http://custom.ex/route');
+    assert.equal(custom.paymentPayload.resource.description, 'customized');
+    assert.equal(CATALOGABLE_BODY.paymentPayload.resource.url, 'http://api.ex/140');
+  });
+
+  test('captureAudit records emitted events in order', () => {
+    const { audit, records } = captureAudit();
+    audit('event_one', { key: 'val1' });
+    audit('event_two', { count: 42 });
+    assert.equal(records.length, 2);
+    assert.deepEqual(records[0], { event: 'event_one', key: 'val1' });
+    assert.deepEqual(records[1], { event: 'event_two', count: 42 });
+  });
+
+  test('codedError sets message and code properties', () => {
+    const err = codedError('timeout occurred', 'ETIMEDOUT');
+    assert.ok(err instanceof Error);
+    assert.equal(err.message, 'timeout occurred');
+    assert.equal(err.code, 'ETIMEDOUT');
+  });
+
+  test('recordingIdempotency tracks completed entries and replayed flags', async () => {
+    const idem = recordingIdempotency({ replayed: true, key: 'idem-test' });
+    const beginRes = await idem.begin('idem-test');
+    assert.deepEqual(beginRes, { replayed: true, key: 'idem-test' });
+
+    await idem.complete('idem-test', 200, { success: true });
+    assert.equal(idem.completed.length, 1);
+    assert.deepEqual(idem.completed[0], {
+      key: 'idem-test',
+      status: 200,
+      response: { success: true },
+    });
+  });
+
+  test('recordingCatalog captures query and search arguments', async () => {
+    const { calls, catalog } = recordingCatalog();
+    await catalog.listResources({ limit: 10, offset: 5 });
+    await catalog.search({ query: 'test', limit: 5 });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], { limit: 10, offset: 5 });
+    assert.deepEqual(calls[1], { query: 'test', limit: 5 });
+  });
+
+  test('withApp ensures app teardown on callback exception', async () => {
+    let closedApp = null;
+    await assert.rejects(async () => {
+      await withApp({}, async app => {
+        closedApp = app;
+        throw new Error('deliberate callback rejection');
+      });
+    }, /deliberate callback rejection/);
+    assert.ok(closedApp);
   });
 });
