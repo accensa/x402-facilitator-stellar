@@ -811,6 +811,7 @@ test('resolveConfig: handles ENABLE_RERANKING', () => {
   const env = {
     FACILITATOR_SECRET: 'S123',
     ENABLE_RERANKING: 'true',
+    RERANK_URL: 'https://rerank.example.com/v1/rerank',
   };
   const config = resolveConfig(env);
   assert.strictEqual(config.enableReranking, true);

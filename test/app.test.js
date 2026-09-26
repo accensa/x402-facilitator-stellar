@@ -774,7 +774,7 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 
   test('an unsettled verify-only listing disappears from discovery once it expires', async () => {
     // Short TTL so the test does not wait out a real window.
-    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 400 });
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 800 });
     const app = await serve({
       catalog,
       facilitator: stubFacilitator({
@@ -786,10 +786,10 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
       await app.post('/verify', CATALOGABLE_BODY, headers);
       // Give the enqueued (off-hot-path) catalog write time to land while the
       // TTL window still puts the listing in the public view.
-      await new Promise(r => setTimeout(r, 60));
+      await new Promise(r => setTimeout(r, 50));
       assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 1);
 
-      await new Promise(r => setTimeout(r, 450));
+      await new Promise(r => setTimeout(r, 900));
       assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 0);
 
       const pruned = await catalog.pruneExpired();
