@@ -149,13 +149,18 @@ export function resolveConfig(env = process.env) {
     };
     if (!str) return limits;
     str.split(',').forEach(pair => {
-      const [k, v] = pair.split('=');
-      if (k === 'verify_rpm') limits.verifyRpm = Number(v);
-      if (k === 'settle_rpm') limits.settleRpm = Number(v);
-      if (k === 'settle_rph') limits.settleRph = Number(v);
-      if (k === 'settle_rpd') limits.settleRpd = Number(v);
-      if (k === 'fee_spd') limits.feeSpd = Number(v);
-      if (k === 'catalog_rpm') limits.catalogRpm = Number(v);
+      const parts = pair.split('=');
+      if (parts.length !== 2) return; // Skip malformed pairs
+      const [k, v] = parts;
+      // Skip if value is empty or not a valid number
+      if (v === '' || Number.isNaN(Number(v))) return;
+      const numValue = Number(v);
+      if (k === 'verify_rpm') limits.verifyRpm = numValue;
+      if (k === 'settle_rpm') limits.settleRpm = numValue;
+      if (k === 'settle_rph') limits.settleRph = numValue;
+      if (k === 'settle_rpd') limits.settleRpd = numValue;
+      if (k === 'fee_spd') limits.feeSpd = numValue;
+      if (k === 'catalog_rpm') limits.catalogRpm = numValue;
     });
     return limits;
   };
@@ -206,10 +211,10 @@ export function resolveConfig(env = process.env) {
         min: 100,
         max: 10_000_000,
       }),
-      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET || null,
-      keyManagerPollIntervalMs: Number(
-        env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
-      ),
+keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
+   keyManagerPollIntervalMs: Number(
+     env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
+   ),
     };
   }
 
@@ -396,14 +401,18 @@ export function resolveConfig(env = process.env) {
      * store for region-aware rate limiting that survives partitions.
      */
     region: env.REGION || null,
-    regions: (env.REGIONS ?? '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-      .map(entry => {
-        const [region, priority, url] = entry.split(':');
-        return { region, priority: Number(priority) || 1, url: url || null };
-      }),
+regions: (env.REGIONS ?? '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(entry => {
+    const parts = entry.split(':');
+    return { 
+      region: parts[0], 
+      priority: Number(parts[1]) || 1, 
+      url: parts.slice(2).join(':') || null 
+    };
+  }),
 
     /**
      * Kafka (#117). Brokers unset means webhooks are delivered directly,
