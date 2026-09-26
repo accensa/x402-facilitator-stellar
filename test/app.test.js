@@ -1,19 +1,59 @@
 /**
- * The HTTP surface.
+ * @file app.test.js
+ * @description Tests for the HTTP transport surface in `src/app.js`.
  *
- * What is under test is the transport — status codes, reason codes, pass-through
- * fidelity, auth and rate-limit wiring. ExactStellarScheme is upstream's and is
- * stubbed throughout: reimplementing or re-verifying it is what this repo exists
- * not to do.
+ * ### What is under test
+ * The transport layer — status codes, reason codes, pass-through fidelity,
+ * auth and rate-limit wiring. `ExactStellarScheme` is upstream's code and is
+ * stubbed throughout: reimplementing or re-verifying it is exactly what this
+ * repo exists NOT to do (see CONTRIBUTING.md).
  *
  * Nothing here touches the network or needs a funded account.
  *
- * Testing strategy: every test boots the real Fastify app from src/app.js via
- * the serve() harness and drives it over HTTP, swapping only the collaborators
+ * ### Testing strategy
+ * Every test boots the real Fastify app from `src/app.js` via the `serve()`
+ * harness and drives it over HTTP, swapping only the collaborators
  * (facilitator, rate limiter, catalog, settlement store, audit sink, lock,
- * webhooks). A failure mode is exercised by handing the app a collaborator that
- * fails in that way, never by reaching into app internals, so each assertion is
- * about what a client actually sees on the wire.
+ * webhooks). A failure mode is exercised by handing the app a collaborator
+ * that fails in that specific way — never by reaching into app internals —
+ * so each assertion is about what a real client sees on the wire.
+ *
+ * ### Collaborator stubs
+ * `stubFacilitator`, `stubRateLimiter`, `stubCatalog` are thin in-memory
+ * implementations defined in `./helpers/app.js`. They record calls and
+ * accept per-test overrides so a single failing collaborator can be isolated
+ * without affecting the others.
+ *
+ * ### Test groupings
+ * | describe block | concern |
+ * |---|---|
+ * | `GET /healthz` | basic liveness |
+ * | `GET /supported` | scheme discovery passthrough |
+ * | `malformed bodies always carry a reason` | transport-level 400 shapes |
+ * | `POST /verify` | verification pass-through and error mapping |
+ * | `POST /settle` | settlement pass-through and error mapping |
+ * | `rate limiting` | 429 headers, budget consumption, isolation |
+ * | `GET /usage` | per-key usage scoping |
+ * | `automatic cataloging` | off-hot-path indexing; never delays payments |
+ * | `RateLimit-Remaining reflects post-count state (#141)` | header fidelity |
+ * | `catalog provenance and provisional lifecycle (#140)` | verify/settle sourcing |
+ * | `transport hardening` | HSTS, TRUST_PROXY, 404 shapes |
+ * | `error boundary` | malformed JSON, oversized bodies, limiter crashes |
+ * | `CORS preflight` | allowlist vs. wildcard per route class |
+ * | `API key header forms` | Bearer variations and rejection reasons |
+ * | `GET /readyz` | readiness checker wiring |
+ * | `GET /metrics` | Prometheus output |
+ * | `POST /verify scheme failures` | distinct reason codes per failure type |
+ * | `POST /settle scheme failures` | timeout/lock/breaker → reason + state |
+ * | `POST /settle idempotent replay` | replay semantics per stored state |
+ * | `POST /settle optional collaborators` | idempotency, webhooks, lock |
+ * | `GET /settlements/:key` | tenant isolation, event log |
+ * | `POST /discovery/resources` | manual registration, hard/soft drops |
+ * | `automatic cataloging outcomes (EXTENSION-RESPONSES)` | header encoding |
+ * | `public discovery reads` | pagination, clamping, 304, errors |
+ * | `cataloging failures on a catalogable payment` | off-path write isolation |
+ * | `RateLimit headers fall back to pre-record check` | header fallback |
+ * | `DLQ operator routes` | conditional registration |
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,8 +69,17 @@ import { MemoryCatalogStore, CatalogError } from '../src/catalog/memory.js';
 import { MemorySettlementStore } from '../src/store/memory.js';
 import { requestState } from '../src/request-state.js';
 
-// A body that actually produces a catalog entry: VALID_BODY has no discovery
-// extension, so validateForCatalog hard-drops it. This one does.
+/**
+ * A payment body that the catalog gate accepts and indexes.
+ *
+ * `VALID_BODY` (from the test harness) carries no Bazaar discovery extension,
+ * so `validateForCatalog` hard-drops it before indexing ever occurs. Tests
+ * that need to exercise the full cataloging path (provisional listings,
+ * overwrite auditing, EXTENSION-RESPONSES header) use this body instead.
+ *
+ * The `resource.url` is deliberately distinct from `VALID_BODY`'s to make it
+ * easy to identify in discovery assertions.
+ */
 const CATALOGABLE_BODY = {
   paymentPayload: {
     x402Version: 2,
@@ -826,10 +875,13 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Boots an app with `options`, runs `fn` against it and always closes it.
+ * Boots a Fastify app with `options`, runs `fn` against it, and always tears
+ * it down — even if `fn` throws. Eliminates the try/finally boilerplate that
+ * every test would otherwise repeat.
  *
- * @param {Parameters<typeof serve>[0]} options - forwarded to serve()
- * @param {(app: Awaited<ReturnType<typeof serve>>) => Promise<void>} fn
+ * @param {Parameters<typeof serve>[0]} options - Collaborator overrides forwarded to `serve()`.
+ * @param {(app: Awaited<ReturnType<typeof serve>>) => Promise<void>} fn - Test body.
+ * @returns {Promise<void>}
  */
 async function withApp(options, fn) {
   const app = await serve(options);
@@ -841,30 +893,67 @@ async function withApp(options, fn) {
 }
 
 /**
- * An audit sink that keeps every record, so a test can assert an abuse or
- * failure signal was emitted rather than scraping stdout.
+ * Creates an in-memory audit sink that captures every emitted record.
  *
- * @returns {{audit: Function, records: Array<{event: string} & object>}}
+ * Using a capture sink instead of asserting on stdout means tests can make
+ * precise assertions about which events were emitted and with what fields,
+ * without relying on log-string parsing.
+ *
+ * @returns {{ audit: (event: string, fields: object) => void, records: Array<{event: string} & object> }}
  */
 function captureAudit() {
   const records = [];
   return { records, audit: (event, fields) => records.push({ event, ...fields }) };
 }
 
-/** Decodes the base64 EXTENSION-RESPONSES header into its `bazaar` outcome. */
+/**
+ * Decodes the base64-encoded `EXTENSION-RESPONSES` header and returns the
+ * `bazaar` outcome object it contains.
+ *
+ * The header encodes the catalog gate's per-extension result so agents can
+ * introspect why a payment was catalogued (or not) without a separate lookup.
+ * It is always present on `/verify` and `/settle` responses that complete the
+ * policy check, even when the catalog is bypassed.
+ *
+ * @param {Response} res - A Fetch-compatible response object from the test harness.
+ * @returns {{ status: string, code?: string, reason?: string }}
+ */
 function bazaarOutcome(res) {
   const raw = res.headers.get('extension-responses');
   assert.ok(raw, 'EXTENSION-RESPONSES header must be present');
   return JSON.parse(Buffer.from(raw, 'base64').toString('utf8')).bazaar;
 }
 
-/** A promise that never settles: stands in for a scheme call that hangs. */
+/**
+ * Returns a promise that never settles, standing in for a scheme call that
+ * hangs indefinitely. Used to trigger `requestTimeoutMs` without real I/O.
+ *
+ * @returns {Promise<never>}
+ */
 const never = () => new Promise(() => {});
 
-/** An Error carrying a `code`, the way the RPC breaker and timeouts tag theirs. */
+/**
+ * Creates an Error whose `.code` property is set to `code`.
+ *
+ * The RPC breaker and several upstream error paths tag their errors with a
+ * `code` field (e.g. `'RPC_BREAKER_OPEN'`) so the transport can map them to
+ * stable reason codes. This factory replicates that shape in tests.
+ *
+ * @param {string} message - Human-readable error description.
+ * @param {string} code - Stable machine-readable error code.
+ * @returns {Error & { code: string }}
+ */
 const codedError = (message, code) => Object.assign(new Error(message), { code });
 
-/** A catalogable body whose `resource` is replaced by `resource`. */
+/**
+ * Returns a copy of {@link CATALOGABLE_BODY} with `resource` merged over the
+ * existing resource fields. Used to test resource-level validation branches
+ * (e.g. a bad URL scheme, a missing field) without duplicating the full body.
+ *
+ * @param {Partial<typeof CATALOGABLE_BODY['paymentPayload']['resource']>} resource
+ *   Fields to merge into the payment payload's resource object.
+ * @returns {typeof CATALOGABLE_BODY}
+ */
 function catalogableWith(resource) {
   return {
     ...CATALOGABLE_BODY,
@@ -1152,7 +1241,20 @@ describe('POST /verify scheme failures map to distinct reason codes', () => {
 });
 
 describe('POST /settle scheme failures map to distinct reason codes', () => {
-  /** Settles once and returns the JSON body plus the stored record. */
+  /**
+   * Settles once with the given collaborators and returns the JSON response
+   * body together with the record saved to the settlement store.
+   *
+   * Encapsulates the serve/close lifecycle so individual test cases only
+   * declare what they are varying (facilitator, config, extras, body).
+   *
+   * @param {object} opts
+   * @param {object} opts.facilitator - Stub facilitator with a `settle` override.
+   * @param {object} [opts.config={}] - Config overrides merged with `testConfig()`.
+   * @param {object} [opts.extras={}] - Extra collaborators (audit, distributedLock, etc.).
+   * @param {object} [opts.body=VALID_BODY] - Request body sent to POST /settle.
+   * @returns {Promise<{ json: object, record: object }>}
+   */
   async function settleWith({ facilitator, config = {}, extras = {}, body = VALID_BODY }) {
     const settlementStore = new MemorySettlementStore();
     let json;
@@ -1260,9 +1362,18 @@ describe('POST /settle idempotent replay from the settlement store', () => {
   const NETWORK = 'stellar:testnet';
 
   /**
-   * Seeds a store with one record under `key`, walked to `state`, and serves an
-   * app over it. The facilitator counts calls so a test can prove a replay never
-   * touched the chain.
+   * Seeds the settlement store with one record under key `'k1'` walked to
+   * `state`, then fires a POST /settle with that idempotency key and returns
+   * the JSON response along with a count of how many times the facilitator's
+   * `settle` method was actually called.
+   *
+   * A `settleCalls === 0` result proves the idempotent replay path was taken;
+   * `settleCalls === 1` proves the re-try path was taken instead.
+   *
+   * @param {'submitted'|'settled'|'failed'} state - Settlement record state to seed.
+   * @param {object} [details={}] - Additional fields merged into the stored record
+   *   (e.g. `tx_hash`, `response`, `error_reason`).
+   * @returns {Promise<{ json: object, settleCalls: number }>}
    */
   async function replay(state, details = {}) {
     const settlementStore = new MemorySettlementStore();
@@ -1350,7 +1461,16 @@ describe('POST /settle idempotent replay from the settlement store', () => {
 });
 
 describe('POST /settle optional collaborators', () => {
-  /** An idempotency store that records begin/complete calls. */
+  /**
+   * Creates a minimal idempotency store stub whose `begin` always returns
+   * `beginResult` (or a fresh non-replayed token when `beginResult` is
+   * undefined). Records every `complete` call so tests can assert on the
+   * number, status and response of completions.
+   *
+   * @param {object} [beginResult] - Value returned by `begin()`. Pass an object
+   *   with `replayed: true` to simulate a key that has already been settled.
+   * @returns {{ completed: Array, keyFor: Function, begin: Function, complete: Function }}
+   */
   function recordingIdempotency(beginResult) {
     const completed = [];
     return {
@@ -1609,7 +1729,16 @@ describe('automatic cataloging outcomes (EXTENSION-RESPONSES)', () => {
 });
 
 describe('public discovery reads', () => {
-  /** A catalog that records the params each read was called with. */
+  /**
+   * Creates a catalog stub that records the `params` object passed to each
+   * `listResources` or `search` call. Accepts per-method overrides so a test
+   * can replace only the method it cares about while the others remain as
+   * no-op stubs. Used to verify parameter clamping and splitting logic without
+   * a real catalog.
+   *
+   * @param {object} [overrides={}] - Method overrides for `stubCatalog`.
+   * @returns {{ calls: Array<object>, catalog: object }}
+   */
   function recordingCatalog(overrides = {}) {
     const calls = [];
     return {
