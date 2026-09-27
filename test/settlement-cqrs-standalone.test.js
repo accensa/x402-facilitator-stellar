@@ -246,5 +246,3 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     assert.ok(pool.projections.has('multi-2'));
   });
 });
-
-console.log('✓ All CQRS standalone tests defined and syntax valid');
