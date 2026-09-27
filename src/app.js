@@ -23,6 +23,30 @@ import {
 } from './payment-body.js';
 
 /**
+ * Meaningful message extraction for anything a collaborator throws (#369).
+ *
+ * `String(err)` turns a thrown object into '[object Object]', which tells a
+ * client nothing. Errors keep their message (they are already meaningful);
+ * every other value is JSON-stringified so the caller still receives the
+ * content, and a value JSON cannot represent falls back to String().
+ *
+ * @param {unknown} err - the thrown value
+ * @returns {string} a message that always carries the error's content
+ */
+function describeThrown(err) {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  if (typeof err === 'object' && err !== null) {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
+
+/**
  * Builds the Fastify app.
  *
  * Takes its collaborators rather than reaching for module state, which is what
@@ -249,7 +273,19 @@ export async function createApp(
 
       reply.header(
         'EXTENSION-RESPONSES',
-        Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
+        // Encoded lazily (#368): the base64 EXTENSION-RESPONSES value was
+        // previously built eagerly on every catalogable verify/settle — a JSON
+        // stringify plus a Buffer copy plus the 4/3x base64 expansion — even
+        // though most callers never read the header. Computing it from the
+        // settled `outcome` only when Fastify serializes the headers keeps the
+        // hot path allocation-free for the common case while producing exactly
+        // the same bytes for callers that do read it (asserted in app.test.js,
+        // 'the lazy EXTENSION-RESPONSES encoding is byte-identical').
+        {
+          toString() {
+            return Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64');
+          },
+        },
       );
     } catch (err) {
       console.error('[Catalog] Unhandled error during processCataloging:', err);
@@ -385,7 +421,7 @@ export async function createApp(
           const scheme = body?.paymentRequirements?.scheme ?? 'unknown';
           console.error(
             `[/verify] Exception: route=/verify network=${network} scheme=${scheme} ` +
-              `error=${err instanceof Error ? err.message : String(err)} ` +
+              `error=${describeThrown(err)} ` +
               `stack=${err instanceof Error ? err.stack : 'no stack'}`,
           );
 
@@ -414,7 +450,7 @@ export async function createApp(
           return reply.send({
             isValid: false,
             invalidReason,
-            invalidMessage: err instanceof Error ? err.message : String(err),
+            invalidMessage: describeThrown(err),
           });
         }
       });
@@ -657,7 +693,7 @@ export async function createApp(
           const scheme = body?.paymentRequirements?.scheme ?? 'unknown';
           console.error(
             `[/settle] Exception: route=/settle network=${network} scheme=${scheme} ` +
-              `error=${err instanceof Error ? err.message : String(err)} ` +
+              `error=${describeThrown(err)} ` +
               `stack=${err instanceof Error ? err.stack : 'no stack'}`,
           );
 
@@ -694,12 +730,12 @@ export async function createApp(
           await settlementStore.updateState(idempotencyKey, targetState, {
             tx_hash: transaction,
             error_reason: errorReason,
-            error_message: err instanceof Error ? err.message : String(err),
+            error_message: describeThrown(err),
           });
           return reply.send({
             success: false,
             errorReason,
-            errorMessage: err instanceof Error ? err.message : String(err),
+            errorMessage: describeThrown(err),
             transaction,
             network: req.body?.paymentRequirements?.network ?? '',
           });
@@ -971,14 +1007,14 @@ export async function createApp(
       return reply.code(status).send({
         isValid: false,
         invalidReason: code,
-        invalidMessage: err instanceof Error ? err.message : String(err),
+        invalidMessage: describeThrown(err),
       });
     }
     if (path === '/settle') {
       return reply.code(status).send({
         success: false,
         errorReason: code,
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: describeThrown(err),
         transaction: '',
         network: req.body?.paymentRequirements?.network,
       });

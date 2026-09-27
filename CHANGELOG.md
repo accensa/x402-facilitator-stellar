@@ -33,6 +33,15 @@ pinned.
 - `server.js` now installs `unhandledRejection` / `uncaughtException` handlers
   and reports a listen or metrics-listener bind failure, exiting non-zero with
   a diagnostic instead of dying silently (#205).
+- A facilitator throwing a non-Error value (an object, a number) no longer
+  surfaces `[object Object]` as `invalidMessage`/`errorMessage`: objects are
+  JSON-stringified so their content reaches the client, while Error messages
+  and strings pass through unchanged (#369).
+- The `EXTENSION-RESPONSES` header on catalogable payments is now encoded
+  lazily, when the response is actually serialized, instead of eagerly on
+  every verify/settle. The bytes a bazaar client receives are unchanged
+  (pinned byte-for-byte by tests); callers that never read the header no
+  longer pay the JSON+base64 cost per payment (#368).
 
 ## [0.0.1] - 2026-08-11
 
