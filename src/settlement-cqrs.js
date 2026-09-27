@@ -113,7 +113,9 @@ export class EventStreamReader {
    * Used for calculating projection lag.
    */
   async getMaxSequence() {
-    const result = await this.pool.query('SELECT COALESCE(MAX(seq), 0) as max_seq FROM settlement_events');
+    const result = await this.pool.query(
+      'SELECT COALESCE(MAX(seq), 0) as max_seq FROM settlement_events',
+    );
     return result.rows[0]?.max_seq || 0;
   }
 }
