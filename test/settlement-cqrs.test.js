@@ -351,13 +351,17 @@ describe('CQRS Event Streaming Pipeline', () => {
   function createEventStorePool(overrides = {}) {
     const events = overrides.events || [];
     const projections = new Map();
-    let checkpointSeq = 0;
+    const state = {
+      checkpointSeq: 0,
+    };
     let maxSeq = events.length > 0 ? Math.max(...events.map(e => e.seq)) : 0;
 
     return {
       events,
       projections,
-      checkpointSeq,
+      get checkpointSeq() {
+        return state.checkpointSeq;
+      },
       on: () => {},
       query: async (text, params = []) => {
         const flat = text.replace(/\s+/g, ' ').trim();
@@ -373,10 +377,10 @@ describe('CQRS Event Streaming Pipeline', () => {
             return { rows: [] };
           }
           if (flat.includes('SELECT last_seq')) {
-            return { rows: [{ last_seq: checkpointSeq }] };
+            return { rows: [{ last_seq: state.checkpointSeq }] };
           }
           if (flat.includes('UPDATE')) {
-            checkpointSeq = params[0];
+            state.checkpointSeq = params[0];
             return { rows: [] };
           }
         }
