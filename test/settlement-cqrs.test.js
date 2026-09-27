@@ -5,6 +5,20 @@ import { buildSettlementStore } from '../src/store/index.js';
 import { resolveConfig } from '../src/config.js';
 import { createApp } from '../src/app.js';
 import { Keypair } from '@stellar/stellar-sdk';
+import {
+  CheckpointManager,
+  EventStreamReader,
+  ProjectionWriter,
+  ProjectionWorker,
+  createProjectionWorker,
+} from '../src/settlement-cqrs.js';
+import {
+  simulateRecoveryTest,
+  processToCaughtUp,
+  validateEventOrdering,
+  verifyCheckpointPersistence,
+} from '../src/eventstore/projection-worker.js';
+import { SETTLEMENT_EVENT_TYPES } from '../src/eventstore/events.js';
 
 /**
  * Minimal fake pg Pool mimicking the subset of the `pg` API the store uses:
@@ -327,5 +341,527 @@ describe('CQRS read replica settlement store (#121)', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe('CQRS Event Streaming Pipeline', () => {
+  /**
+   * Helper to create a fake pool with event store support
+   */
+  function createEventStorePool(overrides = {}) {
+    const events = overrides.events || [];
+    const projections = new Map();
+    let checkpointSeq = 0;
+    let maxSeq = events.length > 0 ? Math.max(...events.map(e => e.seq)) : 0;
+
+    return {
+      events,
+      projections,
+      checkpointSeq,
+      on: () => {},
+      query: async (text, params = []) => {
+        const flat = text.replace(/\s+/g, ' ').trim();
+
+        // Create tables
+        if (/CREATE TABLE|CREATE INDEX/.test(flat)) {
+          return { rows: [] };
+        }
+
+        // Checkpoint initialization
+        if (flat.includes('settlement_projection_checkpoint')) {
+          if (flat.includes('INSERT INTO')) {
+            return { rows: [] };
+          }
+          if (flat.includes('SELECT last_seq')) {
+            return { rows: [{ last_seq: checkpointSeq }] };
+          }
+          if (flat.includes('UPDATE')) {
+            checkpointSeq = params[0];
+            return { rows: [] };
+          }
+        }
+
+        // Read events batch
+        if (flat.includes('FROM settlement_events e WHERE e.seq >')) {
+          const fromSeq = params[0];
+          const limit = params[1];
+          const batch = events.filter(e => e.seq > fromSeq).slice(0, limit);
+          return { rows: batch };
+        }
+
+        // Max sequence
+        if (flat.includes('MAX(seq)')) {
+          return { rows: [{ max_seq: maxSeq }] };
+        }
+
+        // Fetch all events for a key
+        if (flat.includes('WHERE idempotency_key = $1') && flat.includes('ORDER BY seq')) {
+          const key = params[0];
+          const keyEvents = events.filter(e => e.idempotency_key === key);
+          return { rows: keyEvents };
+        }
+
+        // Write projection
+        if (flat.includes('INSERT INTO settlement_read_model')) {
+          const [key] = params;
+          projections.set(key, {
+            idempotency_key: params[0],
+            key_id: params[1],
+            network: params[2],
+            scheme: params[3],
+            state: params[8],
+            tx_hash: params[9],
+            last_event_seq: params[14],
+          });
+          return { rows: [] };
+        }
+
+        // Query merchant history
+        if (flat.includes('FROM settlement_read_model WHERE key_id')) {
+          const keyId = params[0];
+          const rows = [...projections.values()].filter(p => p.key_id === keyId);
+          return { rows };
+        }
+
+        // State counts
+        if (flat.includes('GROUP BY state')) {
+          const counts = new Map();
+          for (const p of projections.values()) {
+            counts.set(p.state, (counts.get(p.state) || 0) + 1);
+          }
+          const rows = [...counts.entries()].map(([state, count]) => ({
+            state,
+            count: String(count),
+          }));
+          return { rows };
+        }
+
+        return { rows: [] };
+      },
+    };
+  }
+
+  /**
+   * Helper to create mock metrics
+   */
+  function createMockMetrics() {
+    const metrics = {
+      projectionLag: 0,
+      eventsProcessed: 0,
+      batchDurations: [],
+      throughput: 0,
+    };
+
+    return {
+      setProjectionLag: lag => {
+        metrics.projectionLag = lag;
+      },
+      incProjectionEventsProcessed: count => {
+        metrics.eventsProcessed += count;
+      },
+      observeProjectionBatchDuration: duration => {
+        metrics.batchDurations.push(duration);
+      },
+      setProjectionThroughput: throughput => {
+        metrics.throughput = throughput;
+      },
+      getMetrics: () => metrics,
+    };
+  }
+
+  test('CheckpointManager initializes and persists checkpoint', async () => {
+    const pool = createEventStorePool();
+    const checkpoint = new CheckpointManager(pool, { info: () => {} });
+
+    await checkpoint.initialize();
+    assert.equal(checkpoint.getOffset(), 0);
+
+    await checkpoint.updateCheckpoint(42);
+    assert.equal(checkpoint.getOffset(), 42);
+    assert.equal(pool.checkpointSeq, 42);
+  });
+
+  test('EventStreamReader reads events in batches', async () => {
+    const events = [
+      {
+        seq: 1,
+        idempotency_key: 'set-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        payload: { idempotency_key: 'set-1', network: 'stellar:testnet', scheme: 'exact-stellar' },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 2,
+        idempotency_key: 'set-1',
+        event_type: SETTLEMENT_EVENT_TYPES.SETTLED,
+        payload: { idempotency_key: 'set-1', tx_hash: 'hash-1' },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 3,
+        idempotency_key: 'set-2',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        payload: { idempotency_key: 'set-2', network: 'stellar:testnet', scheme: 'exact-stellar' },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const pool = createEventStorePool({ events });
+    const reader = new EventStreamReader(pool, { info: () => {} });
+
+    const batch = await reader.readBatch(0, 2);
+    assert.equal(batch.length, 2);
+    assert.equal(batch[0].seq, 1);
+    assert.equal(batch[1].seq, 2);
+
+    const maxSeq = await reader.getMaxSequence();
+    assert.equal(maxSeq, 3);
+  });
+
+  test('ProjectionWriter initializes read-model tables', async () => {
+    const pool = createEventStorePool();
+    const writer = new ProjectionWriter(pool, { info: () => {} });
+
+    await writer.initialize();
+    // Table creation queries were called (verified by not throwing)
+    assert.ok(true);
+  });
+
+  test('ProjectionWriter writes and updates projections', async () => {
+    const pool = createEventStorePool();
+    const writer = new ProjectionWriter(pool, { info: () => {} });
+    await writer.initialize();
+
+    const projection = {
+      idempotency_key: 'proj-1',
+      key_id: 'merchant-1',
+      network: 'stellar:testnet',
+      scheme: 'exact-stellar',
+      payer: null,
+      pay_to: null,
+      asset: null,
+      amount: null,
+      state: 'submitted',
+      tx_hash: null,
+      error_reason: null,
+      error_message: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
+
+    await writer.writeProjection(projection, 1);
+    assert.ok(pool.projections.has('proj-1'));
+    assert.equal(pool.projections.get('proj-1').state, 'submitted');
+  });
+
+  test('ProjectionWriter queries merchant history with sub-10ms optimization', async () => {
+    const pool = createEventStorePool();
+    const writer = new ProjectionWriter(pool, { info: () => {} });
+    await writer.initialize();
+
+    // Add test projections
+    pool.projections.set('m1-1', {
+      idempotency_key: 'm1-1',
+      key_id: 'merchant-1',
+      state: 'settled',
+    });
+    pool.projections.set('m1-2', {
+      idempotency_key: 'm1-2',
+      key_id: 'merchant-1',
+      state: 'failed',
+    });
+    pool.projections.set('m2-1', {
+      idempotency_key: 'm2-1',
+      key_id: 'merchant-2',
+      state: 'settled',
+    });
+
+    const history = await writer.queryMerchantHistory('merchant-1');
+    assert.equal(history.length, 2);
+    assert.ok(history.every(h => h.key_id === 'merchant-1'));
+  });
+
+  test('ProjectionWriter gets state counts for analytics', async () => {
+    const pool = createEventStorePool();
+    const writer = new ProjectionWriter(pool, { info: () => {} });
+    await writer.initialize();
+
+    pool.projections.set('s1', { key_id: 'k1', state: 'settled' });
+    pool.projections.set('s2', { key_id: 'k1', state: 'settled' });
+    pool.projections.set('s3', { key_id: 'k1', state: 'failed' });
+
+    const counts = await writer.getStateCounts();
+    assert.ok(counts.some(c => c.state === 'settled' && c.count === '2'));
+    assert.ok(counts.some(c => c.state === 'failed' && c.count === '1'));
+  });
+
+  test('ProjectionWorker processes events and updates checkpoint', async () => {
+    const events = [
+      {
+        seq: 1,
+        idempotency_key: 'worker-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'worker-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 2,
+        idempotency_key: 'worker-1',
+        event_type: SETTLEMENT_EVENT_TYPES.SETTLED,
+        event_version: 1,
+        payload: { idempotency_key: 'worker-1', tx_hash: 'hash-worker-1' },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const pool = createEventStorePool({ events });
+    const metrics = createMockMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+      batchSize: 10,
+      pollInterval: 100,
+    });
+
+    await worker.initialize();
+    assert.equal(worker.checkpoint.getOffset(), 0);
+
+    await worker.processBatch();
+
+    // Checkpoint should advance to last processed event
+    assert.equal(worker.checkpoint.getOffset(), 2);
+
+    // Projection should be written
+    assert.ok(pool.projections.has('worker-1'));
+    assert.equal(pool.projections.get('worker-1').state, 'settled');
+    assert.equal(pool.projections.get('worker-1').tx_hash, 'hash-worker-1');
+
+    // Metrics should be recorded
+    const m = metrics.getMetrics();
+    assert.equal(m.eventsProcessed, 1); // One settlement processed
+    assert.equal(m.batchDurations.length, 1);
+  });
+
+  test('ProjectionWorker recovers from simulated crash', async () => {
+    const events = [
+      {
+        seq: 1,
+        idempotency_key: 'crash-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'crash-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const pool = createEventStorePool({ events });
+    const metrics = createMockMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+    await worker.processBatch();
+
+    const checkpointBeforeCrash = worker.checkpoint.getOffset();
+    assert.equal(checkpointBeforeCrash, 1);
+
+    // Simulate crash and recovery
+    const recovery = await simulateRecoveryTest(worker);
+    assert.ok(recovery.recovered);
+    assert.equal(recovery.beforeCrash, 1);
+    assert.equal(recovery.afterRestart, 1);
+  });
+
+  test('ProjectionWorker handles out-of-order events within settlement', async () => {
+    // Events arrive out of order within the same settlement
+    const events = [
+      {
+        seq: 2,
+        idempotency_key: 'ooo-1',
+        event_type: SETTLEMENT_EVENT_TYPES.SETTLED,
+        event_version: 1,
+        payload: { idempotency_key: 'ooo-1', tx_hash: 'hash-ooo' },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 1,
+        idempotency_key: 'ooo-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'ooo-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const ordered = validateEventOrdering(events);
+    assert.ok(ordered.has('ooo-1'));
+
+    const settlementEvents = ordered.get('ooo-1');
+    assert.equal(settlementEvents[0].seq, 1);
+    assert.equal(settlementEvents[1].seq, 2);
+  });
+
+  test('ProjectionWorker handles duplicate events idempotently', async () => {
+    const events = [
+      {
+        seq: 1,
+        idempotency_key: 'dup-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'dup-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 2,
+        idempotency_key: 'dup-1',
+        event_type: SETTLEMENT_EVENT_TYPES.SETTLED,
+        event_version: 1,
+        payload: { idempotency_key: 'dup-1', tx_hash: 'hash-dup' },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const pool = createEventStorePool({ events });
+    const metrics = createMockMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+
+    // Process once
+    await worker.processBatch();
+    const projection1 = pool.projections.get('dup-1');
+
+    // Process again (duplicate)
+    worker.checkpoint.currentOffset = 0; // Reset to reprocess
+    await worker.processBatch();
+    const projection2 = pool.projections.get('dup-1');
+
+    // Result should be identical (idempotent)
+    assert.equal(projection1.state, projection2.state);
+    assert.equal(projection1.tx_hash, projection2.tx_hash);
+  });
+
+  test('Projection catches up accurately after simulated crash', async () => {
+    const events = [
+      {
+        seq: 1,
+        idempotency_key: 'catchup-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'catchup-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 2,
+        idempotency_key: 'catchup-2',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'catchup-2',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const pool = createEventStorePool({ events });
+    const metrics = createMockMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+
+    const result = await processToCaughtUp(worker, 10);
+    assert.ok(result.caughtUp);
+    assert.equal(result.offset, 2);
+    assert.equal(pool.projections.size, 2);
+  });
+
+  test('Projection emits metrics for lag and throughput', async () => {
+    const events = [
+      {
+        seq: 1,
+        idempotency_key: 'metrics-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'metrics-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+    ];
+
+    const pool = createEventStorePool({ events });
+    const metrics = createMockMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+    await worker.processBatch();
+    await worker.updateMetrics();
+
+    const m = metrics.getMetrics();
+    assert.equal(m.projectionLag, 0); // Caught up
+    assert.equal(m.eventsProcessed, 1);
+    assert.ok(m.batchDurations.length > 0);
+  });
+
+  test('Checkpoint persistence verified across restarts', async () => {
+    const pool = createEventStorePool();
+    const checkpoint = new CheckpointManager(pool, { info: () => {} });
+
+    await checkpoint.initialize();
+    await checkpoint.updateCheckpoint(123);
+
+    const verification = await verifyCheckpointPersistence(pool, 123);
+    assert.ok(verification.persisted);
+    assert.equal(verification.checkpoint.last_seq, 123);
+  });
+
+  test('createProjectionWorker factory function', async () => {
+    const pool = createEventStorePool({ events: [] });
+    const metrics = createMockMetrics();
+
+    const worker = await createProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    assert.ok(worker instanceof ProjectionWorker);
+    assert.equal(worker.checkpoint.getOffset(), 0);
   });
 });

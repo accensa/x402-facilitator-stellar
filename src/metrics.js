@@ -200,6 +200,34 @@ export function createMetrics() {
   );
   activeVerifications.set({}, 0);
 
+  // CQRS projection metrics
+  const projectionLag = new Gauge(
+    'x402_projection_lag',
+    'Number of events behind the event stream (projection lag).',
+    [],
+  );
+  projectionLag.set({}, 0);
+
+  const projectionEventsProcessed = new Counter(
+    'x402_projection_events_processed_total',
+    'Total number of events processed by the projection worker.',
+    [],
+  );
+
+  const projectionBatchDuration = new Histogram(
+    'x402_projection_batch_duration_seconds',
+    'Duration of projection batch processing in seconds.',
+    [],
+    DURATION_BUCKETS,
+  );
+
+  const projectionThroughput = new Gauge(
+    'x402_projection_throughput_events_per_second',
+    'Event processing throughput (events/second).',
+    [],
+  );
+  projectionThroughput.set({}, 0);
+
   return {
     incRequests: labels => requests.inc(labels),
     observeRequestDuration: ({ route, network, durationSeconds }) =>
@@ -214,6 +242,12 @@ export function createMetrics() {
     incActiveVerifications: () => activeVerifications.inc({}),
     decActiveVerifications: () => activeVerifications.dec({}),
 
+    // CQRS projection metrics
+    setProjectionLag: lag => projectionLag.set({}, lag),
+    incProjectionEventsProcessed: count => projectionEventsProcessed.inc({}, count),
+    observeProjectionBatchDuration: duration => projectionBatchDuration.observe({}, duration),
+    setProjectionThroughput: throughput => projectionThroughput.set({}, throughput),
+
     render: () =>
       [
         requests,
@@ -224,6 +258,10 @@ export function createMetrics() {
         signerInflight,
         dlqDepth,
         activeVerifications,
+        projectionLag,
+        projectionEventsProcessed,
+        projectionBatchDuration,
+        projectionThroughput,
       ]
         .map(m => m.render())
         .join(''),
