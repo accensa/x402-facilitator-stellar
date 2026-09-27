@@ -11,6 +11,7 @@
  * - Prometheus metrics for projection lag and event processing throughput
  */
 
+// TEMP: Force Git to see this file as changed
 import { projectSettlement } from './eventstore/projection.js';
 
 /**
