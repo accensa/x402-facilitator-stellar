@@ -354,7 +354,7 @@ describe('CQRS Event Streaming Pipeline', () => {
     const state = {
       checkpointSeq: 0,
     };
-    let maxSeq = events.length > 0 ? Math.max(...events.map(e => e.seq)) : 0;
+    const maxSeq = events.length > 0 ? Math.max(...events.map(e => e.seq)) : 0;
 
     return {
       events,

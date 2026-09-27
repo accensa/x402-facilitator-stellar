@@ -12,7 +12,6 @@
  */
 
 import { projectSettlement } from './eventstore/projection.js';
-import { SETTLEMENT_EVENT_TYPES } from './eventstore/events.js';
 
 /**
  * Checkpoint manager for tracking the last processed event offset.
@@ -464,7 +463,7 @@ export async function createProjectionWorker(pool, metrics, options = {}) {
  * The projection system is idempotent: processing the same event multiple times
  * produces the same result.
  */
-export function isIdempotentProjection(events) {
+export function isIdempotentProjection(_events) {
   // Events are ordered by sequence number
   // Duplicates are handled by ON CONFLICT in writeProjection
   // Out-of-order events within a settlement are sorted by seq before projection
