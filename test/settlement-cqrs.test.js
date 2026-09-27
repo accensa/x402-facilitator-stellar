@@ -135,14 +135,14 @@ describe('CQRS read replica settlement store (#121)', () => {
       scheme: 'exact-stellar',
       state: 'submitted',
     });
-    assert.equal(saved.state, 'submitted');
-    assert.equal(primary.queryCalls.insert, 1);
-    assert.equal(replica.queryCalls.insert, 0);
+    assert.strictEqual(saved.state, 'submitted');
+    assert.strictEqual(primary.queryCalls.insert, 1);
+    assert.strictEqual(replica.queryCalls.insert, 0);
 
     // Seed the replica (as replication would) and read from it.
     replica.store.set('cqrs-1', { ...saved, updated_at: new Date() });
     const got = await store.get('cqrs-1');
-    assert.equal(got.idempotency_key, 'cqrs-1');
+    assert.strictEqual(got.idempotency_key, 'cqrs-1');
     // The in-memory fallback is authoritative for our own write, so force a
     // clean store where the row only exists on the replica.
     const clean = new PostgresSettlementStore('postgres://primary', {
@@ -152,7 +152,7 @@ describe('CQRS read replica settlement store (#121)', () => {
     });
     await clean.ready;
     const gotClean = await clean.get('cqrs-1');
-    assert.equal(gotClean.idempotency_key, 'cqrs-1');
+    assert.strictEqual(gotClean.idempotency_key, 'cqrs-1');
   });
 
   test('updateState mutates the primary, not the replica', async () => {
@@ -175,11 +175,11 @@ describe('CQRS read replica settlement store (#121)', () => {
     primary.queryCalls.insert = 0;
 
     await store.updateState('cqrs-2', 'settled', { tx_hash: 'tx-abc' });
-    assert.equal(primary.queryCalls.update, 1);
-    assert.equal(replica.queryCalls.update, 0);
+    assert.strictEqual(primary.queryCalls.update, 1);
+    assert.strictEqual(replica.queryCalls.update, 0);
     // Replica is untouched; the primary row changed.
-    assert.equal(primary.store.get('cqrs-2').state, 'settled');
-    assert.equal(primary.store.get('cqrs-2').tx_hash, 'tx-abc');
+    assert.strictEqual(primary.store.get('cqrs-2').state, 'settled');
+    assert.strictEqual(primary.store.get('cqrs-2').tx_hash, 'tx-abc');
   });
 
   test('read-after-write: own writes are served from memory, never the lagging replica', async () => {
@@ -204,7 +204,7 @@ describe('CQRS read replica settlement store (#121)', () => {
     // (`getConsistent`, what the status endpoint uses) serves this process's
     // own write from memory immediately.
     const got = await store.getConsistent('fresh-1');
-    assert.equal(got.state, 'submitted');
+    assert.strictEqual(got.state, 'submitted');
   });
 
   test("getConsistent falls back to the primary once the replica can't propagate a fresh row", async () => {
@@ -231,8 +231,8 @@ describe('CQRS read replica settlement store (#121)', () => {
     });
 
     const got = await store.getConsistent('laggy-1');
-    assert.equal(got.state, 'settled');
-    assert.equal(got.tx_hash, 'tx-laggy');
+    assert.strictEqual(got.state, 'settled');
+    assert.strictEqual(got.tx_hash, 'tx-laggy');
   });
 
   test('listUnknown reads from the replica (historical sweep)', async () => {
@@ -255,7 +255,7 @@ describe('CQRS read replica settlement store (#121)', () => {
     });
     await store.ready;
     const rows = await store.listUnknown();
-    assert.equal(rows.length, 2);
+    assert.strictEqual(rows.length, 2);
   });
 
   test('buildSettlementStore wires replicaUrl and replicaLagMs from config', async () => {
@@ -265,8 +265,8 @@ describe('CQRS read replica settlement store (#121)', () => {
       DATABASE_URL_REPLICA: 'postgres://replica:5432/x402',
       SETTLEMENT_REPLICA_LAG_MS: '2500',
     });
-    assert.equal(config.databaseReplicaUrl, 'postgres://replica:5432/x402');
-    assert.equal(config.settlementReplicaLagMs, 2500);
+    assert.strictEqual(config.databaseReplicaUrl, 'postgres://replica:5432/x402');
+    assert.strictEqual(config.settlementReplicaLagMs, 2500);
 
     // Inject a fake primary pool so buildSettlementStore's lazy `import('pg')`
     // never tries to resolve the fake hostname (getaddrinfo ENOTFOUND primary)
@@ -282,8 +282,8 @@ describe('CQRS read replica settlement store (#121)', () => {
     const store = buildSettlementStore(config, { log: () => {}, pool: fakePool });
     assert.ok(store instanceof PostgresSettlementStore);
     // The config fields are forwarded into the store's replica settings.
-    assert.equal(store.replicaLagMs, 2500);
-    assert.equal(store.replicaUrl, 'postgres://replica:5432/x402');
+    assert.strictEqual(store.replicaLagMs, 2500);
+    assert.strictEqual(store.replicaUrl, 'postgres://replica:5432/x402');
   });
 
   test('GET /settlements/:key serves a fresh settlement even when the replica lags', async () => {
@@ -333,11 +333,11 @@ describe('CQRS read replica settlement store (#121)', () => {
         url: '/settlements/settlement-A',
         headers: { authorization: 'Bearer secretA' },
       });
-      assert.equal(res.statusCode, 200);
+      assert.strictEqual(res.statusCode, 200);
       const body = JSON.parse(res.payload);
-      assert.equal(body.ok, true);
-      assert.equal(body.settlement.state, 'settled');
-      assert.equal(body.settlement.tx_hash, 'hashA');
+      assert.strictEqual(body.ok, true);
+      assert.strictEqual(body.settlement.state, 'settled');
+      assert.strictEqual(body.settlement.tx_hash, 'hashA');
     } finally {
       await app.close();
     }
@@ -474,11 +474,11 @@ describe('CQRS Event Streaming Pipeline', () => {
     const checkpoint = new CheckpointManager(pool, { info: () => {} });
 
     await checkpoint.initialize();
-    assert.equal(checkpoint.getOffset(), 0);
+    assert.strictEqual(checkpoint.getOffset(), 0);
 
     await checkpoint.updateCheckpoint(42);
-    assert.equal(checkpoint.getOffset(), 42);
-    assert.equal(pool.checkpointSeq, 42);
+    assert.strictEqual(checkpoint.getOffset(), 42);
+    assert.strictEqual(pool.checkpointSeq, 42);
   });
 
   test('EventStreamReader reads events in batches', async () => {
@@ -510,12 +510,12 @@ describe('CQRS Event Streaming Pipeline', () => {
     const reader = new EventStreamReader(pool, { info: () => {} });
 
     const batch = await reader.readBatch(0, 2);
-    assert.equal(batch.length, 2);
-    assert.equal(batch[0].seq, 1);
-    assert.equal(batch[1].seq, 2);
+    assert.strictEqual(batch.length, 2);
+    assert.strictEqual(batch[0].seq, 1);
+    assert.strictEqual(batch[1].seq, 2);
 
     const maxSeq = await reader.getMaxSequence();
-    assert.equal(maxSeq, 3);
+    assert.strictEqual(maxSeq, 3);
   });
 
   test('ProjectionWriter initializes read-model tables', async () => {
@@ -551,7 +551,7 @@ describe('CQRS Event Streaming Pipeline', () => {
 
     await writer.writeProjection(projection, 1);
     assert.ok(pool.projections.has('proj-1'));
-    assert.equal(pool.projections.get('proj-1').state, 'submitted');
+    assert.strictEqual(pool.projections.get('proj-1').state, 'submitted');
   });
 
   test('ProjectionWriter queries merchant history with sub-10ms optimization', async () => {
@@ -577,7 +577,7 @@ describe('CQRS Event Streaming Pipeline', () => {
     });
 
     const history = await writer.queryMerchantHistory('merchant-1');
-    assert.equal(history.length, 2);
+    assert.strictEqual(history.length, 2);
     assert.ok(history.every(h => h.key_id === 'merchant-1'));
   });
 
@@ -629,22 +629,22 @@ describe('CQRS Event Streaming Pipeline', () => {
     });
 
     await worker.initialize();
-    assert.equal(worker.checkpoint.getOffset(), 0);
+    assert.strictEqual(worker.checkpoint.getOffset(), 0);
 
     await worker.processBatch();
 
     // Checkpoint should advance to last processed event
-    assert.equal(worker.checkpoint.getOffset(), 2);
+    assert.strictEqual(worker.checkpoint.getOffset(), 2);
 
     // Projection should be written
     assert.ok(pool.projections.has('worker-1'));
-    assert.equal(pool.projections.get('worker-1').state, 'settled');
-    assert.equal(pool.projections.get('worker-1').tx_hash, 'hash-worker-1');
+    assert.strictEqual(pool.projections.get('worker-1').state, 'settled');
+    assert.strictEqual(pool.projections.get('worker-1').tx_hash, 'hash-worker-1');
 
     // Metrics should be recorded
     const m = metrics.getMetrics();
-    assert.equal(m.eventsProcessed, 1); // One settlement processed
-    assert.equal(m.batchDurations.length, 1);
+    assert.strictEqual(m.eventsProcessed, 1); // One settlement processed
+    assert.strictEqual(m.batchDurations.length, 1);
   });
 
   test('ProjectionWorker recovers from simulated crash', async () => {
@@ -674,13 +674,13 @@ describe('CQRS Event Streaming Pipeline', () => {
     await worker.processBatch();
 
     const checkpointBeforeCrash = worker.checkpoint.getOffset();
-    assert.equal(checkpointBeforeCrash, 1);
+    assert.strictEqual(checkpointBeforeCrash, 1);
 
     // Simulate crash and recovery
     const recovery = await simulateRecoveryTest(worker);
     assert.ok(recovery.recovered);
-    assert.equal(recovery.beforeCrash, 1);
-    assert.equal(recovery.afterRestart, 1);
+    assert.strictEqual(recovery.beforeCrash, 1);
+    assert.strictEqual(recovery.afterRestart, 1);
   });
 
   test('ProjectionWorker handles out-of-order events within settlement', async () => {
@@ -713,8 +713,8 @@ describe('CQRS Event Streaming Pipeline', () => {
     assert.ok(ordered.has('ooo-1'));
 
     const settlementEvents = ordered.get('ooo-1');
-    assert.equal(settlementEvents[0].seq, 1);
-    assert.equal(settlementEvents[1].seq, 2);
+    assert.strictEqual(settlementEvents[0].seq, 1);
+    assert.strictEqual(settlementEvents[1].seq, 2);
   });
 
   test('ProjectionWorker handles duplicate events idempotently', async () => {
@@ -760,8 +760,8 @@ describe('CQRS Event Streaming Pipeline', () => {
     const projection2 = pool.projections.get('dup-1');
 
     // Result should be identical (idempotent)
-    assert.equal(projection1.state, projection2.state);
-    assert.equal(projection1.tx_hash, projection2.tx_hash);
+    assert.strictEqual(projection1.state, projection2.state);
+    assert.strictEqual(projection1.tx_hash, projection2.tx_hash);
   });
 
   test('Projection catches up accurately after simulated crash', async () => {
@@ -804,8 +804,8 @@ describe('CQRS Event Streaming Pipeline', () => {
 
     const result = await processToCaughtUp(worker, 10);
     assert.ok(result.caughtUp);
-    assert.equal(result.offset, 2);
-    assert.equal(pool.projections.size, 2);
+    assert.strictEqual(result.offset, 2);
+    assert.strictEqual(pool.projections.size, 2);
   });
 
   test('Projection emits metrics for lag and throughput', async () => {
@@ -836,8 +836,8 @@ describe('CQRS Event Streaming Pipeline', () => {
     await worker.updateMetrics();
 
     const m = metrics.getMetrics();
-    assert.equal(m.projectionLag, 0); // Caught up
-    assert.equal(m.eventsProcessed, 1);
+    assert.strictEqual(m.projectionLag, 0); // Caught up
+    assert.strictEqual(m.eventsProcessed, 1);
     assert.ok(m.batchDurations.length > 0);
   });
 
@@ -850,7 +850,7 @@ describe('CQRS Event Streaming Pipeline', () => {
 
     const verification = await verifyCheckpointPersistence(pool, 123);
     assert.ok(verification.persisted);
-    assert.equal(verification.checkpoint.last_seq, 123);
+    assert.strictEqual(verification.checkpoint.last_seq, 123);
   });
 
   test('createProjectionWorker factory function', async () => {
@@ -862,6 +862,6 @@ describe('CQRS Event Streaming Pipeline', () => {
     });
 
     assert.ok(worker instanceof ProjectionWorker);
-    assert.equal(worker.checkpoint.getOffset(), 0);
+    assert.strictEqual(worker.checkpoint.getOffset(), 0);
   });
 });

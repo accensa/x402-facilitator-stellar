@@ -94,10 +94,10 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     const checkpoint = new CheckpointManager(pool, { info: () => {} });
 
     await checkpoint.initialize();
-    assert.equal(checkpoint.getOffset(), 0);
+    assert.strictEqual(checkpoint.getOffset(), 0);
 
     await checkpoint.updateCheckpoint(100);
-    assert.equal(checkpoint.getOffset(), 100);
+    assert.strictEqual(checkpoint.getOffset(), 100);
   });
 
   test('EventStreamReader reads events in batches', async () => {
@@ -122,9 +122,9 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     const reader = new EventStreamReader(pool, { info: () => {} });
     const batch = await reader.readBatch(0, 10);
 
-    assert.equal(batch.length, 2);
-    assert.equal(batch[0].seq, 1);
-    assert.equal(batch[1].seq, 2);
+    assert.strictEqual(batch.length, 2);
+    assert.strictEqual(batch[0].seq, 1);
+    assert.strictEqual(batch[1].seq, 2);
   });
 
   test('ProjectionWriter writes projections to read model', async () => {
@@ -153,8 +153,8 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     await writer.writeProjection(projection, 1);
 
     assert.ok(pool.projections.has('proj-1'));
-    assert.equal(pool.projections.get('proj-1').state, 'settled');
-    assert.equal(pool.projections.get('proj-1').tx_hash, 'hash123');
+    assert.strictEqual(pool.projections.get('proj-1').state, 'settled');
+    assert.strictEqual(pool.projections.get('proj-1').tx_hash, 'hash123');
   });
 
   test('ProjectionWorker processes batch and updates checkpoint', async () => {
@@ -179,11 +179,11 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     });
 
     await worker.initialize();
-    assert.equal(worker.checkpoint.getOffset(), 0);
+    assert.strictEqual(worker.checkpoint.getOffset(), 0);
 
     await worker.processBatch();
 
-    assert.equal(worker.checkpoint.getOffset(), 1);
+    assert.strictEqual(worker.checkpoint.getOffset(), 1);
     assert.ok(pool.projections.has('worker-1'));
   });
 
@@ -197,9 +197,9 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     const ordered = validateEventOrdering(events);
     const settlementEvents = ordered.get('a');
 
-    assert.equal(settlementEvents[0].seq, 1);
-    assert.equal(settlementEvents[1].seq, 2);
-    assert.equal(settlementEvents[2].seq, 3);
+    assert.strictEqual(settlementEvents[0].seq, 1);
+    assert.strictEqual(settlementEvents[1].seq, 2);
+    assert.strictEqual(settlementEvents[2].seq, 3);
   });
 
   test('Projection handles multiple settlements in one batch', async () => {
@@ -241,7 +241,7 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     await worker.initialize();
     await worker.processBatch();
 
-    assert.equal(pool.projections.size, 2);
+    assert.strictEqual(pool.projections.size, 2);
     assert.ok(pool.projections.has('multi-1'));
     assert.ok(pool.projections.has('multi-2'));
   });
