@@ -15,6 +15,22 @@ pinned.
 
 ### Added
 
+- Dynamic fee estimation from Horizon `/fee_stats`: p50/p90/p99 fee rates cached
+  for 5s, a bid chosen from request priority and deadline, and a strict clamp to
+  `MAX_TX_FEE_STROOPS`. Stale stats (or the protocol minimum) are used if Horizon
+  is unreachable. New `HORIZON_URL` / `HORIZON_URL_PUBNET` settings; estimators
+  are exposed as `feeEstimators` from `buildFacilitator` (#426).
+- SEP-0007 `web+stellar:pay` URI parser and generator in the SDK
+  (`parsePayUri`, `buildPayUri`, `payUriFromRequirements`), with strict
+  rejection of malformed or ambiguous URIs and a conformance matrix built on the
+  spec's own examples (#424).
+- `npm run test:bench`: a resource-budget benchmark recording peak RSS, CPU
+  utilization and open sockets, writing a markdown report and a run history, and
+  failing on peak RSS above 512 MiB or a duration regression above 20% (#427).
+- JSON-RPC 2.0 batch requests on the MCP server (stdio and HTTP): members run
+  concurrently with isolated failures, responses are matched by id, and batches
+  over 25 requests are refused. This replaces the previous blanket `-32600`
+  rejection of arrays (#428).
 - Optional mTLS client-certificate authentication for outbound webhooks. A
   delivery carrying `mtls.ref` is sent with a client certificate resolved from a
   ref, over a pooled per-credential agent, and still carries the existing HMAC
