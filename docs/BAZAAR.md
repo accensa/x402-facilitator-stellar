@@ -106,6 +106,11 @@ Cursor pagination is implemented via the opaque `cursor` parameter (base64 `offs
 ### Performance Target
 The p95 latency target for this endpoint is **<50ms**, ensuring it does not block agent interactive paths.
 
+### Result Caching (#392)
+Discovery traffic is repetitive — agents poll the same handful of queries — so results are cached in two tiers when `CATALOG_SEARCH_CACHE=1`: an in-process LRU (5s) in front of a shared Redis entry (60s). This is where the Postgres saving comes from; N replicas issue one query per distinct query rather than N. See `.env.example` for the flag and `docs/OPERATIONS.md` for the `x402_catalog_cache_lookups_total` series.
+
+Caching does not weaken the freshness contract. The catalog's monotonic write version is part of the cache key, so any write makes every earlier entry unreachable immediately — no cached read can be stale, and that holds even if an invalidation message is lost. A write publishes on a Redis channel so other replicas drop their L1 immediately instead of on their next miss. Concurrent misses for the same key collapse into one catalog query, so the L1 expiry window is not also a stampede window. If Redis is unreachable the cache is bypassed and the catalog is queried directly: a cache outage can slow discovery down but cannot fail it. Responses are byte-identical to an uncached read; the cache is not observable to a client.
+
 ## Validation & Cataloging Policy
 
 Automatic cataloging is triggered asynchronously off the payment path for `/verify` and `/settle` when the `PaymentPayload` carries the discovery extension. Manual registration is supported via `POST /discovery/resources` but marked as `source: 'manual'`.

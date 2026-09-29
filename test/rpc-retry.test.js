@@ -92,6 +92,24 @@ describe('what is retried', () => {
   });
 });
 
+describe('idempotent installation', () => {
+  test('calling installRpcRetry twice does not wrap fetch twice', async () => {
+    const stub = scriptedFetch(new Response('ok'));
+    globalThis.fetch = stub;
+
+    const first = installFast({ attempts: 2 });
+    const wrappedFetch = globalThis.fetch;
+    const second = installFast({ attempts: 4 });
+
+    assert.equal(globalThis.fetch, wrappedFetch, 'second install should not replace the wrapper');
+    assert.equal(second, first, 'second install should return the existing handle');
+
+    const res = await globalThis.fetch('http://rpc.invalid');
+    assert.equal(await res.text(), 'ok');
+    assert.equal(stub.calls, 1, 'the fetch implementation should only be called once');
+  });
+});
+
 describe('what is deliberately not retried', () => {
   test('an HTTP error response is returned as-is, never retried', async () => {
     // This is the important one. A 500 from the RPC is the server answering.

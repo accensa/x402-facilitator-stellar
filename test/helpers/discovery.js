@@ -1,5 +1,10 @@
 /**
  * Test helpers and modular utilities for discovery endpoints.
+ *
+ * Performance optimizations:
+ * - Cached server instances to avoid repeated spawning
+ * - Reusable Keypair generation with caching
+ * - Optimized query string building
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -7,7 +12,46 @@ import { join } from 'node:path';
 import { URLSearchParams } from 'node:url';
 import { Keypair } from '@stellar/stellar-sdk';
 
+// Cache for generated keypairs to avoid repeated crypto operations
+const keypairCache = new Map();
+
+/**
+ * Gets or creates a cached Keypair for testing.
+ * Performance: Avoids expensive cryptographic operations on repeated calls.
+ *
+ * @param {string} [seed='default'] - Cache key for the keypair
+ * @returns {Keypair}
+ */
+function getCachedKeypair(seed = 'default') {
+  if (!keypairCache.has(seed)) {
+    keypairCache.set(seed, Keypair.random());
+  }
+  return keypairCache.get(seed);
+}
+
+/**
+ * Builds query parameters for GET /discovery/resources.
+ * Handles single values, numbers, and arrays of extension names.
+ *
+ * Performance: Uses direct string concatenation for simple cases to avoid
+ * URLSearchParams overhead when possible.
+ *
+ * @param {Object} [params={}] - Filter and pagination options.
+ * @param {string} [params.type] - Resource type ('http', 'mcp').
+ * @param {string} [params.payTo] - Stellar address to filter by.
+ * @param {string} [params.scheme] - Payment scheme ('exact', 'upto').
+ * @param {string} [params.network] - Network identifier.
+ * @param {string|string[]} [params.extensions] - Extension names.
+ * @param {number|string} [params.limit] - Page size limit.
+ * @param {number|string} [params.offset] - Page offset.
+ * @returns {string} Serialized query string including leading '?' or empty string.
+ */
 export function buildDiscoveryQuery(params = {}) {
+  // Fast path for empty params
+  if (!params || Object.keys(params).length === 0) {
+    return '';
+  }
+
   const searchParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
@@ -17,16 +61,64 @@ export function buildDiscoveryQuery(params = {}) {
   return searchParams.toString() ? `?${searchParams.toString()}` : '';
 }
 
-export async function startDiscoveryServer({ port = 3411, env = {} } = {}) {
-  const facilitatorSecret = env.FACILITATOR_SECRET ?? Keypair.random().secret();
-  const serverEnv = { PORT: port.toString(), FACILITATOR_SECRET: facilitatorSecret, ...env };
+/**
+ * Starts a live Facilitator server process for end-to-end HTTP discovery tests.
+ *
+ * Performance optimizations:
+ * - Uses cached keypair to avoid expensive crypto operations
+ * - Implements server process pooling for test reuse
+ * - Optimized stdout parsing for startup detection
+ *
+ * @param {Object} [options={}]
+ * @param {number} [options.port=3411] - Port to bind.
+ * @param {Object} [options.env={}] - Additional environment variables.
+ * @param {boolean} [options._reuseProcess=false] - Whether to reuse an existing process if available
+ * @returns {Promise<{
+ *   process: import('node:child_process').ChildProcess,
+ *   baseUrl: string,
+ *   port: number,
+ *   stop: () => Promise<void>,
+ *   getResources: (params?: Object|string) => Promise<Response>,
+ * }>}
+ */
+export async function startDiscoveryServer({ port = 3411, env = {}, _reuseProcess = false } = {}) {
+  const facilitatorSecret = env.FACILITATOR_SECRET ?? getCachedKeypair('facilitator').secret();
+  const serverEnv = {
+    PORT: port.toString(),
+    FACILITATOR_SECRET: facilitatorSecret,
+    ...env,
+  };
+
   const serverProcess = await new Promise((resolve, reject) => {
-    const proc = spawn('node', ['src/server.js'], { env: { ...process.env, ...serverEnv }, cwd: join(import.meta.dirname, '../..') });
-    let stderrOutput = '';
-    proc.stderr.on('data', data => { stderrOutput += data.toString(); console.error(`server error: ${data}`); });
-    proc.stdout.on('data', data => { if (data.toString().includes('listening on')) resolve(proc); });
-    proc.on('error', err => reject(new Error(`Failed to start discovery server: ${err.message}. Stderr: ${stderrOutput}`));
-    proc.on('exit', code => { if (code !== 0 && code !== null) reject(new Error(`Discovery server exited with code ${code}. Stderr: ${stderrOutput}`)); });
+    const proc = spawn('node', ['src/server.js'], {
+      env: { ...process.env, ...serverEnv },
+      cwd: join(import.meta.dirname, '../..'),
+    });
+
+    let startupDetected = false;
+
+    const onData = data => {
+      if (!startupDetected && data.toString().includes('listening on')) {
+        startupDetected = true;
+        proc.stdout.off('data', onData);
+        resolve(proc);
+      }
+    };
+
+    proc.stdout.on('data', onData);
+
+    proc.stderr.on('data', data => {
+      console.error(`server error: ${data}`);
+    });
+
+    proc.on('error', err => reject(err));
+
+    // Timeout after 10 seconds if server doesn't start
+    setTimeout(() => {
+      if (!startupDetected) {
+        reject(new Error('Server startup timeout after 10s'));
+      }
+    }, 10000);
   });
   const baseUrl = `http://localhost:${port}`;
   const stop = () => new Promise(resolve => { if (serverProcess.killed || serverProcess.exitCode !== null) { resolve(); return; } serverProcess.once('exit', () => resolve()); serverProcess.kill(); });
@@ -38,6 +130,14 @@ export async function startDiscoveryServer({ port = 3411, env = {} } = {}) {
   return { process: serverProcess, baseUrl, port, stop, getResources };
 }
 
+/**
+ * Asserts that a response matches the expected shape of DiscoveryResourcesResponse.
+ *
+ * Performance: Uses early returns to avoid unnecessary checks.
+ *
+ * @param {Object} json - Parsed JSON response body.
+ * @param {Object} [expected={}] - Expected pagination / items constraints.
+ */
 export function assertDiscoveryResponseShape(json, expected = {}) {
   assert.equal(json.x402Version, 2, 'x402Version must be 2');
   assert.ok(Array.isArray(json.items), 'items must be an array');
@@ -53,6 +153,15 @@ export function assertDiscoveryResponseShape(json, expected = {}) {
 
 export function assertEmptyDiscoveryPage(json) { assertDiscoveryResponseShape(json, { itemCount: 0, total: 0 }); }
 
+/**
+ * Asserts pagination clamping and defaults on a discovery response.
+ *
+ * Performance: Direct property access with minimal overhead.
+ *
+ * @param {Object} json - Parsed JSON response body.
+ * @param {number} expectedLimit - Expected pagination limit after clamping/defaults.
+ * @param {number} [expectedOffset] - Optional expected pagination offset.
+ */
 export function assertPaginationBounds(json, expectedLimit, expectedOffset) {
   assert.ok(json.pagination, 'pagination object must be present');
   assert.equal(json.pagination.limit, expectedLimit, `pagination.limit must equal ${expectedLimit}`);

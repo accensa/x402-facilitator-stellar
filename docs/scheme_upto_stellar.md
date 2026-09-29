@@ -1,7 +1,7 @@
 # Stellar `upto` Scheme Specification
 
 **Status:** Draft / Upstream Contribution  
-**TSC Thread:** [TSC Thread (x402/stellar#000)](https://github.com/x402/stellar/pull/000)  
+**TSC Thread:** x402/stellar `upto` scheme (draft — no TSC PR opened yet)  
 **Dependency:** Blocked on `accensa-contracts` [ADR-002](https://github.com/accensa/accensa-contracts/issues/2) (Contract vs Contract-free design)
 
 This document defines the `stellar` network implementation for the x402 `upto` scheme. It adheres to the standard x402 network specification format, mapping abstract `upto` concepts—authorizing a maximum spend but settling actual usage—to Stellar primitives.

@@ -9,6 +9,7 @@ import { createEd25519Signer } from '@x402/stellar';
 import { TESTNET, PUBNET } from './config.js';
 import { signerMetrics } from './metrics.js';
 import { KeyManager } from './key-manager.js';
+import { createFeeEstimator } from './horizon-client.js';
 
 async function loadRemoteKeys(url) {
   const response = await fetch(url);
@@ -22,6 +23,7 @@ export function buildFacilitator(config) {
   const signers = {};
   const feeBumpSigners = {};
   const keyManagers = {};
+  const feeEstimators = {};
   const schemes = {};
 
   for (const network of config.networks) {
@@ -33,6 +35,15 @@ export function buildFacilitator(config) {
       pollIntervalMs: netConfig.keyManagerPollIntervalMs,
     });
     keyManagers[network] = keyManager;
+
+    // Dynamic fee bidding (#426). The scheme only takes a hard ceiling, so the
+    // estimator supplies the recommended bid and enforces that same ceiling.
+    if (netConfig.horizonUrl) {
+      feeEstimators[network] = createFeeEstimator({
+        horizonUrl: netConfig.horizonUrl,
+        maxFeeStroops: netConfig.maxTransactionFeeStroops,
+      });
+    }
 
     let feeBumpSigner = null;
     if (netConfig.feeBumpSecret) {
@@ -78,7 +89,7 @@ export function buildFacilitator(config) {
     facilitator.register(network, schemes[network].scheme);
   }
 
-  return { facilitator, signers, feeBumpSigners, keyManagers, schemes };
+  return { facilitator, signers, feeBumpSigners, keyManagers, feeEstimators, schemes };
 }
 
 export { TESTNET, PUBNET };

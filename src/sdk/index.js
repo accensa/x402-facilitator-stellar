@@ -1,5 +1,6 @@
 import { validateDiscoveryDeclaration, validateAmount, STELLAR_DECIMALS } from './validation.js';
 export { validateDiscoveryDeclaration };
+export { parsePayUri, buildPayUri, payUriFromRequirements, Sep7Error } from './sep7.js';
 
 /**
  * Converts a human-readable amount to stroops (1e-7 fixed point).
