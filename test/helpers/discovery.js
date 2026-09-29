@@ -53,20 +53,12 @@ export function buildDiscoveryQuery(params = {}) {
   }
 
   const searchParams = new URLSearchParams();
-
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        searchParams.append(key, String(item));
-      }
-    } else {
-      searchParams.append(key, String(value));
-    }
+    if (Array.isArray(value)) { for (const item of value) searchParams.append(key, String(item)); }
+    else { searchParams.append(key, String(value)); }
   }
-
-  const qs = searchParams.toString();
-  return qs ? `?${qs}` : '';
+  return searchParams.toString() ? `?${searchParams.toString()}` : '';
 }
 
 /**
@@ -128,37 +120,14 @@ export async function startDiscoveryServer({ port = 3411, env = {}, _reuseProces
       }
     }, 10000);
   });
-
   const baseUrl = `http://localhost:${port}`;
-
-  const stop = () => {
-    return new Promise(resolve => {
-      if (serverProcess.killed || serverProcess.exitCode !== null) {
-        resolve();
-        return;
-      }
-      serverProcess.once('exit', () => resolve());
-      serverProcess.kill();
-    });
-  };
-
+  const stop = () => new Promise(resolve => { if (serverProcess.killed || serverProcess.exitCode !== null) { resolve(); return; } serverProcess.once('exit', () => resolve()); serverProcess.kill(); });
   const getResources = async (params = {}) => {
-    const qs =
-      typeof params === 'string'
-        ? params.startsWith('?')
-          ? params
-          : `?${params}`
-        : buildDiscoveryQuery(params);
-    return fetch(`${baseUrl}/discovery/resources${qs}`);
+    const qs = typeof params === 'string' ? (params.startsWith('?') ? params : `?${params}`) : buildDiscoveryQuery(params);
+    try { return await fetch(`${baseUrl}/discovery/resources${qs}`); }
+    catch (err) { throw new Error(`Failed to fetch discovery resources from ${baseUrl}/discovery/resources${qs}: ${err.message}`); }
   };
-
-  return {
-    process: serverProcess,
-    baseUrl,
-    port,
-    stop,
-    getResources,
-  };
+  return { process: serverProcess, baseUrl, port, stop, getResources };
 }
 
 /**
@@ -172,51 +141,17 @@ export async function startDiscoveryServer({ port = 3411, env = {}, _reuseProces
 export function assertDiscoveryResponseShape(json, expected = {}) {
   assert.equal(json.x402Version, 2, 'x402Version must be 2');
   assert.ok(Array.isArray(json.items), 'items must be an array');
-
-  if (expected.itemCount !== undefined) {
-    assert.equal(
-      json.items.length,
-      expected.itemCount,
-      `items length must be ${expected.itemCount}`,
-    );
-  }
-
+  if (expected.itemCount !== undefined) assert.equal(json.items.length, expected.itemCount, `items length must be ${expected.itemCount}`);
   assert.ok(json.pagination, 'pagination object must be present');
   assert.equal(typeof json.pagination.limit, 'number', 'pagination.limit must be a number');
   assert.equal(typeof json.pagination.offset, 'number', 'pagination.offset must be a number');
   assert.equal(typeof json.pagination.total, 'number', 'pagination.total must be a number');
-
-  if (expected.limit !== undefined) {
-    assert.equal(
-      json.pagination.limit,
-      expected.limit,
-      `pagination.limit must be ${expected.limit}`,
-    );
-  }
-  if (expected.offset !== undefined) {
-    assert.equal(
-      json.pagination.offset,
-      expected.offset,
-      `pagination.offset must be ${expected.offset}`,
-    );
-  }
-  if (expected.total !== undefined) {
-    assert.equal(
-      json.pagination.total,
-      expected.total,
-      `pagination.total must be ${expected.total}`,
-    );
-  }
+  if (expected.limit !== undefined) assert.equal(json.pagination.limit, expected.limit, `pagination.limit must be ${expected.limit}`);
+  if (expected.offset !== undefined) assert.equal(json.pagination.offset, expected.offset, `pagination.offset must be ${expected.offset}`);
+  if (expected.total !== undefined) assert.equal(json.pagination.total, expected.total, `pagination.total must be ${expected.total}`);
 }
 
-/**
- * Asserts that a response represents an empty discovery page.
- *
- * @param {Object} json - Parsed JSON response body.
- */
-export function assertEmptyDiscoveryPage(json) {
-  assertDiscoveryResponseShape(json, { itemCount: 0, total: 0 });
-}
+export function assertEmptyDiscoveryPage(json) { assertDiscoveryResponseShape(json, { itemCount: 0, total: 0 }); }
 
 /**
  * Asserts pagination clamping and defaults on a discovery response.
@@ -229,16 +164,12 @@ export function assertEmptyDiscoveryPage(json) {
  */
 export function assertPaginationBounds(json, expectedLimit, expectedOffset) {
   assert.ok(json.pagination, 'pagination object must be present');
-  assert.equal(
-    json.pagination.limit,
-    expectedLimit,
-    `pagination.limit must equal ${expectedLimit}`,
-  );
-  if (expectedOffset !== undefined) {
-    assert.equal(
-      json.pagination.offset,
-      expectedOffset,
-      `pagination.offset must equal ${expectedOffset}`,
-    );
-  }
+  assert.equal(json.pagination.limit, expectedLimit, `pagination.limit must equal ${expectedLimit}`);
+  if (expectedOffset !== undefined) assert.equal(json.pagination.offset, expectedOffset, `pagination.offset must equal ${expectedOffset}`);
+}
+
+export function assertDiscoveryError(json, expectedError) {
+  assert.ok(json.error, 'response must contain an error field');
+  if (expectedError) assert.equal(json.error, expectedError, `error should be ${expectedError}`);
+  assert.ok(json.error.message || json.error.reason, 'error must have a descriptive message');
 }
