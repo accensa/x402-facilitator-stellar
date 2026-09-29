@@ -101,6 +101,7 @@ export function resolveConfig(env = process.env) {
       secret: testnetSecrets[0],
       feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
+      horizonUrl: env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS, {
         name: 'MAX_TX_FEE_STROOPS',
         defaultValue: 50_000,
@@ -205,6 +206,7 @@ export function resolveConfig(env = process.env) {
       secret: pubnetSecrets[0],
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
+      horizonUrl: env.HORIZON_URL_PUBNET || 'https://horizon.stellar.org',
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS_PUBNET, {
         name: 'MAX_TX_FEE_STROOPS_PUBNET',
         defaultValue: 50_000,

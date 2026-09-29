@@ -157,3 +157,118 @@ export function installHorizonClient({
     },
   };
 }
+
+/** Horizon's fee_stats are per ledger; a ledger closes roughly every 5s. */
+export const FEE_STATS_TTL_MS = 5000;
+/** Stellar's protocol minimum base fee per operation, in stroops. */
+export const MIN_BASE_FEE_STROOPS = 100;
+/** Priority → fee_charged percentile the bid is anchored to. */
+const PRIORITY_TIERS = ['low', 'normal', 'high'];
+const TIER_PERCENTILE = { low: 'p50', normal: 'p90', high: 'p99' };
+/** A deadline shorter than ~one ledger cannot wait out a surge: bid one tier up. */
+const URGENT_DEADLINE_MS = 5000;
+
+const toStroops = value => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.ceil(n) : null;
+};
+
+/**
+ * Dynamic fee estimation from Horizon `/fee_stats`.
+ *
+ * `fetchFeeStats()` returns the p50/p90/p99 fee_charged rates (stroops per
+ * operation), cached for 5s so a burst of settlements costs one Horizon call;
+ * concurrent callers share the in-flight request. `estimateFee()` maps
+ * priority and deadline to a percentile and clamps the bid to a hard ceiling,
+ * so congestion can never push spend past `maxFeeStroops`.
+ *
+ * If Horizon is unreachable the last known stats are used (however stale);
+ * with none at all the bid falls back to the protocol minimum and is flagged
+ * `source: 'fallback'`. The ceiling applies in every case.
+ *
+ * @param {object} options
+ * @param {string} options.horizonUrl - Horizon base URL
+ * @param {number} options.maxFeeStroops - strict ceiling on any bid
+ * @param {Function} [options.fetchFn] - injectable fetch (defaults to global, i.e. the pooled one)
+ * @param {number} [options.ttlMs=5000]
+ * @param {() => number} [options.now] - injectable clock
+ */
+export function createFeeEstimator({
+  horizonUrl,
+  maxFeeStroops,
+  fetchFn = (...args) => globalThis.fetch(...args),
+  ttlMs = FEE_STATS_TTL_MS,
+  now = Date.now,
+}) {
+  if (!horizonUrl) throw new Error('createFeeEstimator: horizonUrl is required');
+  if (!Number.isFinite(maxFeeStroops) || maxFeeStroops < MIN_BASE_FEE_STROOPS) {
+    throw new Error(`createFeeEstimator: maxFeeStroops must be >= ${MIN_BASE_FEE_STROOPS}`);
+  }
+  const url = `${horizonUrl.replace(/\/+$/, '')}/fee_stats`;
+  let cached = null; // { stats, at }
+  let inflight = null;
+
+  async function load() {
+    const res = await fetchFn(url);
+    if (!res.ok) throw new Error(`fee_stats returned HTTP ${res.status}`);
+    const body = await res.json();
+    const charged = body.fee_charged ?? {};
+    const baseFee = toStroops(body.last_ledger_base_fee) ?? MIN_BASE_FEE_STROOPS;
+    const rates = {};
+    for (const p of ['p50', 'p90', 'p99']) {
+      const rate = toStroops(charged[p]);
+      if (rate === null) throw new Error(`fee_stats response is missing fee_charged.${p}`);
+      rates[p] = Math.max(rate, baseFee);
+    }
+    return {
+      ...rates,
+      baseFee,
+      ledgerCapacityUsage: Number(body.ledger_capacity_usage) || 0,
+    };
+  }
+
+  async function fetchFeeStats() {
+    if (cached && now() - cached.at < ttlMs) return cached.stats;
+    inflight ??= load()
+      .then(stats => {
+        cached = { stats, at: now() };
+        return stats;
+      })
+      .finally(() => {
+        inflight = null;
+      });
+    return inflight;
+  }
+
+  /**
+   * @param {object} [request]
+   * @param {'low'|'normal'|'high'} [request.priority='normal']
+   * @param {number} [request.deadlineMs] - time the caller can wait for inclusion
+   * @returns {Promise<{feeStroops: number, tier: string, capped: boolean, source: 'horizon'|'stale'|'fallback'}>}
+   */
+  async function estimateFee({ priority = 'normal', deadlineMs } = {}) {
+    let tierIndex = PRIORITY_TIERS.indexOf(priority);
+    if (tierIndex === -1) throw new Error(`Unknown fee priority: ${priority}`);
+    if (deadlineMs !== undefined && !(Number.isFinite(deadlineMs) && deadlineMs > 0)) {
+      throw new Error('deadlineMs must be a positive number');
+    }
+    if (deadlineMs !== undefined && deadlineMs < URGENT_DEADLINE_MS) {
+      tierIndex = Math.min(tierIndex + 1, PRIORITY_TIERS.length - 1);
+    }
+    const tier = PRIORITY_TIERS[tierIndex];
+
+    let stats;
+    let source = 'horizon';
+    try {
+      stats = await fetchFeeStats();
+    } catch {
+      stats = cached?.stats;
+      source = stats ? 'stale' : 'fallback';
+    }
+    const bid = stats ? stats[TIER_PERCENTILE[tier]] : MIN_BASE_FEE_STROOPS;
+    const feeStroops = Math.min(bid, maxFeeStroops);
+    return { feeStroops, tier, capped: bid > maxFeeStroops, source };
+  }
+
+  return { fetchFeeStats, estimateFee, maxFeeStroops };
+}

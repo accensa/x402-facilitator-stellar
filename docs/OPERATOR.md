@@ -98,7 +98,7 @@ checklist. The groups:
 | --- | --- |
 | **Signers** (testnet) | `FACILITATOR_SECRET` or `FACILITATOR_SECRETS` (pool), optional `FEE_BUMP_SECRET` |
 | **Signers** (pubnet, opt-in) | `ENABLE_PUBNET=true`, `FACILITATOR_SECRET_PUBNET` / `FACILITATOR_SECRETS_PUBNET`, optional `FEE_BUMP_SECRET_PUBNET`, required `STELLAR_RPC_URL_PUBNET` |
-| **Network / fees** | `STELLAR_RPC_URL` (testnet RPC, defaults to public), `MAX_TX_FEE_STROOPS`, `MAX_TX_FEE_STROOPS_PUBNET` |
+| **Network / fees** | `STELLAR_RPC_URL` (testnet RPC, defaults to public), `MAX_TX_FEE_STROOPS`, `MAX_TX_FEE_STROOPS_PUBNET`, `HORIZON_URL`, `HORIZON_URL_PUBNET` |
 | **Caller auth** | `FACILITATOR_API_KEYS` (unset = open mode) |
 | **Rate limits / metering** | `RATE_LIMIT_GLOBAL`, `RATE_LIMIT_<keyId>` per-key overrides, `RATE_LIMIT_STORE`, `DATABASE_URL`, `REDIS_URL` |
 | **HTTP / CORS / proxy** | `PORT`, `CORS_ALLOWED_ORIGINS`, `TRUST_PROXY`, `NODE_ENV` |
