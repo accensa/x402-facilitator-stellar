@@ -3,6 +3,7 @@ import { getPrompt, listPrompts } from './prompts.js';
 import { McpInputError } from './sanitize.js';
 import { listResourceTemplates, listResources, readResource } from './resources.js';
 import { createServer } from 'node:http';
+import { MAX_BATCH_SIZE, currentBatchSink, processBatch } from './batch.js';
 
 /**
  * Protocol revisions this server will negotiate, oldest first (#169).
@@ -40,10 +41,10 @@ export const LATEST_PROTOCOL_VERSION =
  *     with a result and not with an error; the send helpers refuse to emit a
  *     frame without an id, because JSON.stringify would silently drop the
  *     undefined key and put a malformed message on the wire.
- *  3. A malformed or unsupported frame is answered, never ignored (#199): a
- *     batch (a JSON array) is rejected with -32600 — the MCP protocol does not
- *     support JSON-RPC batching — and anything that is not an object with a
- *     string `method` gets -32600 rather than the silence a client times out on.
+ *  3. A malformed frame is answered, never ignored (#199): anything that is not
+ *     an object with a string `method` gets -32600 rather than the silence a
+ *     client times out on. A JSON array is a JSON-RPC 2.0 batch (#428): members
+ *     run concurrently and are answered with an array (see ./batch.js).
  *
  * Beyond `tools/*` the server also speaks the `prompts/*` and `resources/*`
  * halves of MCP (#391). Both follow the same two-tier error contract as tools,
@@ -63,6 +64,7 @@ export class McpServer {
    *   on first use.
    * @param {boolean} [options.prompts=true] - serve `prompts/*` (#391)
    * @param {boolean} [options.resources=true] - serve `resources/*` (#391)
+   * @param {number} [options.maxBatchSize=25] - largest JSON-RPC batch accepted (#428)
    */
   constructor({
     name,
@@ -71,11 +73,13 @@ export class McpServer {
     fetchDiscovery = null,
     prompts = true,
     resources = true,
+    maxBatchSize = MAX_BATCH_SIZE,
   } = {}) {
     this.name = name;
     this.version = version;
     this.logger = logger;
     this.fetchDiscovery = fetchDiscovery;
+    this.maxBatchSize = maxBatchSize;
     this.promptsEnabled = prompts;
     this.resourcesEnabled = resources && typeof fetchDiscovery === 'function';
     this.tools = new Map();
@@ -200,14 +204,15 @@ export class McpServer {
         }
 
         if (Array.isArray(reqObj)) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              id: null,
-              error: { code: -32600, message: 'JSON-RPC batch requests are not supported' },
-            }),
-          );
+          const out = await this._runBatch(reqObj);
+          if (Array.isArray(out) && out.length === 0) {
+            // A batch of only notifications is answered with nothing at all.
+            res.writeHead(204);
+            res.end();
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(out));
+          }
           return;
         }
 
@@ -287,16 +292,12 @@ export class McpServer {
       return;
     }
 
-    // #199: a batch is an array of requests, answered with an array. The MCP
-    // protocol does not support JSON-RPC batching, so the shape is rejected
-    // explicitly — dispatching it as a single request produced silence, and
-    // silence is the one behaviour a client cannot recover from.
+    // #428: a batch is an array of requests, answered with an array of
+    // responses (nothing at all when every member is a notification).
     if (Array.isArray(req)) {
-      if (req.length === 0) {
-        this._sendError(null, -32600, 'Invalid Request: batch must not be empty');
-      } else {
-        this._sendError(null, -32600, 'Invalid Request: JSON-RPC batch requests are not supported');
-      }
+      const out = await this._runBatch(req);
+      if (!Array.isArray(out)) this._sendError(null, out.error.code, out.error.message);
+      else if (out.length > 0) this._write(`${JSON.stringify(out)}\n`);
       return;
     }
 
@@ -321,6 +322,11 @@ export class McpServer {
         this.logger.error?.(`mcp: notification ${req.method} failed: ${err.message}`);
       }
     }
+  }
+
+  /** Runs a JSON-RPC batch (#428); see processBatch for the return shape. */
+  _runBatch(batch) {
+    return processBatch(batch, req => this._handleRequest(req), { maxSize: this.maxBatchSize });
   }
 
   /**
@@ -524,7 +530,7 @@ export class McpServer {
       this.logger.error?.('mcp: refusing to send a result with no id (request was a notification)');
       return;
     }
-    this._write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
+    this._emit({ jsonrpc: '2.0', id, result });
   }
 
   _sendError(id, code, message, data) {
@@ -538,7 +544,14 @@ export class McpServer {
     }
     const error = { code, message };
     if (data !== undefined) error.data = data;
-    this._write(`${JSON.stringify({ jsonrpc: '2.0', id, error })}\n`);
+    this._emit({ jsonrpc: '2.0', id, error });
+  }
+
+  /** Puts a response frame on the wire, or hands it to the batch it belongs to (#428). */
+  _emit(frame) {
+    const sink = currentBatchSink();
+    if (sink) sink.push(frame);
+    else this._write(`${JSON.stringify(frame)}\n`);
   }
 
   /**

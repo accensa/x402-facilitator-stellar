@@ -209,15 +209,25 @@ contract above, the server keeps four transport-level promises:
 
 ### Batches
 
-JSON-RPC 2.0 batch requests — a JSON array of requests, answered with an array
-of responses — are **not supported**; the MCP protocol does not use them. They
-are rejected explicitly rather than silently ignored, and every malformed
-frame is answered, so a client can never time out waiting on something the
-server refused to understand:
+A JSON array is a JSON-RPC 2.0 batch (#428) and is answered with a single JSON
+array of responses, on both the stdio and HTTP (`POST /mcp`) transports:
+
+- Members run **concurrently** and fail independently; a tool error, unknown
+  method or invalid member never affects its neighbours.
+- Each response carries the `id` of the request it answers, in request order.
+- Notifications (no `id`) get no response; a batch of only notifications
+  produces no output (HTTP: `204`).
+- A batch larger than **25** requests is refused whole. The limit is the
+  `maxBatchSize` option of `McpServer`.
+
+Every malformed frame is answered, so a client can never time out waiting on
+something the server refused to understand:
 
 | Input | Response |
 | --- | --- |
-| Any JSON array (including `[]` and arrays of only notifications) | single `-32600` error whose message names that batches are not supported |
+| `[]` | single `-32600` error, `id: null` ("batch must not be empty") |
+| More than 25 requests | single `-32600` error, `id: null`, naming the limit |
+| A batch member that is not an object with a string `method` | `-32600` entry for that member (its `id` if detectable, else `null`); the others still run |
 | Valid JSON that is not an object with a string `method` | `-32600` with `id: null` |
 | A line that is not valid JSON | `-32700` "Parse error" with `id: null` |
 
