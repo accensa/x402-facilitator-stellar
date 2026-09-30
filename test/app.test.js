@@ -79,39 +79,6 @@ import { MemorySettlementStore } from '../src/store/memory.js';
 import { requestState } from '../src/request-state.js';
 
 /**
- * A payment body that the catalog gate accepts and indexes.
- *
- * `VALID_BODY` (from the test harness) carries no Bazaar discovery extension,
- * so `validateForCatalog` hard-drops it before indexing ever occurs. Tests
- * that need to exercise the full cataloging path (provisional listings,
- * overwrite auditing, EXTENSION-RESPONSES header) use this body instead.
- *
- * The `resource.url` is deliberately distinct from `VALID_BODY`'s to make it
- * easy to identify in discovery assertions.
- */
-const CATALOGABLE_BODY = {
-  paymentPayload: {
-    x402Version: 2,
-    scheme: 'exact',
-    network: 'stellar:testnet',
-    resource: { url: 'http://api.ex/140', serviceName: 'provenance-demo', description: 'demo' },
-    extensions: {
-      bazaar: {
-        info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
-        schema: { type: 'object' },
-        routeTemplate: '/140',
-      },
-    },
-  },
-  paymentRequirements: {
-    scheme: 'exact',
-    network: 'stellar:testnet',
-    asset: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
-    maxAmountRequired: '1000',
-    payTo: 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6',
-  },
-};
-
  * GET /healthz — liveness probe.
  *
  * The cheapest possible signal that the process is up and routing: it must
@@ -964,95 +931,6 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Boots a Fastify app with `options`, runs `fn` against it, and always tears
- * it down — even if `fn` throws. Eliminates the try/finally boilerplate that
- * every test would otherwise repeat.
- *
- * @param {Parameters<typeof serve>[0]} options - Collaborator overrides forwarded to `serve()`.
- * @param {(app: Awaited<ReturnType<typeof serve>>) => Promise<void>} fn - Test body.
- * @returns {Promise<void>}
- */
-async function withApp(options, fn) {
-  const app = await serve(options);
-  try {
-    await fn(app);
-  } finally {
-    await app.close();
-  }
-}
-
-/**
- * Creates an in-memory audit sink that captures every emitted record.
- *
- * Using a capture sink instead of asserting on stdout means tests can make
- * precise assertions about which events were emitted and with what fields,
- * without relying on log-string parsing.
- *
- * @returns {{ audit: (event: string, fields: object) => void, records: Array<{event: string} & object> }}
- */
-function captureAudit() {
-  const records = [];
-  return { records, audit: (event, fields) => records.push({ event, ...fields }) };
-}
-
-/**
- * Decodes the base64-encoded `EXTENSION-RESPONSES` header and returns the
- * `bazaar` outcome object it contains.
- *
- * The header encodes the catalog gate's per-extension result so agents can
- * introspect why a payment was catalogued (or not) without a separate lookup.
- * It is always present on `/verify` and `/settle` responses that complete the
- * policy check, even when the catalog is bypassed.
- *
- * @param {Response} res - A Fetch-compatible response object from the test harness.
- * @returns {{ status: string, code?: string, reason?: string }}
- */
-function bazaarOutcome(res) {
-  const raw = res.headers.get('extension-responses');
-  assert.ok(raw, 'EXTENSION-RESPONSES header must be present');
-  return JSON.parse(Buffer.from(raw, 'base64').toString('utf8')).bazaar;
-}
-
-/**
- * Returns a promise that never settles, standing in for a scheme call that
- * hangs indefinitely. Used to trigger `requestTimeoutMs` without real I/O.
- *
- * @returns {Promise<never>}
- */
-const never = () => new Promise(() => {});
-
-/**
- * Creates an Error whose `.code` property is set to `code`.
- *
- * The RPC breaker and several upstream error paths tag their errors with a
- * `code` field (e.g. `'RPC_BREAKER_OPEN'`) so the transport can map them to
- * stable reason codes. This factory replicates that shape in tests.
- *
- * @param {string} message - Human-readable error description.
- * @param {string} code - Stable machine-readable error code.
- * @returns {Error & { code: string }}
- */
-const codedError = (message, code) => Object.assign(new Error(message), { code });
-
-/**
- * Returns a copy of {@link CATALOGABLE_BODY} with `resource` merged over the
- * existing resource fields. Used to test resource-level validation branches
- * (e.g. a bad URL scheme, a missing field) without duplicating the full body.
- *
- * @param {Partial<typeof CATALOGABLE_BODY['paymentPayload']['resource']>} resource
- *   Fields to merge into the payment payload's resource object.
- * @returns {typeof CATALOGABLE_BODY}
- */
-function catalogableWith(resource) {
-  return {
-    ...CATALOGABLE_BODY,
-    paymentPayload: {
-      ...CATALOGABLE_BODY.paymentPayload,
-      resource: { ...CATALOGABLE_BODY.paymentPayload.resource, ...resource },
-    },
-  };
-}
-
  * Security headers and proxy trust: HSTS/nosniff policy, X-Forwarded-For hop
  * counting under TRUST_PROXY, and the 404 reason shape.
  */

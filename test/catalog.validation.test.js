@@ -38,7 +38,7 @@
  * all suites.
  */
 
-import test, { describe } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 import { validateForCatalog } from '../src/catalog/validation.js';
