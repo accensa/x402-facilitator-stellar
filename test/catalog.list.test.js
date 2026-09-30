@@ -31,7 +31,6 @@ import {
   createMcpListing,
   createSampleListResources,
   seedCatalogWithDelay,
-  seedCatalog,
   assertListResults,
 } from './helpers/catalog-test-utils.js';
 
@@ -454,7 +453,7 @@ describe('MemoryCatalogStore.listResources', () => {
 
     test('a catalog at its size cap still lists what it has', async () => {
       const tiny = new MemoryCatalogStore({ maxCatalogSize: 2 });
-      await seedCatalog(tiny, [
+      await seedCatalogWithDelay(tiny, [
         createHttpListing({ url: 'http://x' }),
         createHttpListing({ url: 'http://y' }),
       ]);
@@ -464,11 +463,12 @@ describe('MemoryCatalogStore.listResources', () => {
       );
       const res = await tiny.listResources({});
       assert.strictEqual(res.total, 2);
-      // Same-millisecond writes tie-break by key ascending, so x precedes y.
-      assert.deepEqual(
-        res.items.map(i => i.url),
-        ['http://x', 'http://y'],
-      );
+      // Listing is newest-first on first_seen_at. Seeding without a delay
+      // leaves both writes in the same millisecond on a fast runner, where
+      // the key-ascending tie-break puts x first, and in adjacent
+      // milliseconds on a loaded one, where y wins — so the delay is what
+      // makes this order deterministic, as elsewhere in this file.
+      assertListResults(res, { total: 2, count: 2, urls: ['http://y', 'http://x'] });
     });
   });
 

@@ -46,7 +46,7 @@ jobs:
     name: upstream e2e (stellar, testnet)
     needs: detect-x402-bump
     if: needs.detect-x402-bump.outputs.is-x402 == 'true'
-    uses: ./.github/workflows/conformance.yml
+    uses: ./.github/workflows/conformance-run.yml
     with:
       x402_ref: 'main'
     secrets: inherit
