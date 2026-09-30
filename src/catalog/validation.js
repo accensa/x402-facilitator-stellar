@@ -12,6 +12,33 @@ import { validateAmount } from '../sdk/validation.js';
 const ROUTE_PARAM_REGEX = /\{([^}]+)\}/g;
 const HTML_TAG_REGEX = /<[^>]*>?/gm;
 
+/** Longest description the catalog will index, in UTF-16 code units. */
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/**
+ * Truncates a description to at most `maxLength` UTF-16 code units without
+ * splitting a surrogate pair (#218).
+ *
+ * `String.prototype.slice`/`substring` cut on code-unit boundaries, so a cut
+ * landing between the two halves of an astral character (an emoji in a listing
+ * blurb) leaves an unpaired surrogate behind. That is not valid UTF-16: it
+ * survives `JSON.stringify` as a lone `\udXXX` escape which conformant clients
+ * reject or render as U+FFFD, and it cannot be round-tripped through a
+ * `jsonb` column. Losing one code unit off the end is strictly better than
+ * emitting a value that is not text.
+ *
+ * The fast path returns the input untouched when it already fits, so the
+ * common short description pays nothing for the guard.
+ */
+function truncateDescription(value, maxLength = MAX_DESCRIPTION_LENGTH) {
+  if (value.length <= maxLength) return value;
+  // Walking back one unit when the cut lands on a high surrogate keeps the
+  // pair whole; the result is then at most maxLength - 1 code units long.
+  const boundary = value.charCodeAt(maxLength - 1);
+  const end = boundary >= 0xd800 && boundary <= 0xdbff ? maxLength - 1 : maxLength;
+  return value.slice(0, end);
+}
+
 /**
  * Distinguishes a hostile routeTemplate (path traversal, protocol smuggling,
  * unparseable percent-encoding) from one that is merely low-quality, such as
@@ -145,8 +172,8 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
     let description = rawDescription.includes('<')
       ? rawDescription.replace(HTML_TAG_REGEX, '').trim()
       : rawDescription.trim();
-    if (description.length > 200) {
-      description = description.substring(0, 200);
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      description = truncateDescription(description);
       result.softDrops.push('description_truncated');
     }
     extracted.description = description;

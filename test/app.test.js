@@ -55,7 +55,7 @@
  * | `RateLimit headers fall back to pre-record check` | header fallback |
  * | `DLQ operator routes` | conditional registration |
  */
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   serve,
@@ -64,6 +64,15 @@ import {
   stubRateLimiter,
   stubCatalog,
   VALID_BODY,
+  CATALOGABLE_BODY,
+  catalogableWith,
+  withApp,
+  captureAudit,
+  bazaarOutcome,
+  never,
+  codedError,
+  recordingIdempotency,
+  recordingCatalog,
 } from './helpers/app.js';
 import { MemoryCatalogStore, CatalogError } from '../src/catalog/memory.js';
 import { MemorySettlementStore } from '../src/store/memory.js';
@@ -103,12 +112,19 @@ const CATALOGABLE_BODY = {
   },
 };
 
+ * GET /healthz — liveness probe.
+ *
+ * The cheapest possible signal that the process is up and routing: it must
+ * answer 200 with `{ ok: true }` without touching any collaborator.
+ */
 describe('GET /healthz', () => {
   let app;
   before(async () => {
     app = await serve();
   });
-  after(() => app.close());
+  after(async () => {
+    if (app) await app.close();
+  });
 
   test('reports liveness', async () => {
     const res = await app.get('/healthz');
@@ -117,6 +133,14 @@ describe('GET /healthz', () => {
   });
 });
 
+/**
+ * GET /supported — scheme and extension discovery.
+ *
+ * Asserts the transport relays getSupported() byte-for-byte (including the
+ * Stellar `extra` block) and that discovery stays unauthenticated even when
+ * API keys are configured, because a client reads it before any relationship
+ * with us exists.
+ */
 describe('GET /supported', () => {
   test('passes getSupported() through untouched, extra block and all', async () => {
     // The Stellar extra block carrying areFeesSponsored is an explicit
@@ -156,12 +180,23 @@ describe('GET /supported', () => {
   });
 });
 
+/**
+ * Request validation for POST /verify and POST /settle.
+ *
+ * Every malformed body must produce a 400 carrying a non-null reason code so
+ * agents branch on codes rather than prose. Also documents the deliberate
+ * shape divergence: /verify answers `{isValid, invalidReason,
+ * invalidMessage}` while /settle keeps `{transaction, network}` for
+ * attribution even on transport-level rejections.
+ */
 describe('malformed bodies always carry a reason', () => {
   let app;
   before(async () => {
     app = await serve();
   });
-  after(() => app.close());
+  after(async () => {
+    if (app) await app.close();
+  });
 
   for (const route of ['/verify', '/settle']) {
     for (const [label, body] of [
@@ -258,6 +293,14 @@ describe('malformed bodies always carry a reason', () => {
   }
 });
 
+/**
+ * POST /verify — transport contract.
+ *
+ * Proves the payload and requirements reach the facilitator verbatim, that
+ * facilitator throws become 200 verification failures with a reason code
+ * (never bare 500s), and that the scheme's own rejection vocabulary passes
+ * through untranslated.
+ */
 describe('POST /verify', () => {
   test('passes the payload and requirements through unmodified', async () => {
     const facilitator = stubFacilitator();
@@ -346,6 +389,14 @@ describe('POST /verify', () => {
   });
 });
 
+/**
+ * POST /settle — transport contract and fee reporting.
+ *
+ * Proves scheme results pass through untouched, failures still carry
+ * transaction/network for out-of-band attribution, and the settle path
+ * reports the sponsored fee to the real RateLimiter so the fee ceiling
+ * (feeSpd) actually bounds spend.
+ */
 describe('POST /settle', () => {
   test('passes the scheme result through untouched', async () => {
     const app = await serve();
@@ -473,6 +524,14 @@ describe('POST /settle', () => {
   });
 });
 
+/**
+ * Rate-limit wiring on /verify and /settle.
+ *
+ * Covers the RateLimit-* header contract on allowed requests, the 429 +
+ * Retry-After + reason shape on refusals, that refusals short-circuit before
+ * the facilitator (bounding work, not just responses), and that malformed
+ * bodies never consume caller budget.
+ */
 describe('rate limiting', () => {
   test('an allowed request carries the RateLimit headers', async () => {
     const app = await serve();
@@ -530,6 +589,13 @@ describe('rate limiting', () => {
   });
 });
 
+/**
+ * GET /usage — per-key usage reporting.
+ *
+ * Usage is scoped to the presented API key (id uppercased at auth); in open
+ * mode there is no caller identity, so the route is refused with a distinct
+ * reason instead of leaking instance-wide numbers.
+ */
 describe('GET /usage', () => {
   test('is refused in open mode with a distinct reason', async () => {
     // With no keys there is no caller identity, so there is no usage to scope.
@@ -567,6 +633,14 @@ describe('GET /usage', () => {
   });
 });
 
+/**
+ * Automatic cataloging side effects of /verify and /settle.
+ *
+ * Cataloging must never delay or fail a payment: asserts that throwing,
+ * slow, and synchronously-crashing collaborators leave the payment response
+ * intact and JSON-shaped, and that only successful, catalogable outcomes
+ * are recorded.
+ */
 describe('automatic cataloging', () => {
   /** Cataloging is enqueued, so give the microtask queue a turn before asserting. */
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
@@ -676,6 +750,13 @@ describe('automatic cataloging', () => {
   });
 });
 
+/**
+ * RateLimit-Remaining header semantics (issue #141).
+ *
+ * The current request is counted before headers are emitted, so a budget of
+ * 3 yields remaining 2 → 1 → 0 and the fourth request is refused with a 429
+ * that still reports 0. Exercises the real RateLimiter for both routes.
+ */
 describe('RateLimit-Remaining reflects the post-count state (issue #141)', () => {
   test('/verify decrements to zero and refuses exactly the request after the budget runs out', async () => {
     const { RateLimiter } = await import('../src/rate-limit.js');
@@ -752,6 +833,14 @@ describe('RateLimit-Remaining reflects the post-count state (issue #141)', () =>
   });
 });
 
+/**
+ * Catalog provenance and provisional lifecycle (issue #140).
+ *
+ * A verify-only pass records a provisional listing with an expiry; settle
+ * promotes it to permanent public state (`source: 'settle'`, no expiry);
+ * unsettled provisional listings disappear from discovery once the TTL
+ * lapses and are pruned by pruneExpired().
+ */
 describe('catalog provenance and provisional lifecycle (issue #140)', () => {
   test('a verify without settle catalogues a provisional, expiring listing', async () => {
     const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 600_000 });
@@ -839,7 +928,7 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
 
   test('an unsettled verify-only listing disappears from discovery once it expires', async () => {
     // Short TTL so the test does not wait out a real window.
-    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 150 });
+    const catalog = new MemoryCatalogStore({ catalogVerifyTtlMs: 800 });
     const app = await serve({
       catalog,
       facilitator: stubFacilitator({
@@ -850,11 +939,11 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
       const headers = { authorization: 'Bearer secret' };
       await app.post('/verify', CATALOGABLE_BODY, headers);
       // Give the enqueued (off-hot-path) catalog write time to land while the
-      // 150ms window still puts the listing in the public view.
-      await new Promise(r => setTimeout(r, 60));
+      // TTL window still puts the listing in the public view.
+      await new Promise(r => setTimeout(r, 50));
       assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 1);
 
-      await new Promise(r => setTimeout(r, 180));
+      await new Promise(r => setTimeout(r, 900));
       assert.equal((await (await app.get('/discovery/resources')).json()).items.length, 0);
 
       const pruned = await catalog.pruneExpired();
@@ -964,6 +1053,9 @@ function catalogableWith(resource) {
   };
 }
 
+ * Security headers and proxy trust: HSTS/nosniff policy, X-Forwarded-For hop
+ * counting under TRUST_PROXY, and the 404 reason shape.
+ */
 describe('transport hardening', () => {
   test('HSTS is sent only when NODE_ENV=production; nosniff always', async () => {
     await withApp({ nodeEnv: 'production' }, async app => {
@@ -1012,6 +1104,13 @@ describe('transport hardening', () => {
   });
 });
 
+/**
+ * Error boundary around body parsing and collaborator failures.
+ *
+ * Malformed JSON is rejected in each route's own shape, oversized bodies hit
+ * the 256 KB cap as 413 payload_too_large, and a limiter crash surfaces as a
+ * structured 500 rather than an unhandled fault.
+ */
 describe('error boundary', () => {
   test('malformed JSON keeps each route’s own rejection shape', async () => {
     await withApp({}, async app => {
@@ -1059,6 +1158,14 @@ describe('error boundary', () => {
   });
 });
 
+/**
+ * CORS preflight (OPTIONS) policy.
+ *
+ * Public routes default to `*` with no allowlist; once an allowlist exists,
+ * only listed origins get a grant, unlisted origins get a 204 without
+ * access-control-allow-origin (so the browser blocks the real request), and
+ * public routes stop defaulting to `*`.
+ */
 describe('CORS preflight', () => {
   const origin = 'https://agent.example';
 
@@ -1098,6 +1205,13 @@ describe('CORS preflight', () => {
   });
 });
 
+/**
+ * API key Authorization header forms.
+ *
+ * Table-driven coverage of accepted vs malformed header syntax: a bare key
+ * is tolerated, every structurally invalid Bearer form maps to
+ * malformed_auth_header, and an unknown key maps to invalid_api_key.
+ */
 describe('API key header forms', () => {
   const config = testConfig({ apiKeys: ['alice:a-secret'] });
 
@@ -1119,6 +1233,14 @@ describe('API key header forms', () => {
   }
 });
 
+/**
+ * GET /readyz — readiness probe contract.
+ *
+ * Without a checker it reports readiness_not_configured (503) while still
+ * exposing failover state; with one it relays the report (200/503), maps a
+ * throwing probe to a 503 carrying the error message, and per-network config
+ * builds the real checker at boot.
+ */
 describe('GET /readyz', () => {
   test('without a readiness checker it reports not_ready, with failover state', async () => {
     const failoverHealth = { getState: () => ({ region: 'eu-west' }) };
@@ -1167,6 +1289,13 @@ describe('GET /readyz', () => {
   });
 });
 
+/**
+ * GET /metrics — Prometheus exposition.
+ *
+ * Asserts the exposition content type, the seeded signer gauges (and that a
+ * network with no signer gets no series), and that the listener omits the
+ * route entirely when serveMetrics is false.
+ */
 describe('GET /metrics', () => {
   test('serves Prometheus text with seeded signer gauges', async () => {
     const extras = { signers: { 'stellar:testnet': 'GSIGNER', 'stellar:pubnet': null } };
@@ -1191,6 +1320,14 @@ describe('GET /metrics', () => {
   });
 });
 
+/**
+ * POST /verify scheme failure mapping.
+ *
+ * Table-driven: a timeout, an open RPC breaker, and an unregistered
+ * scheme/network each map to a distinct invalidReason while still answering
+ * 200, and every non-generic failure is audited as rpc_unreachable with
+ * op=verify.
+ */
 describe('POST /verify scheme failures map to distinct reason codes', () => {
   for (const [label, verify, config, reason] of [
     [
@@ -1240,6 +1377,14 @@ describe('POST /verify scheme failures map to distinct reason codes', () => {
   }
 });
 
+/**
+ * POST /settle scheme failure mapping.
+ *
+ * Each misbehaving collaborator maps to a distinct errorReason and a
+ * settlement-store state (failed/unknown), lock timeouts and open breakers
+ * stay distinguishable, submitted-after-wire timeouts report
+ * submitted_outcome_unknown, and failures are audited.
+ */
 describe('POST /settle scheme failures map to distinct reason codes', () => {
   /**
    * Settles once with the given collaborators and returns the JSON response
@@ -1254,6 +1399,18 @@ describe('POST /settle scheme failures map to distinct reason codes', () => {
    * @param {object} [opts.extras={}] - Extra collaborators (audit, distributedLock, etc.).
    * @param {object} [opts.body=VALID_BODY] - Request body sent to POST /settle.
    * @returns {Promise<{ json: object, record: object }>}
+   * Settles once against a throwaway settlement store and returns the parsed
+   * response body alongside the persisted record.
+   *
+   * Boots an app per call so each scenario gets exactly one collaborator
+   * misbehaving, keys the request on `k-fail` so the record can be read back.
+   *
+   * @param {object} options
+   * @param {object} options.facilitator - Facilitator stub driving the outcome.
+   * @param {object} [options.config] - Config overrides merged over testConfig().
+   * @param {object} [options.extras] - Extra collaborators (audit, lock, ...).
+   * @param {object} [options.body] - Request body, defaulting to VALID_BODY.
+   * @returns {Promise<{json: object, record: object|undefined}>} Response body and stored record.
    */
   async function settleWith({ facilitator, config = {}, extras = {}, body = VALID_BODY }) {
     const settlementStore = new MemorySettlementStore();
@@ -1358,6 +1515,14 @@ describe('POST /settle scheme failures map to distinct reason codes', () => {
   });
 });
 
+/**
+ * POST /settle idempotent replay from the settlement store.
+ *
+ * Proves a prior record short-circuits settlement without touching the
+ * facilitator: stored responses replay verbatim (stringified JSON parsed
+ * first), bare records rebuild from their fields, in-flight and terminal
+ * failures replay their state, and only retryable failures settle again.
+ */
 describe('POST /settle idempotent replay from the settlement store', () => {
   const NETWORK = 'stellar:testnet';
 
@@ -1374,6 +1539,16 @@ describe('POST /settle idempotent replay from the settlement store', () => {
    * @param {object} [details={}] - Additional fields merged into the stored record
    *   (e.g. `tx_hash`, `response`, `error_reason`).
    * @returns {Promise<{ json: object, settleCalls: number }>}
+   * Seeds a store with one record under `k1`, walked to `state`, and serves an
+   * app over it. The facilitator counts calls so a test can prove a replay never
+   * touched the chain.
+   *
+   * @param {'settled'|'submitted'|'failed'} state - State to walk the record to
+   *   before the request (`submitted` is the seeded default and is not updated).
+   * @param {object} [details={}] - Extra column values: `response`,
+   *   `error_reason`, `error_message`, `tx_hash`.
+   * @returns {Promise<{json: object, settleCalls: number}>} The parsed response
+   *   body and the number of times the facilitator settle path actually ran.
    */
   async function replay(state, details = {}) {
     const settlementStore = new MemorySettlementStore();
@@ -1460,6 +1635,14 @@ describe('POST /settle idempotent replay from the settlement store', () => {
   });
 });
 
+/**
+ * POST /settle optional collaborators — idempotency, webhooks, lock.
+ *
+ * Each collaborator is optional: when present it must be used (replay
+ * short-circuits, complete() records both outcomes, webhooks enqueue
+ * settlement.completed, the distributed lock serializes under the payment
+ * key), and when absent the route still works.
+ */
 describe('POST /settle optional collaborators', () => {
   /**
    * Creates a minimal idempotency store stub whose `begin` always returns
@@ -1540,6 +1723,14 @@ describe('POST /settle optional collaborators', () => {
   });
 });
 
+/**
+ * GET /settlements/:idempotencyKey and its /events sub-route.
+ *
+ * Reads are tenant-scoped: the owning key reads the record and its event
+ * log, any other key (or an unknown key) gets a 404 so settlement existence
+ * never leaks across tenants. Stores exposing getConsistent are read
+ * through it.
+ */
 describe('GET /settlements/:idempotencyKey', () => {
   const config = testConfig({ apiKeys: ['alice:a-secret', 'bob:b-secret'] });
   const alice = { authorization: 'Bearer a-secret' };
@@ -1591,6 +1782,15 @@ describe('GET /settlements/:idempotencyKey', () => {
   });
 });
 
+/**
+ * POST /discovery/resources — manual registration.
+ *
+ * Documents the rejection ladder: catalog budget is checked before body
+ * validation (429 + Retry-After + audit), structural problems are 400
+ * invalid_resource, a missing discovery extension is a hard drop, and
+ * CatalogError codes surface verbatim while uncoded errors collapse to
+ * catalog_error.
+ */
 describe('POST /discovery/resources (manual registration)', () => {
   test('a structurally invalid body → 400 invalid_resource', async () => {
     await withApp({}, async app => {
@@ -1664,6 +1864,14 @@ describe('POST /discovery/resources (manual registration)', () => {
   });
 });
 
+/**
+ * EXTENSION-RESPONSES header reporting for automatic cataloging.
+ *
+ * The bazaar outcome declared alongside a successful payment describes what
+ * cataloging did: hostile declarations hard-dropped with their code, budget
+ * refusals that still let the payment succeed (plus audit), soft-dropped
+ * fields named individually, and overwrite audits on re-cataloguing.
+ */
 describe('automatic cataloging outcomes (EXTENSION-RESPONSES)', () => {
   const verifying = stubFacilitator({ verify: async () => ({ isValid: true }) });
 
@@ -1728,6 +1936,14 @@ describe('automatic cataloging outcomes (EXTENSION-RESPONSES)', () => {
   });
 });
 
+/**
+ * Public discovery reads — /discovery/resources and /discovery/search.
+ *
+ * Covers query parsing (clamped limits, split extensions), search requiring
+ * a query, conditional GETs (ETag/If-None-Match answering 304 without
+ * re-running the catalog), and JSON-shaped failures when the catalog or the
+ * read budget breaks.
+ */
 describe('public discovery reads', () => {
   /**
    * Creates a catalog stub that records the `params` object passed to each
@@ -1855,11 +2071,15 @@ describe('public discovery reads', () => {
   });
 });
 
+/**
+ * Cataloging failures during a genuinely catalogable payment.
+ *
+ * Distinct from 'automatic cataloging' above: those bodies are hard-dropped
+ * by validateForCatalog before any collaborator runs, so these use
+ * CATALOGABLE_BODY to force the failure inside processCataloging itself and
+ * prove the payment is still untouched.
+ */
 describe('cataloging failures on a catalogable payment', () => {
-  // The two "does not fail the payment" tests in 'automatic cataloging' above
-  // send VALID_BODY, which validateForCatalog hard-drops before the limiter or
-  // the catalog is ever called. These send a body that is actually catalogued,
-  // so the failure really happens inside processCataloging.
   const verifying = stubFacilitator({ verify: async () => ({ isValid: true }) });
 
   test('an async catalog write that rejects is logged, and the payment is untouched', async () => {
@@ -1895,6 +2115,12 @@ describe('cataloging failures on a catalogable payment', () => {
   });
 });
 
+/**
+ * RateLimit header fallback when the store records nothing.
+ *
+ * record* returning no state must not cost the caller its headers: they are
+ * rebuilt from the pre-record check so limit/remaining/reset still arrive.
+ */
 describe('RateLimit headers fall back to the pre-record check', () => {
   test('a limiter whose record call returns no state still yields headers', async () => {
     const rateLimiter = stubRateLimiter();
@@ -1910,6 +2136,12 @@ describe('RateLimit headers fall back to the pre-record check', () => {
   });
 });
 
+/**
+ * /admin/dlq operator routes.
+ *
+ * Registration is conditional: the routes exist only when a dead-letter
+ * store is wired in; otherwise they 404 even for an authenticated operator.
+ */
 describe('DLQ operator routes', () => {
   test('are registered only when a dead-letter store is supplied', async () => {
     const config = testConfig({ apiKeys: ['ops:o-secret'] });
@@ -1926,5 +2158,315 @@ describe('DLQ operator routes', () => {
     await withApp({ config }, async app => {
       assert.equal((await app.get('/admin/dlq', headers)).status, 404);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic failure modes and lazy EXTENSION-RESPONSES encoding (#369, #368).
+//
+// #369 asks that error states in this surface be explicit and predictable:
+// every rejection carries a stable reason code, the originating message
+// reaches the client verbatim (never '[object Object]'), the failure lands in
+// the log channels an operator watches (stderr + the per-request line), and a
+// replayed failure produces the same bytes every time.
+//
+// #368 made the EXTENSION-RESPONSES header encoding lazy (see src/app.js);
+// the two tests at the bottom pin its wire behaviour so the optimization
+// cannot silently change what a bazaar client observes.
+// ---------------------------------------------------------------------------
+describe('deterministic failure modes and lazy EXTENSION-RESPONSES encoding (#369, #368)', () => {
+  test('a facilitator throw carries the same code and message on every replay', async () => {
+    // Predictable failure modes (#369): the same fault must not degrade into
+    // different shapes across retries — an agent backing off on a reason code
+    // needs the replay to answer identically.
+    const app = await serve({
+      facilitator: stubFacilitator({
+        verify: async () => {
+          throw new Error('deterministic boom 42');
+        },
+      }),
+    });
+    try {
+      let first;
+      for (let i = 0; i < 5; i += 1) {
+        const res = await app.post('/verify', VALID_BODY);
+        assert.equal(res.status, 200);
+        const json = await res.json();
+        assert.equal(json.isValid, false);
+        assert.equal(json.invalidReason, 'facilitator_error');
+        assert.equal(json.invalidMessage, 'deterministic boom 42');
+        if (i === 0) first = json;
+        else assert.deepEqual(json, first, `replay ${i} diverged from the first failure`);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a non-Error rejection is stringified into the message, never "[object Object]"', async () => {
+    // Thrown non-Errors used to be a silent-failure trap: String({}) is
+    // '[object Object]', which tells the caller nothing. The transport must
+    // stringify so the message stays stable and parseable (#369).
+    for (const [thrown, expected] of [
+      [{ code: 'X', detail: 'inner detail' }, '{"code":"X","detail":"inner detail"}'],
+      [42, '42'],
+      [null, 'null'],
+    ]) {
+      const app = await serve({
+        facilitator: stubFacilitator({
+          verify: async () => {
+            throw thrown;
+          },
+        }),
+      });
+      try {
+        const json = await (await app.post('/verify', VALID_BODY)).json();
+        assert.equal(json.invalidReason, 'facilitator_error');
+        assert.equal(json.invalidMessage, expected);
+        assert.ok(!json.invalidMessage.includes('[object Object]'));
+      } finally {
+        await app.close();
+      }
+    }
+  });
+
+  test('an Error subclass propagates its name, message and stack into the logs', async () => {
+    // A bare Error loses its identity ("Error: boom" for everything), so
+    // operational classes like timeouts carry their own name. The stderr line
+    // the route logs on a facilitator throw must contain that name and the
+    // message, or the failure is undiagnosable from logs alone (#369).
+    class SimulatedTimeoutError extends Error {
+      constructor(message) {
+        super(message);
+        this.name = 'SimulatedTimeoutError';
+      }
+    }
+    const app = await serve({
+      facilitator: stubFacilitator({
+        verify: async () => {
+          throw new SimulatedTimeoutError('deadline passed');
+        },
+      }),
+    });
+    const errorLines = [];
+    const spy = mock.method(console, 'error', (...args) => errorLines.push(args.join(' ')));
+    try {
+      const json = await (await app.post('/verify', VALID_BODY)).json();
+      assert.equal(json.isValid, false);
+      assert.equal(json.invalidReason, 'facilitator_error');
+      assert.equal(json.invalidMessage, 'deadline passed');
+    } finally {
+      spy.mock.restore();
+      await app.close();
+    }
+    const joined = errorLines.join('\n');
+    assert.match(joined, /SimulatedTimeoutError/, 'the error name must reach stderr');
+    assert.match(joined, /deadline passed/, 'the error message must reach stderr');
+    assert.match(joined, /route=\/verify/, 'the failing route must be identified');
+  });
+
+  test('the per-request log line records the failure with its route and reason', async () => {
+    // stderr carries the detail; the structured request line is what metrics
+    // and dashboards scrape, so it must carry outcome, reason and route for a
+    // failed verification too (#369).
+    const app = await serve({
+      facilitator: stubFacilitator({
+        verify: async () => {
+          throw new Error('logging probe');
+        },
+      }),
+    });
+    const logLines = [];
+    const errorLines = [];
+    const logSpy = mock.method(console, 'log', (...args) => logLines.push(args.join(' ')));
+    const errorSpy = mock.method(console, 'error', (...args) => errorLines.push(args.join(' ')));
+    try {
+      await app.post('/verify', VALID_BODY);
+    } finally {
+      logSpy.mock.restore();
+      errorSpy.mock.restore();
+      await app.close();
+    }
+    const requestLine = logLines.find(line => line.includes('"event":"request"'));
+    assert.ok(requestLine, 'a request log line must have been emitted');
+    assert.match(requestLine, /"outcome":"error"/);
+    assert.match(requestLine, /"reason":"facilitator_error"/);
+    assert.match(requestLine, /"route":"\/verify"/);
+  });
+
+  test('concurrent failures keep their own codes and messages', async () => {
+    // Error handling must be request-scoped: a burst of failing settlements
+    // must not let one request's error leak into another's response (#369).
+    const app = await serve({
+      facilitator: {
+        verify: async payload => {
+          throw new Error(`boom for ${payload.payload.tx}`);
+        },
+      },
+    });
+    try {
+      const bodies = Array.from({ length: 10 }, (_, i) => ({
+        ...VALID_BODY,
+        paymentPayload: { ...VALID_BODY.paymentPayload, payload: { tx: `det-${i}` } },
+      }));
+      const responses = await Promise.all(bodies.map(body => app.post('/verify', body)));
+      const jsons = await Promise.all(responses.map(res => res.json()));
+      jsons.forEach((json, i) => {
+        assert.equal(json.isValid, false);
+        assert.equal(json.invalidReason, 'facilitator_error');
+        assert.equal(json.invalidMessage, `boom for det-${i}`, 'error content must not be crossed');
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('transport-level rejections are byte-identical across replays', async () => {
+    // Determinism applies to the transport's own failure paths as well: a
+    // malformed body and an oversized body must produce the same bytes on
+    // every replay, so a client can cache or diff rejections (#369).
+    await withApp({}, async app => {
+      for (const [route, body] of [
+        ['/verify', '{not json'],
+        ['/settle', '{not json'],
+        ['/verify', JSON.stringify({ ...VALID_BODY, pad: 'x'.repeat(300 * 1024) })],
+      ]) {
+        let first;
+        for (let i = 0; i < 3; i += 1) {
+          const res = await app.post(route, body);
+          const text = await res.text();
+          if (i === 0) first = text;
+          else assert.equal(text, first, `replay ${i} of ${route} diverged`);
+        }
+      }
+    });
+  });
+
+  test('the lazy EXTENSION-RESPONSES encoding is byte-identical to the eager one (#368)', async () => {
+    // #368 deferred the base64 encoding of EXTENSION-RESPONSES so a payment
+    // whose caller never reads the header stops paying for it. This pins the
+    // wire bytes: what the client receives must equal the eager encoding of
+    // the same outcome, byte for byte and semantically.
+    const app = await serve({
+      facilitator: stubFacilitator({
+        settle: async () => ({ success: true, transaction: 'tx', network: 'stellar:testnet' }),
+      }),
+    });
+    try {
+      const res = await app.post('/settle', CATALOGABLE_BODY);
+      assert.equal(res.status, 200);
+      const actual = res.headers.get('extension-responses');
+      assert.ok(actual, 'the header must still be sent');
+
+      // The landed outcome the settle path builds, encoded exactly the way the
+      // eager implementation did.
+      const expected = Buffer.from(
+        JSON.stringify({ bazaar: { status: 'landed', code: 'catalog_success' } }),
+      ).toString('base64');
+      assert.equal(actual, expected);
+
+      // And it still decodes to the same envelope.
+      const decoded = JSON.parse(Buffer.from(actual, 'base64').toString('utf8'));
+      assert.deepEqual(decoded.bazaar, { status: 'landed', code: 'catalog_success' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a rejected cataloging outcome is still encoded byte-identically (#368)', async () => {
+    // The lazy object closes over the settled `outcome`, so every branch
+    // (landed, rejected, partial) must encode identically to before — the
+    // rejection ladder is where a shape regression would hide.
+    for (const [resource, envelope] of [
+      [{ url: 'ftp://api.ex/x' }, { status: 'rejected', code: 'invalid_url_scheme' }],
+      [
+        { iconUrl: 'javascript:alert(1)' },
+        {
+          status: 'partially landed',
+          code: 'catalog_partial',
+          reason: 'Dropped fields: iconUrl',
+        },
+      ],
+    ]) {
+      const app = await serve({
+        facilitator: stubFacilitator({ verify: async () => ({ isValid: true }) }),
+      });
+      try {
+        const res = await app.post('/verify', catalogableWith(resource));
+        assert.equal(res.status, 200);
+        const actual = res.headers.get('extension-responses');
+        const expected = Buffer.from(JSON.stringify({ bazaar: envelope })).toString('base64');
+        assert.equal(actual, expected);
+      } finally {
+        await app.close();
+      }
+    }
+  });
+});
+
+/**
+ * Unit tests for the shared test helpers themselves (test/helpers/app.js).
+ *
+ * Guards the fixture semantics the rest of the suite depends on: deep-copy
+ * isolation of overrides, ordered audit capture, error shaping, recording
+ * stubs, and withApp's guarantee that the app is closed even when the
+ * callback throws.
+ */
+describe('modular app test helpers and edge cases', () => {
+  test('catalogableWith creates deep-copied overrides without mutating baseline fixture', () => {
+    const custom = catalogableWith({ url: 'http://custom.ex/route', description: 'customized' });
+    assert.equal(custom.paymentPayload.resource.url, 'http://custom.ex/route');
+    assert.equal(custom.paymentPayload.resource.description, 'customized');
+    assert.equal(CATALOGABLE_BODY.paymentPayload.resource.url, 'http://api.ex/140');
+  });
+
+  test('captureAudit records emitted events in order', () => {
+    const { audit, records } = captureAudit();
+    audit('event_one', { key: 'val1' });
+    audit('event_two', { count: 42 });
+    assert.equal(records.length, 2);
+    assert.deepEqual(records[0], { event: 'event_one', key: 'val1' });
+    assert.deepEqual(records[1], { event: 'event_two', count: 42 });
+  });
+
+  test('codedError sets message and code properties', () => {
+    const err = codedError('timeout occurred', 'ETIMEDOUT');
+    assert.ok(err instanceof Error);
+    assert.equal(err.message, 'timeout occurred');
+    assert.equal(err.code, 'ETIMEDOUT');
+  });
+
+  test('recordingIdempotency tracks completed entries and replayed flags', async () => {
+    const idem = recordingIdempotency({ replayed: true, key: 'idem-test' });
+    const beginRes = await idem.begin('idem-test');
+    assert.deepEqual(beginRes, { replayed: true, key: 'idem-test' });
+
+    await idem.complete('idem-test', 200, { success: true });
+    assert.equal(idem.completed.length, 1);
+    assert.deepEqual(idem.completed[0], {
+      key: 'idem-test',
+      status: 200,
+      response: { success: true },
+    });
+  });
+
+  test('recordingCatalog captures query and search arguments', async () => {
+    const { calls, catalog } = recordingCatalog();
+    await catalog.listResources({ limit: 10, offset: 5 });
+    await catalog.search({ query: 'test', limit: 5 });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], { limit: 10, offset: 5 });
+    assert.deepEqual(calls[1], { query: 'test', limit: 5 });
+  });
+
+  test('withApp ensures app teardown on callback exception', async () => {
+    let closedApp = null;
+    await assert.rejects(async () => {
+      await withApp({}, async app => {
+        closedApp = app;
+        throw new Error('deliberate callback rejection');
+      });
+    }, /deliberate callback rejection/);
+    assert.ok(closedApp);
   });
 });

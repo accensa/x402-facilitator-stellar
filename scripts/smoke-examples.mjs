@@ -263,6 +263,14 @@ async function assertMcpAgent() {
       `initialize answered with unexpected serverInfo: ${JSON.stringify(init.serverInfo)}`,
     );
   }
+  // #169: the handshake negotiates. A revision the server implements comes back
+  // unchanged, so this assertion is what makes "the agent and the server agree
+  // on a protocol revision" a checked fact rather than an assumption.
+  if (init.protocolVersion !== '2024-11-05') {
+    throw new Error(
+      `initialize did not echo the requested protocolVersion: ${JSON.stringify(init.protocolVersion)}`,
+    );
+  }
 
   const listed = await send('tools/list', {});
   const names = (listed.tools ?? []).map(tool => tool.name);

@@ -82,9 +82,9 @@ test('createProcessErrorHandlers is independent of any global process object', (
 
 test('server.js reports a bind failure and exits non-zero instead of dying silently', async t => {
   // Hold a port, then ask the server to bind it. 0.0.0.0 conflicts with the
-  // held 127.0.0.1 binding, producing EADDRINUSE.
+  // held 0.0.0.0 binding, producing EADDRINUSE.
   const blocker = net.createServer();
-  blocker.listen(0, '127.0.0.1');
+  blocker.listen(0, '0.0.0.0');
   await once(blocker, 'listening');
   const port = blocker.address().port;
   t.after(() => blocker.close());
