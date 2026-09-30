@@ -180,11 +180,13 @@ describe('MemoryCatalogStore.listResources', () => {
 
     test('filters resources properly when resource has no extensions field', async () => {
       const noExtStore = new MemoryCatalogStore();
-      await noExtStore.upsertResource(createHttpListing({ url: 'http://noext', extensions: undefined }));
-      
+      await noExtStore.upsertResource(
+        createHttpListing({ url: 'http://noext', extensions: undefined }),
+      );
+
       const resEmpty = await noExtStore.listResources({ extensions: [] });
       assert.strictEqual(resEmpty.total, 1);
-      
+
       const resFilter = await noExtStore.listResources({ extensions: ['ext1'] });
       assert.strictEqual(resFilter.total, 0);
     });
@@ -193,10 +195,10 @@ describe('MemoryCatalogStore.listResources', () => {
       const pStore = new MemoryCatalogStore();
       const res1 = createHttpListing({ url: 'http://prov' });
       await pStore.upsertResource(res1, 'verify');
-      
+
       const entry = pStore.resources.get('http://prov::');
-      entry.expires_at = Date.now() - 10000; 
-      
+      entry.expires_at = Date.now() - 10000;
+
       const res = await pStore.listResources({});
       assert.strictEqual(res.total, 0);
       assert.strictEqual(res.items.length, 0);
@@ -206,7 +208,7 @@ describe('MemoryCatalogStore.listResources', () => {
       const pStore = new MemoryCatalogStore();
       const res1 = createHttpListing({ url: 'http://prov' });
       await pStore.upsertResource(res1, 'verify');
-      
+
       const res = await pStore.listResources({});
       assert.strictEqual(res.total, 1);
     });
@@ -215,24 +217,24 @@ describe('MemoryCatalogStore.listResources', () => {
       const pStore = new MemoryCatalogStore();
       const res1 = createHttpListing({ url: 'http://prov' });
       await pStore.upsertResource(res1, 'verify');
-      
+
       const entry = pStore.resources.get('http://prov::');
-      entry.expires_at = null; 
-      
+      entry.expires_at = null;
+
       const res = await pStore.listResources({});
       assert.strictEqual(res.total, 0);
     });
-    
+
     test('handles missing first_seen_at during sorting', async () => {
       const sStore = new MemoryCatalogStore();
       const r1 = createHttpListing({ url: 'http://a' });
       const r2 = createHttpListing({ url: 'http://b' });
       await sStore.upsertResource(r1);
       await sStore.upsertResource(r2);
-      
+
       sStore.resources.get('http://a::').first_seen_at = null;
       sStore.resources.get('http://b::').first_seen_at = null;
-      
+
       const res = await sStore.listResources({});
       assert.strictEqual(res.total, 2);
       assert.strictEqual(res.items[0].url, 'http://a');
@@ -244,7 +246,7 @@ describe('MemoryCatalogStore.listResources', () => {
       assert.strictEqual(res.total, 3);
       assert.strictEqual(res.items.length, 2);
     });
-    
+
     test('handles NaN or invalid numbers for limit and offset', async () => {
       const res = await store.listResources({ limit: NaN, offset: NaN });
       assert.ok(Array.isArray(res.items));
