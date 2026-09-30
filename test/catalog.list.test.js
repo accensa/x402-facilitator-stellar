@@ -159,4 +159,95 @@ describe('MemoryCatalogStore.listResources', () => {
       assert.strictEqual(res.items.length, 0);
     });
   });
+
+  describe('Edge cases and boundary conditions', () => {
+    test('handles negative limit and offset gracefully by treating them as 0 or array slice semantics', async () => {
+      const res = await store.listResources({ limit: -1, offset: -1 });
+      assert.ok(Array.isArray(res.items));
+    });
+
+    test('ignores extensions filter if extensions is not an array', async () => {
+      const res = await store.listResources({ extensions: 'ext1' });
+      assert.strictEqual(res.total, 3);
+      assert.strictEqual(res.items.length, 3);
+    });
+
+    test('ignores extensions filter if extensions is null', async () => {
+      const res = await store.listResources({ extensions: null });
+      assert.strictEqual(res.total, 3);
+      assert.strictEqual(res.items.length, 3);
+    });
+
+    test('filters resources properly when resource has no extensions field', async () => {
+      const noExtStore = new MemoryCatalogStore();
+      await noExtStore.upsertResource(createHttpListing({ url: 'http://noext', extensions: undefined }));
+      
+      const resEmpty = await noExtStore.listResources({ extensions: [] });
+      assert.strictEqual(resEmpty.total, 1);
+      
+      const resFilter = await noExtStore.listResources({ extensions: ['ext1'] });
+      assert.strictEqual(resFilter.total, 0);
+    });
+
+    test('filters out expired provisional resources', async () => {
+      const pStore = new MemoryCatalogStore();
+      const res1 = createHttpListing({ url: 'http://prov' });
+      await pStore.upsertResource(res1, 'verify');
+      
+      const entry = pStore.resources.get('http://prov::');
+      entry.expires_at = Date.now() - 10000; 
+      
+      const res = await pStore.listResources({});
+      assert.strictEqual(res.total, 0);
+      assert.strictEqual(res.items.length, 0);
+    });
+
+    test('includes non-expired provisional resources', async () => {
+      const pStore = new MemoryCatalogStore();
+      const res1 = createHttpListing({ url: 'http://prov' });
+      await pStore.upsertResource(res1, 'verify');
+      
+      const res = await pStore.listResources({});
+      assert.strictEqual(res.total, 1);
+    });
+
+    test('provisional resource without expires_at is considered expired', async () => {
+      const pStore = new MemoryCatalogStore();
+      const res1 = createHttpListing({ url: 'http://prov' });
+      await pStore.upsertResource(res1, 'verify');
+      
+      const entry = pStore.resources.get('http://prov::');
+      entry.expires_at = null; 
+      
+      const res = await pStore.listResources({});
+      assert.strictEqual(res.total, 0);
+    });
+    
+    test('handles missing first_seen_at during sorting', async () => {
+      const sStore = new MemoryCatalogStore();
+      const r1 = createHttpListing({ url: 'http://a' });
+      const r2 = createHttpListing({ url: 'http://b' });
+      await sStore.upsertResource(r1);
+      await sStore.upsertResource(r2);
+      
+      sStore.resources.get('http://a::').first_seen_at = null;
+      sStore.resources.get('http://b::').first_seen_at = null;
+      
+      const res = await sStore.listResources({});
+      assert.strictEqual(res.total, 2);
+      assert.strictEqual(res.items[0].url, 'http://a');
+      assert.strictEqual(res.items[1].url, 'http://b');
+    });
+
+    test('applies default limit when limit is undefined but offset is provided', async () => {
+      const res = await store.listResources({ offset: 1 });
+      assert.strictEqual(res.total, 3);
+      assert.strictEqual(res.items.length, 2);
+    });
+    
+    test('handles NaN or invalid numbers for limit and offset', async () => {
+      const res = await store.listResources({ limit: NaN, offset: NaN });
+      assert.ok(Array.isArray(res.items));
+    });
+  });
 });

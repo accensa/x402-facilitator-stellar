@@ -49,7 +49,9 @@ describe('GET /healthz', () => {
   before(async () => {
     app = await serve();
   });
-  after(() => app.close());
+  after(async () => {
+    if (app) await app.close();
+  });
 
   test('reports liveness', async () => {
     const res = await app.get('/healthz');
@@ -119,7 +121,9 @@ describe('malformed bodies always carry a reason', () => {
   before(async () => {
     app = await serve();
   });
-  after(() => app.close());
+  after(async () => {
+    if (app) await app.close();
+  });
 
   for (const route of ['/verify', '/settle']) {
     for (const [label, body] of [
