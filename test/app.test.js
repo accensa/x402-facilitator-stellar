@@ -15,7 +15,7 @@
  * fails in that way, never by reaching into app internals, so each assertion is
  * about what a client actually sees on the wire.
  */
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   serve,
@@ -1920,6 +1920,249 @@ describe('DLQ operator routes', () => {
     await withApp({ config }, async app => {
       assert.equal((await app.get('/admin/dlq', headers)).status, 404);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic failure modes and lazy EXTENSION-RESPONSES encoding (#369, #368).
+//
+// #369 asks that error states in this surface be explicit and predictable:
+// every rejection carries a stable reason code, the originating message
+// reaches the client verbatim (never '[object Object]'), the failure lands in
+// the log channels an operator watches (stderr + the per-request line), and a
+// replayed failure produces the same bytes every time.
+//
+// #368 made the EXTENSION-RESPONSES header encoding lazy (see src/app.js);
+// the two tests at the bottom pin its wire behaviour so the optimization
+// cannot silently change what a bazaar client observes.
+// ---------------------------------------------------------------------------
+describe('deterministic failure modes and lazy EXTENSION-RESPONSES encoding (#369, #368)', () => {
+  test('a facilitator throw carries the same code and message on every replay', async () => {
+    // Predictable failure modes (#369): the same fault must not degrade into
+    // different shapes across retries — an agent backing off on a reason code
+    // needs the replay to answer identically.
+    const app = await serve({
+      facilitator: stubFacilitator({
+        verify: async () => {
+          throw new Error('deterministic boom 42');
+        },
+      }),
+    });
+    try {
+      let first;
+      for (let i = 0; i < 5; i += 1) {
+        const res = await app.post('/verify', VALID_BODY);
+        assert.equal(res.status, 200);
+        const json = await res.json();
+        assert.equal(json.isValid, false);
+        assert.equal(json.invalidReason, 'facilitator_error');
+        assert.equal(json.invalidMessage, 'deterministic boom 42');
+        if (i === 0) first = json;
+        else assert.deepEqual(json, first, `replay ${i} diverged from the first failure`);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a non-Error rejection is stringified into the message, never "[object Object]"', async () => {
+    // Thrown non-Errors used to be a silent-failure trap: String({}) is
+    // '[object Object]', which tells the caller nothing. The transport must
+    // stringify so the message stays stable and parseable (#369).
+    for (const [thrown, expected] of [
+      [{ code: 'X', detail: 'inner detail' }, '{"code":"X","detail":"inner detail"}'],
+      [42, '42'],
+      [null, 'null'],
+    ]) {
+      const app = await serve({
+        facilitator: stubFacilitator({
+          verify: async () => {
+            throw thrown;
+          },
+        }),
+      });
+      try {
+        const json = await (await app.post('/verify', VALID_BODY)).json();
+        assert.equal(json.invalidReason, 'facilitator_error');
+        assert.equal(json.invalidMessage, expected);
+        assert.ok(!json.invalidMessage.includes('[object Object]'));
+      } finally {
+        await app.close();
+      }
+    }
+  });
+
+  test('an Error subclass propagates its name, message and stack into the logs', async () => {
+    // A bare Error loses its identity ("Error: boom" for everything), so
+    // operational classes like timeouts carry their own name. The stderr line
+    // the route logs on a facilitator throw must contain that name and the
+    // message, or the failure is undiagnosable from logs alone (#369).
+    class SimulatedTimeoutError extends Error {
+      constructor(message) {
+        super(message);
+        this.name = 'SimulatedTimeoutError';
+      }
+    }
+    const app = await serve({
+      facilitator: stubFacilitator({
+        verify: async () => {
+          throw new SimulatedTimeoutError('deadline passed');
+        },
+      }),
+    });
+    const errorLines = [];
+    const spy = mock.method(console, 'error', (...args) => errorLines.push(args.join(' ')));
+    try {
+      const json = await (await app.post('/verify', VALID_BODY)).json();
+      assert.equal(json.isValid, false);
+      assert.equal(json.invalidReason, 'facilitator_error');
+      assert.equal(json.invalidMessage, 'deadline passed');
+    } finally {
+      spy.mock.restore();
+      await app.close();
+    }
+    const joined = errorLines.join('\n');
+    assert.match(joined, /SimulatedTimeoutError/, 'the error name must reach stderr');
+    assert.match(joined, /deadline passed/, 'the error message must reach stderr');
+    assert.match(joined, /route=\/verify/, 'the failing route must be identified');
+  });
+
+  test('the per-request log line records the failure with its route and reason', async () => {
+    // stderr carries the detail; the structured request line is what metrics
+    // and dashboards scrape, so it must carry outcome, reason and route for a
+    // failed verification too (#369).
+    const app = await serve({
+      facilitator: stubFacilitator({
+        verify: async () => {
+          throw new Error('logging probe');
+        },
+      }),
+    });
+    const logLines = [];
+    const errorLines = [];
+    const logSpy = mock.method(console, 'log', (...args) => logLines.push(args.join(' ')));
+    const errorSpy = mock.method(console, 'error', (...args) => errorLines.push(args.join(' ')));
+    try {
+      await app.post('/verify', VALID_BODY);
+    } finally {
+      logSpy.mock.restore();
+      errorSpy.mock.restore();
+      await app.close();
+    }
+    const requestLine = logLines.find(line => line.includes('"event":"request"'));
+    assert.ok(requestLine, 'a request log line must have been emitted');
+    assert.match(requestLine, /"outcome":"error"/);
+    assert.match(requestLine, /"reason":"facilitator_error"/);
+    assert.match(requestLine, /"route":"\/verify"/);
+  });
+
+  test('concurrent failures keep their own codes and messages', async () => {
+    // Error handling must be request-scoped: a burst of failing settlements
+    // must not let one request's error leak into another's response (#369).
+    const app = await serve({
+      facilitator: {
+        verify: async payload => {
+          throw new Error(`boom for ${payload.payload.tx}`);
+        },
+      },
+    });
+    try {
+      const bodies = Array.from({ length: 10 }, (_, i) => ({
+        ...VALID_BODY,
+        paymentPayload: { ...VALID_BODY.paymentPayload, payload: { tx: `det-${i}` } },
+      }));
+      const responses = await Promise.all(bodies.map(body => app.post('/verify', body)));
+      const jsons = await Promise.all(responses.map(res => res.json()));
+      jsons.forEach((json, i) => {
+        assert.equal(json.isValid, false);
+        assert.equal(json.invalidReason, 'facilitator_error');
+        assert.equal(json.invalidMessage, `boom for det-${i}`, 'error content must not be crossed');
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('transport-level rejections are byte-identical across replays', async () => {
+    // Determinism applies to the transport's own failure paths as well: a
+    // malformed body and an oversized body must produce the same bytes on
+    // every replay, so a client can cache or diff rejections (#369).
+    await withApp({}, async app => {
+      for (const [route, body] of [
+        ['/verify', '{not json'],
+        ['/settle', '{not json'],
+        ['/verify', JSON.stringify({ ...VALID_BODY, pad: 'x'.repeat(300 * 1024) })],
+      ]) {
+        let first;
+        for (let i = 0; i < 3; i += 1) {
+          const res = await app.post(route, body);
+          const text = await res.text();
+          if (i === 0) first = text;
+          else assert.equal(text, first, `replay ${i} of ${route} diverged`);
+        }
+      }
+    });
+  });
+
+  test('the lazy EXTENSION-RESPONSES encoding is byte-identical to the eager one (#368)', async () => {
+    // #368 deferred the base64 encoding of EXTENSION-RESPONSES so a payment
+    // whose caller never reads the header stops paying for it. This pins the
+    // wire bytes: what the client receives must equal the eager encoding of
+    // the same outcome, byte for byte and semantically.
+    const app = await serve({
+      facilitator: stubFacilitator({
+        settle: async () => ({ success: true, transaction: 'tx', network: 'stellar:testnet' }),
+      }),
+    });
+    try {
+      const res = await app.post('/settle', CATALOGABLE_BODY);
+      assert.equal(res.status, 200);
+      const actual = res.headers.get('extension-responses');
+      assert.ok(actual, 'the header must still be sent');
+
+      // The landed outcome the settle path builds, encoded exactly the way the
+      // eager implementation did.
+      const expected = Buffer.from(
+        JSON.stringify({ bazaar: { status: 'landed', code: 'catalog_success' } }),
+      ).toString('base64');
+      assert.equal(actual, expected);
+
+      // And it still decodes to the same envelope.
+      const decoded = JSON.parse(Buffer.from(actual, 'base64').toString('utf8'));
+      assert.deepEqual(decoded.bazaar, { status: 'landed', code: 'catalog_success' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a rejected cataloging outcome is still encoded byte-identically (#368)', async () => {
+    // The lazy object closes over the settled `outcome`, so every branch
+    // (landed, rejected, partial) must encode identically to before — the
+    // rejection ladder is where a shape regression would hide.
+    for (const [resource, envelope] of [
+      [{ url: 'ftp://api.ex/x' }, { status: 'rejected', code: 'invalid_url_scheme' }],
+      [
+        { iconUrl: 'javascript:alert(1)' },
+        {
+          status: 'partially landed',
+          code: 'catalog_partial',
+          reason: 'Dropped fields: iconUrl',
+        },
+      ],
+    ]) {
+      const app = await serve({
+        facilitator: stubFacilitator({ verify: async () => ({ isValid: true }) }),
+      });
+      try {
+        const res = await app.post('/verify', catalogableWith(resource));
+        assert.equal(res.status, 200);
+        const actual = res.headers.get('extension-responses');
+        const expected = Buffer.from(JSON.stringify({ bazaar: envelope })).toString('base64');
+        assert.equal(actual, expected);
+      } finally {
+        await app.close();
+      }
+    }
   });
 });
 

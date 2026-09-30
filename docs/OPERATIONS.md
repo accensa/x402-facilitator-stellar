@@ -145,6 +145,7 @@ Prometheus text format, unauthenticated. By default it is served on `PORT`; set 
 | `x402_rpc_retries_total` | counter | `code`, `host` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
 | `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert if it sits at ≥ 1 persistently or climbs (signer pool needed before bursty traffic) |
 | `active_verifications` | gauge | none | process-wide number of verification calls waiting on Stellar Horizon | HPA target is 5 average active verifications per pod |
+| `x402_catalog_cache_lookups_total` | counter | `tier` (`l1`/`l2`), `outcome` (`hit`/`miss`/`error`) | catalog search cache effectiveness (#392) — the Postgres CPU signal | `l1` hit ratio persistently low with `CATALOG_SEARCH_CACHE=1` means the LRU is too small or queries are too varied; any `outcome="error"` means Redis is timing out (the cache is bypassed, not wrong) |
 
 Operational endpoints (`/metrics`, `/healthz`, `/health/ready`) are logged but excluded from `x402_requests_total` so the payment counters stay semantically about payments.
 
@@ -206,7 +207,7 @@ To add a new signer to the pool, generate and fund a new Stellar account, append
 > the status page reports `no_sla` — that is the honest state, not a failure to
 > measure. The whole point of this issue is to make "we don't know" impossible to
 > hide: see the org's own silent indexer outage that lost 207 ledgers
-> ([incident history](status/incidents.json)).
+> ([incident history](../status/incidents.json)).
 
 ## Numeric availability & latency targets
 
@@ -300,7 +301,7 @@ recipient** with a documented **escalation path**.
 | Settlement store unavailable | SEV1 | Facilitator On-Call | page; `/settle` already refuses fast (`settlement_store_unavailable`) |
 
 **Named recipient.** The recipient is the **Accensa Facilitator On-Call**,
-reachable through the channels in [`SUPPORT.md`](SUPPORT.md) (Telegram / Discord)
+reachable through the channels in [`SUPPORT.md`](../SUPPORT.md) (Telegram / Discord)
 and the `FACILITATOR_ONCALL_EMAIL` secret. On-call rotation is owned by the
 Accensa maintainers. **Escalation** is always: On-Call → Accensa maintainers →
 org owners; the same channels are the human escalation path, so a rotated invite

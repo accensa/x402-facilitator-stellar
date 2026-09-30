@@ -6,6 +6,7 @@ import { createReadinessChecker } from './readiness.js';
 import { createRequestLog } from './log.js';
 import { createMetrics, signerMetrics } from './metrics.js';
 import { createIpPseudonymizer } from './ip.js';
+import { createTrustProxyHook } from './trust-proxy.js';
 import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
 import { buildSettlementStore } from './store/index.js';
@@ -21,6 +22,30 @@ import {
   readPaymentBody,
   readDiscoveryBody,
 } from './payment-body.js';
+
+/**
+ * Meaningful message extraction for anything a collaborator throws (#369).
+ *
+ * `String(err)` turns a thrown object into '[object Object]', which tells a
+ * client nothing. Errors keep their message (they are already meaningful);
+ * every other value is JSON-stringified so the caller still receives the
+ * content, and a value JSON cannot represent falls back to String().
+ *
+ * @param {unknown} err - the thrown value
+ * @returns {string} a message that always carries the error's content
+ */
+function describeThrown(err) {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  if (typeof err === 'object' && err !== null) {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
 
 /**
  * Builds the Fastify app.
@@ -67,8 +92,14 @@ export async function createApp(
 
   const serveMetrics = extras.serveMetrics !== false;
 
+  // #392: the catalog search cache is an optional decorator around the store,
+  // so the metrics registry is attached here — app.js owns the registry, and
+  // server.js (which builds the cache) does not. No-ops on a plain store.
+  if (typeof catalog?.searchCache?.onLookup !== 'undefined') {
+    catalog.searchCache.onLookup = lookup => metrics.incCatalogCacheLookup(lookup);
+  }
+
   const app = Fastify({
-    trustProxy: config.trustProxy,
     bodyLimit: BODY_LIMIT_BYTES,
     logger: false,
     ajv: {
@@ -157,19 +188,11 @@ export async function createApp(
     }
   });
 
-  if (typeof config.trustProxy === 'number') {
-    const hops = Math.max(0, Math.floor(config.trustProxy));
-    app.addHook('onRequest', async req => {
-      const raw = req.headers['x-forwarded-for'] ?? '';
-      const forwarded = String(raw)
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
-      const chain = [...forwarded, req.socket.remoteAddress];
-      const ip = chain[Math.max(0, chain.length - 1 - hops)] ?? req.socket.remoteAddress;
-      Object.defineProperty(req, 'ip', { value: ip, configurable: true });
-    });
-  }
+  // Client-IP resolution behind reverse proxies and CDNs (src/trust-proxy.js)
+  // is the single choke point that decides what req.ip may mean. It runs
+  // ahead of the pseudonymiser below so every consumer — the rate limiter's
+  // bucket key, audit actors — sees the resolved, spoof-resistant address.
+  app.addHook('onRequest', createTrustProxyHook(config.trustProxy));
 
   app.addHook('onRequest', async req => {
     const pseudonym = ipPseudonymizer(req.ip);
@@ -233,6 +256,11 @@ export async function createApp(
                 validation.resource.toolName ?? null,
               );
               await catalog.upsertResource(validation.resource, source);
+              // Tell the search cache the catalog moved (#392). The local
+              // version bump already makes stale entries unreachable; this
+              // publishes so *other* replicas drop their L1 now instead of on
+              // their next miss. Best-effort and never on the payment path.
+              await catalog.searchCache?.invalidate({ reason: `cataloging:${source}` });
               audit('catalog_write', {
                 actor: req.keyId ?? `ip:${req.ip}`,
                 source,
@@ -249,7 +277,19 @@ export async function createApp(
 
       reply.header(
         'EXTENSION-RESPONSES',
-        Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64'),
+        // Encoded lazily (#368): the base64 EXTENSION-RESPONSES value was
+        // previously built eagerly on every catalogable verify/settle — a JSON
+        // stringify plus a Buffer copy plus the 4/3x base64 expansion — even
+        // though most callers never read the header. Computing it from the
+        // settled `outcome` only when Fastify serializes the headers keeps the
+        // hot path allocation-free for the common case while producing exactly
+        // the same bytes for callers that do read it (asserted in app.test.js,
+        // 'the lazy EXTENSION-RESPONSES encoding is byte-identical').
+        {
+          toString() {
+            return Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64');
+          },
+        },
       );
     } catch (err) {
       console.error('[Catalog] Unhandled error during processCataloging:', err);
@@ -385,7 +425,7 @@ export async function createApp(
           const scheme = body?.paymentRequirements?.scheme ?? 'unknown';
           console.error(
             `[/verify] Exception: route=/verify network=${network} scheme=${scheme} ` +
-              `error=${err instanceof Error ? err.message : String(err)} ` +
+              `error=${describeThrown(err)} ` +
               `stack=${err instanceof Error ? err.stack : 'no stack'}`,
           );
 
@@ -414,7 +454,7 @@ export async function createApp(
           return reply.send({
             isValid: false,
             invalidReason,
-            invalidMessage: err instanceof Error ? err.message : String(err),
+            invalidMessage: describeThrown(err),
           });
         }
       });
@@ -581,17 +621,36 @@ export async function createApp(
 
                 await processCataloging(req, body, reply, 'settle');
 
+                // These are best-effort side effects on an already-settled,
+                // already-persisted transaction (#344): if the webhook enqueue
+                // or idempotency write throws, the settlement itself must
+                // still be reported as successful to the caller rather than
+                // falling into the outer catch, which would otherwise
+                // overwrite the durable 'settled' record with 'failed' and
+                // tell the caller their payment failed after funds moved.
                 if (
                   !enqueued.atomicallyEnqueued &&
                   enqueued.event &&
                   webhooks &&
                   typeof webhooks.enqueue === 'function'
                 ) {
-                  webhooks.enqueue(enqueued.event);
+                  try {
+                    webhooks.enqueue(enqueued.event);
+                  } catch (err) {
+                    console.error(
+                      `[/settle] webhook enqueue failed for ${idempotencyKey}: ${describeThrown(err)}`,
+                    );
+                  }
                 }
 
                 if (idempotency && replay) {
-                  await idempotency.complete(replay.key, 200, result);
+                  try {
+                    await idempotency.complete(replay.key, 200, result);
+                  } catch (err) {
+                    console.error(
+                      `[/settle] idempotency.complete failed for ${idempotencyKey}: ${describeThrown(err)}`,
+                    );
+                  }
                 }
 
                 audit('settlement', {
@@ -613,7 +672,13 @@ export async function createApp(
               });
 
               if (idempotency && replay) {
-                await idempotency.complete(replay.key, 200, result);
+                try {
+                  await idempotency.complete(replay.key, 200, result);
+                } catch (err) {
+                  console.error(
+                    `[/settle] idempotency.complete failed for ${idempotencyKey}: ${describeThrown(err)}`,
+                  );
+                }
               }
 
               audit('settlement', {
@@ -657,7 +722,7 @@ export async function createApp(
           const scheme = body?.paymentRequirements?.scheme ?? 'unknown';
           console.error(
             `[/settle] Exception: route=/settle network=${network} scheme=${scheme} ` +
-              `error=${err instanceof Error ? err.message : String(err)} ` +
+              `error=${describeThrown(err)} ` +
               `stack=${err instanceof Error ? err.stack : 'no stack'}`,
           );
 
@@ -694,12 +759,12 @@ export async function createApp(
           await settlementStore.updateState(idempotencyKey, targetState, {
             tx_hash: transaction,
             error_reason: errorReason,
-            error_message: err instanceof Error ? err.message : String(err),
+            error_message: describeThrown(err),
           });
           return reply.send({
             success: false,
             errorReason,
-            errorMessage: err instanceof Error ? err.message : String(err),
+            errorMessage: describeThrown(err),
             transaction,
             network: req.body?.paymentRequirements?.network ?? '',
           });
@@ -793,6 +858,11 @@ export async function createApp(
           validation.resource.toolName ?? null,
         );
         const entry = await catalog.upsertResource(validation.resource, 'manual');
+        // Announce the write so peer replicas drop their cached searches (#392).
+        // The local replica is already correct — the write bumped the version
+        // that keys the cache — but without this broadcast the other replicas
+        // would keep serving the previous generation until their TTL expires.
+        await catalog.searchCache?.invalidate({ reason: 'cataloging:manual' });
         audit('catalog_write', {
           actor: req.keyId ?? `ip:${req.ip}`,
           source: 'manual',
@@ -971,14 +1041,14 @@ export async function createApp(
       return reply.code(status).send({
         isValid: false,
         invalidReason: code,
-        invalidMessage: err instanceof Error ? err.message : String(err),
+        invalidMessage: describeThrown(err),
       });
     }
     if (path === '/settle') {
       return reply.code(status).send({
         success: false,
         errorReason: code,
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: describeThrown(err),
         transaction: '',
         network: req.body?.paymentRequirements?.network,
       });

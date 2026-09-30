@@ -173,6 +173,114 @@ test('Hostile Inputs Validation', async t => {
 });
 
 /**
+ * Description truncation has to stay inside UTF-16 (#218).
+ *
+ * `substring(0, 200)` cuts on code-unit boundaries, so a description whose
+ * 200th code unit is the high half of an astral character (an emoji in a
+ * listing blurb) used to reach the catalog with an unpaired surrogate attached.
+ * That is not valid UTF-16: `JSON.stringify` serialises it as a lone `\udXXX`
+ * escape, which conformant clients reject or render as U+FFFD, and which cannot
+ * be round-tripped through a `jsonb` column.
+ *
+ * The suite pins the positions a cut can land in — inside the pair, immediately
+ * after it, and on the plain ASCII boundary — so the fix cannot degenerate into
+ * "always shave one character".
+ */
+test('Description truncation is surrogate-safe (#218)', async t => {
+  const baseReq = { network: 'stellar:testnet', payTo: 'G123' };
+  const payloadWithDescription = description => ({
+    x402Version: 2,
+    resource: { url: 'http://example.com', description },
+    extensions: {
+      bazaar: {
+        info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+        schema: { type: 'object' },
+        routeTemplate: '/a',
+      },
+    },
+  });
+
+  // A high surrogate that is not followed by a low one, or a low one that is
+  // not preceded by a high one — i.e. exactly the invalid-UTF-16 shape.
+  const hasLoneSurrogate = value =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
+
+  const EMOJI = '\u{1F600}'; // two code units: high surrogate + low surrogate
+
+  await t.test('an ASCII description at the limit is untouched, with no soft drop', () => {
+    const description = 'A'.repeat(200);
+    const res = validateForCatalog(payloadWithDescription(description), baseReq);
+    assert.equal(res.resource.description, description);
+    assert.ok(
+      !res.softDrops.includes('description_truncated'),
+      'nothing was truncated, so nothing to flag',
+    );
+  });
+
+  await t.test('an ASCII description one unit past the limit truncates exactly at it', () => {
+    const res = validateForCatalog(payloadWithDescription('A'.repeat(201)), baseReq);
+    assert.equal(res.resource.description.length, 200);
+    assert.ok(res.softDrops.includes('description_truncated'));
+  });
+
+  await t.test('a cut between a surrogate pair drops the split character whole', () => {
+    // 199 'A' then the emoji occupies units 199 and 200, so the old
+    // substring(0, 200) kept the high half and emitted a lone surrogate.
+    const res = validateForCatalog(
+      payloadWithDescription('A'.repeat(199) + EMOJI + 'B'.repeat(50)),
+      baseReq,
+    );
+    assert.equal(
+      res.resource.description,
+      'A'.repeat(199),
+      'the character that straddles the limit is dropped rather than halved',
+    );
+    assert.equal(
+      hasLoneSurrogate(res.resource.description),
+      false,
+      'no unpaired surrogate may survive truncation',
+    );
+  });
+
+  await t.test('a cut immediately after a surrogate pair keeps the character whole', () => {
+    const res = validateForCatalog(
+      payloadWithDescription('A'.repeat(198) + EMOJI + 'B'.repeat(50)),
+      baseReq,
+    );
+    assert.equal(res.resource.description.length, 200, 'a complete pair is kept, not shaved');
+    assert.ok(res.resource.description.endsWith(EMOJI), 'the last complete character survives');
+    assert.equal(hasLoneSurrogate(res.resource.description), false);
+  });
+
+  await t.test('truncated descriptions survive JSON and UTF-8 round-trips', () => {
+    const descriptions = [
+      'A'.repeat(201), // cut inside a BMP run
+      'A'.repeat(199) + EMOJI + 'B'.repeat(50), // cut inside a pair
+      'A'.repeat(198) + EMOJI + 'B'.repeat(50), // cut after a pair
+      'A' + EMOJI.repeat(150), // cut inside a pair, several units in
+      EMOJI.repeat(150), // emoji-only description
+    ];
+
+    for (const description of descriptions) {
+      const res = validateForCatalog(payloadWithDescription(description), baseReq);
+      const emitted = res.resource.description;
+      assert.ok(emitted.length <= 200, `description must fit the limit (got ${emitted.length})`);
+      assert.equal(hasLoneSurrogate(emitted), false, 'the emitted value must be valid UTF-16');
+      assert.equal(
+        JSON.parse(JSON.stringify(emitted)),
+        emitted,
+        'the emitted value must survive the JSON the catalog is served as',
+      );
+      assert.equal(
+        Buffer.from(emitted, 'utf8').toString('utf8'),
+        emitted,
+        'the emitted value must survive a UTF-8 write and read',
+      );
+    }
+  });
+});
+
+/**
  * Custom error definition for catalog validation exceptions.
  * Encapsulates contextual failure data, enabling predictable error handling and logging.
  */

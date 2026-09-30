@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert';
 import {
   McpServer,
@@ -217,4 +217,147 @@ test('MCP (#169): a malformed version is treated as unsupported, never echoed', 
 
   assert.equal(sent[0].result.protocolVersion, LATEST_PROTOCOL_VERSION);
   assert.equal(warnings.length, 1, 'a non-string version is a mismatch worth logging');
+});
+
+describe('JSON-RPC 2.0 batch processing (#428)', () => {
+  // Real send helpers (makeServer stubs them), so responses flow through the
+  // batch sink exactly as they do on the wire.
+  function batchServer(options) {
+    const server = new McpServer({ name: 'batch-test', version: '0.0.1', ...options });
+    server.tool('echo', { description: 'echo' }, async args => args);
+    server.tool('slow', { description: 'slow' }, async ({ ms, tag }) => {
+      await new Promise(r => setTimeout(r, ms));
+      return tag;
+    });
+    server.tool('crash', { description: 'crash' }, async () => {
+      throw new Error('internal boom');
+    });
+    return server;
+  }
+  const call = (id, name, args = {}) => ({
+    jsonrpc: '2.0',
+    id,
+    method: 'tools/call',
+    params: { name, arguments: args },
+  });
+
+  test('returns one response per request, matched by id, with errors isolated', async () => {
+    const out = await batchServer()._runBatch([
+      call(1, 'echo', { v: 1 }),
+      call('two', 'nope'),
+      call(3, 'crash'),
+      { jsonrpc: '2.0', id: 4, method: 'ping' },
+      { jsonrpc: '2.0', id: 5, method: 'bogus' },
+    ]);
+    assert.deepEqual(
+      out.map(r => r.id),
+      [1, 'two', 3, 4, 5],
+    );
+    assert.equal(out[0].result.isError, false);
+    assert.equal(out[1].error.code, -32602);
+    assert.equal(out[2].error.code, -32603);
+    assert.deepEqual(out[3].result, {});
+    assert.equal(out[4].error.code, -32601);
+  });
+
+  test('members run concurrently, not sequentially', async () => {
+    const start = Date.now();
+    const out = await batchServer()._runBatch([
+      call(1, 'slow', { ms: 150, tag: 'a' }),
+      call(2, 'slow', { ms: 150, tag: 'b' }),
+      call(3, 'slow', { ms: 150, tag: 'c' }),
+    ]);
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 400, `3 x 150ms calls took ${elapsed}ms; expected concurrent (~150ms)`);
+    assert.deepEqual(
+      out.map(r => r.result.content[0].text),
+      ['a', 'b', 'c'],
+    );
+  });
+
+  test('invalid members are answered individually; valid ones still run', async () => {
+    const out = await batchServer()._runBatch([
+      1,
+      { jsonrpc: '2.0', id: 'x' },
+      { jsonrpc: '2.0', id: 3, method: 'ping' },
+    ]);
+    assert.deepEqual(
+      out.map(r => [r.id, r.error?.code]),
+      [
+        [null, -32600],
+        ['x', -32600],
+        [3, undefined],
+      ],
+    );
+  });
+
+  test('notifications get no response, even alongside requests', async () => {
+    const out = await batchServer()._runBatch([
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', method: 'bogus' },
+      { jsonrpc: '2.0', id: 7, method: 'ping' },
+    ]);
+    assert.deepEqual(
+      out.map(r => r.id),
+      [7],
+    );
+    assert.deepEqual(await batchServer()._runBatch([{ jsonrpc: '2.0', method: 'ping' }]), []);
+  });
+
+  test('an empty batch is refused with a single -32600 error', async () => {
+    const out = await batchServer()._runBatch([]);
+    assert.equal(Array.isArray(out), false);
+    assert.equal(out.error.code, -32600);
+    assert.equal(out.id, null);
+  });
+
+  test('enforces the maximum batch size (default 25, configurable)', async () => {
+    const ping = i => ({ jsonrpc: '2.0', id: i, method: 'ping' });
+    const at = await batchServer()._runBatch(Array.from({ length: 25 }, (_, i) => ping(i)));
+    assert.equal(at.length, 25, 'exactly the limit is accepted');
+
+    const over = await batchServer()._runBatch(Array.from({ length: 26 }, (_, i) => ping(i)));
+    assert.equal(over.error.code, -32600);
+    assert.match(over.error.message, /26.*maximum of 25/);
+
+    const small = batchServer({ maxBatchSize: 2 });
+    const refused = await small._runBatch([ping(1), ping(2), ping(3)]);
+    assert.match(refused.error.message, /maximum of 2/);
+  });
+
+  test('concurrent batches do not mix frames', async () => {
+    const server = batchServer();
+    const [a, b] = await Promise.all([
+      server._runBatch([call('a1', 'slow', { ms: 30, tag: 'A' }), call('a2', 'echo')]),
+      server._runBatch([call('b1', 'slow', { ms: 10, tag: 'B' }), call('b2', 'echo')]),
+    ]);
+    assert.deepEqual(
+      a.map(r => r.id),
+      ['a1', 'a2'],
+    );
+    assert.deepEqual(
+      b.map(r => r.id),
+      ['b1', 'b2'],
+    );
+  });
+
+  test('over HTTP: array in, array out; notifications-only gives 204', async () => {
+    const server = batchServer();
+    const { port, close } = await server.startSSE();
+    try {
+      const post = body =>
+        fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', body: JSON.stringify(body) });
+      const res = await post([{ jsonrpc: '2.0', id: 1, method: 'ping' }, call(2, 'echo')]);
+      assert.equal(res.status, 200);
+      const out = await res.json();
+      assert.deepEqual(
+        out.map(r => r.id),
+        [1, 2],
+      );
+      const none = await post([{ jsonrpc: '2.0', method: 'ping' }]);
+      assert.equal(none.status, 204);
+    } finally {
+      await close();
+    }
+  });
 });
