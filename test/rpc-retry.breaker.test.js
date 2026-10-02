@@ -14,31 +14,9 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installRpcRetry, RpcBreakerOpenError } from '../src/rpc-retry.js';
+import { transportError, scriptedFetch, failingFetch } from './helpers/rpc-fetch.js';
 
 const REAL_FETCH = globalThis.fetch;
-
-/** A fetch stub that always fails with the given transport code. */
-function failingFetch(code) {
-  const stub = async () => {
-    stub.calls++;
-    const err = new Error(`simulated ${code}`);
-    err.code = code;
-    throw err;
-  };
-  stub.calls = 0;
-  return stub;
-}
-
-function scriptedFetch(...outcomes) {
-  const stub = async () => {
-    stub.calls++;
-    const next = outcomes.shift();
-    if (next instanceof Error) throw next;
-    return next ?? new Response('ok');
-  };
-  stub.calls = 0;
-  return stub;
-}
 
 beforeEach(() => {
   globalThis.fetch = REAL_FETCH;
@@ -315,8 +293,8 @@ describe('sendTransaction is never aborted by the breaker', () => {
     // Host A fails repeatedly, tripping ITS breaker; meanwhile host B's
     // sendTransaction keeps retrying — its own loop is not re-gated.
     const stub = scriptedFetch(
-      transportErr('ECONNRESET'),
-      transportErr('ECONNRESET'),
+      transportError('ECONNRESET'),
+      transportError('ECONNRESET'),
       new Response('ok'),
     );
     globalThis.fetch = stub;
@@ -331,11 +309,5 @@ describe('sendTransaction is never aborted by the breaker', () => {
     const res = await globalThis.fetch('http://b.invalid/soroban', SEND_INIT);
     assert.equal(res.status, 200);
     assert.equal(stub.calls, 3, 'the send retried through to success despite trips elsewhere');
-
-    function transportErr(code) {
-      const err = new Error(`simulated ${code}`);
-      err.code = code;
-      return err;
-    }
   });
 });

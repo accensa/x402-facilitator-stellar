@@ -6,8 +6,14 @@
  * or the rate limiter refuse, which is not reachable when the server is spawned
  * as a child process and talks to a real scheme.
  */
+import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createApp } from '../../src/app.js';
+import { stubRateLimiter } from './rate-limiter.js';
+
+// Re-exported so existing importers keep one entry point; the definition lives
+// in ./rate-limiter.js so limiter-only suites can use it without loading the app.
+export { stubRateLimiter };
 
 /**
  * Builds the config shape createApp expects.
@@ -54,42 +60,6 @@ export function stubFacilitator(overrides = {}) {
 }
 
 /**
- * A rate limiter that allows everything and records what it was told.
- *
- * `allow: false` flips it to refusing, which is how the 429 path and its
- * headers get exercised without waiting out a real window.
- */
-export function stubRateLimiter({ allow = true, reason = 'verify_rpm_exceeded' } = {}) {
-  const resetAt = Math.floor(Date.now() / 1000) + 60;
-  const result = () => ({ allowed: allow, limit: 60, remaining: allow ? 59 : 0, resetAt, reason });
-  const recorded = [];
-  return {
-    recorded,
-    checkVerify: () => result(),
-    checkSettle: () => result(),
-    checkCatalog: () => result(),
-    checkCatalogRead: () => result(),
-    recordCatalog: req => {
-      recorded.push({ name: 'recordCatalog', keyId: req.keyId });
-      return result();
-    },
-    recordCatalogRead: req => {
-      recorded.push({ name: 'recordCatalogRead', keyId: req.keyId });
-      return result();
-    },
-    recordVerify: req => {
-      recorded.push({ name: 'recordVerify', keyId: req.keyId });
-      return result();
-    },
-    recordSettle: (req, fee) => {
-      recorded.push({ name: 'recordSettle', keyId: req.keyId, fee });
-      return result();
-    },
-    getUsage: keyId => ({ keyId, verify: 1, settle: 2, feeStroops: 3000 }),
-  };
-}
-
-/**
  * Boots the app on an ephemeral port and returns a client bound to it.
  *
  * Port 0 rather than a fixed one: tests must not collide with each other, nor
@@ -129,22 +99,40 @@ export async function serve({
     { distributedLock, webhooks, ...extras },
   );
 
-  // Fastify's listen resolves with the bound address once the server is up.
-  await app.listen({ port: 0, host: '127.0.0.1' });
-  const base = `http://127.0.0.1:${app.server.address().port}`;
+  await app.ready();
+
+  const adapt = res => ({
+    status: res.statusCode,
+    headers: { get: name => res.headers[name.toLowerCase()] ?? null },
+    json: async () => res.json(),
+    text: async () => res.payload,
+  });
 
   return {
-    base,
     app,
-    close: () => app.close(),
-    get: (path, headers = {}) => fetch(`${base}${path}`, { headers }),
-    post: (path, body, headers = {}) =>
-      fetch(`${base}${path}`, {
+    close: async () => app.close(),
+    get: async (path, headers = {}) => {
+      const res = await app.inject({ method: 'GET', url: path, headers });
+      return adapt(res);
+    },
+    post: async (path, body, headers = {}) => {
+      const res = await app.inject({
         method: 'POST',
+        url: path,
         headers: { 'content-type': 'application/json', ...headers },
-        body: typeof body === 'string' ? body : JSON.stringify(body),
-      }),
-    request: (path, options = {}) => fetch(`${base}${path}`, options),
+        payload: typeof body === 'string' ? body : JSON.stringify(body),
+      });
+      return adapt(res);
+    },
+    request: async (path, options = {}) => {
+      const res = await app.inject({
+        method: options.method || 'GET',
+        url: path,
+        headers: options.headers || {},
+        payload: options.body,
+      });
+      return adapt(res);
+    },
   };
 }
 
@@ -164,3 +152,114 @@ export const VALID_BODY = {
     payTo: 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6',
   },
 };
+
+/**
+ * A body that produces a valid catalog entry with bazaar discovery extension.
+ */
+export const CATALOGABLE_BODY = {
+  paymentPayload: {
+    x402Version: 2,
+    scheme: 'exact',
+    network: 'stellar:testnet',
+    resource: { url: 'http://api.ex/140', serviceName: 'provenance-demo', description: 'demo' },
+    extensions: {
+      bazaar: {
+        info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+        schema: { type: 'object' },
+        routeTemplate: '/140',
+      },
+    },
+  },
+  paymentRequirements: {
+    scheme: 'exact',
+    network: 'stellar:testnet',
+    asset: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+    maxAmountRequired: '1000',
+    payTo: 'GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6',
+  },
+};
+
+/**
+ * Creates a catalogable payment body with customized resource fields.
+ */
+export function catalogableWith(resource) {
+  return {
+    ...CATALOGABLE_BODY,
+    paymentPayload: {
+      ...CATALOGABLE_BODY.paymentPayload,
+      resource: { ...CATALOGABLE_BODY.paymentPayload.resource, ...resource },
+    },
+  };
+}
+
+/**
+ * Boots an app with `options`, runs `fn` against it and always closes it.
+ *
+ * @param {Parameters<typeof serve>[0]} options - forwarded to serve()
+ * @param {(app: Awaited<ReturnType<typeof serve>>) => Promise<void>} fn
+ */
+export async function withApp(options, fn) {
+  const app = await serve(options);
+  try {
+    await fn(app);
+  } finally {
+    await app.close();
+  }
+}
+
+/**
+ * An audit sink that collects all audit events.
+ *
+ * @returns {{audit: Function, records: Array<{event: string} & object>}}
+ */
+export function captureAudit() {
+  const records = [];
+  return { records, audit: (event, fields) => records.push({ event, ...fields }) };
+}
+
+/** Decodes the base64 EXTENSION-RESPONSES header into its `bazaar` outcome. */
+export function bazaarOutcome(res) {
+  const raw = res.headers.get('extension-responses');
+  assert.ok(raw, 'EXTENSION-RESPONSES header must be present');
+  return JSON.parse(Buffer.from(raw, 'base64').toString('utf8')).bazaar;
+}
+
+/** A promise that never settles: stands in for a scheme call that hangs. */
+export const never = () => new Promise(() => {});
+
+/** An Error carrying a `code`, the way the RPC breaker and timeouts tag theirs. */
+export const codedError = (message, code) => Object.assign(new Error(message), { code });
+
+/**
+ * An idempotency store test stub that records begin/complete calls.
+ */
+export function recordingIdempotency(beginResult) {
+  const completed = [];
+  return {
+    completed,
+    keyFor: () => 'idem-1',
+    begin: async key => beginResult ?? { replayed: false, key },
+    complete: async (key, status, response) => completed.push({ key, status, response }),
+  };
+}
+
+/**
+ * A catalog test stub that records list/search query parameters.
+ */
+export function recordingCatalog(overrides = {}) {
+  const calls = [];
+  return {
+    calls,
+    catalog: stubCatalog({
+      listResources: async params => {
+        calls.push(params);
+        return { items: [], total: 0 };
+      },
+      search: async params => {
+        calls.push(params);
+        return { resources: [{ url: 'http://x' }], partialResults: false, pagination: {} };
+      },
+      ...overrides,
+    }),
+  };
+}

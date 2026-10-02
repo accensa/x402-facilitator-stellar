@@ -101,6 +101,7 @@ export function resolveConfig(env = process.env) {
       secret: testnetSecrets[0],
       feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
+      horizonUrl: env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS, {
         name: 'MAX_TX_FEE_STROOPS',
         defaultValue: 50_000,
@@ -149,13 +150,18 @@ export function resolveConfig(env = process.env) {
     };
     if (!str) return limits;
     str.split(',').forEach(pair => {
-      const [k, v] = pair.split('=');
-      if (k === 'verify_rpm') limits.verifyRpm = Number(v);
-      if (k === 'settle_rpm') limits.settleRpm = Number(v);
-      if (k === 'settle_rph') limits.settleRph = Number(v);
-      if (k === 'settle_rpd') limits.settleRpd = Number(v);
-      if (k === 'fee_spd') limits.feeSpd = Number(v);
-      if (k === 'catalog_rpm') limits.catalogRpm = Number(v);
+      const parts = pair.split('=');
+      if (parts.length !== 2) return; // Skip malformed pairs
+      const [k, v] = parts;
+      // Skip if value is empty or not a valid number
+      if (v === '' || Number.isNaN(Number(v))) return;
+      const numValue = Number(v);
+      if (k === 'verify_rpm') limits.verifyRpm = numValue;
+      if (k === 'settle_rpm') limits.settleRpm = numValue;
+      if (k === 'settle_rph') limits.settleRph = numValue;
+      if (k === 'settle_rpd') limits.settleRpd = numValue;
+      if (k === 'fee_spd') limits.feeSpd = numValue;
+      if (k === 'catalog_rpm') limits.catalogRpm = numValue;
     });
     return limits;
   };
@@ -200,13 +206,14 @@ export function resolveConfig(env = process.env) {
       secret: pubnetSecrets[0],
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
+      horizonUrl: env.HORIZON_URL_PUBNET || 'https://horizon.stellar.org',
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS_PUBNET, {
         name: 'MAX_TX_FEE_STROOPS_PUBNET',
         defaultValue: 50_000,
         min: 100,
         max: 10_000_000,
       }),
-      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET || null,
+      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
       keyManagerPollIntervalMs: Number(
         env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
       ),
@@ -258,6 +265,27 @@ export function resolveConfig(env = process.env) {
     .map(o => o.trim())
     .filter(Boolean);
 
+  /**
+   * Reranking requires an explicit endpoint (#170).
+   *
+   * `ENABLE_RERANKING=true` with no `RERANK_URL` is the configuration that made
+   * search quality unmeasurable: the code guessed `${EMBEDDINGS_URL}/rerank` — a
+   * path no rerank provider serves — and treated every failure as "carry on in
+   * fused order". An instance that believes it is reranking and is not is worse
+   * than one that never claimed to, so this fails at boot, where it costs a
+   * restart, instead of silently at query time.
+   */
+  const rerankUrl = env.RERANK_URL?.trim() || null;
+  if (env.ENABLE_RERANKING === 'true' && !rerankUrl) {
+    throw new Error(
+      'ENABLE_RERANKING=true but RERANK_URL is unset. RERANK_URL is the full URL of the ' +
+        'rerank endpoint (nothing is inferred from EMBEDDINGS_URL). Set it, or unset ENABLE_RERANKING.',
+    );
+  }
+  if (rerankUrl && !/^https?:\/\//i.test(rerankUrl)) {
+    throw new Error(`RERANK_URL must be an absolute http(s) URL, got "${rerankUrl}".`);
+  }
+
   return {
     port: parsePositiveInt(env.PORT, { name: 'PORT', defaultValue: 3402, min: 1, max: 65535 }),
 
@@ -284,10 +312,34 @@ export function resolveConfig(env = process.env) {
     networks,
     perNetwork,
     trustProxy,
+    rpcForceIpv4: env.RPC_FORCE_IPV4 !== 'false',
+
+    /**
+     * HMAC key for client-IP pseudonymisation (#204). Unset (the default) means
+     * the server derives a key from the facilitator signer secret, so IPs are
+     * still pseudonymised with no new configuration. Set it when you want the
+     * key under your own rotation policy, independent of the signer. Changing
+     * it re-keys every rate-limit bucket — see docs/PRIVACY.md.
+     */
+    ipHashSecret: env.IP_HASH_SECRET || null,
 
     /** Optional shared stores. Unset means in-memory, single-instance. */
     redisUrl: env.REDIS_URL || null,
     databaseUrl: env.DATABASE_URL || null,
+
+    /**
+     * Two-tier catalog search cache (#392). Off by default so the behaviour
+     * change is opt-in: with it on, a discovery search can be answered from
+     * this process's L1 for up to CATALOG_CACHE_L1_TTL_MS, and from a shared
+     * L2 for up to 60s. Freshness is still guaranteed by the catalog write
+     * version, which is part of the cache key — the TTLs only bound memory and
+     * bound how long a *missed* cross-node invalidation can linger.
+     *
+     * Set CATALOG_SEARCH_CACHE=1 to enable. It implies a shared L2 only when
+     * REDIS_URL is also set; without it this is a per-process L1, which is
+     * still the majority of the win because discovery traffic is repetitive.
+     */
+    catalogSearchCache: env.CATALOG_SEARCH_CACHE === '1' || env.CATALOG_SEARCH_CACHE === 'true',
 
     /**
      * CQRS read replica (#121): when DATABASE_URL_REPLICA is set, settlement
@@ -391,8 +443,12 @@ export function resolveConfig(env = process.env) {
       .map(s => s.trim())
       .filter(Boolean)
       .map(entry => {
-        const [region, priority, url] = entry.split(':');
-        return { region, priority: Number(priority) || 1, url: url || null };
+        const parts = entry.split(':');
+        return {
+          region: parts[0],
+          priority: Number(parts[1]) || 1,
+          url: parts.slice(2).join(':') || null,
+        };
       }),
 
     /**
@@ -444,6 +500,16 @@ export function resolveConfig(env = process.env) {
      * money, so a listing it creates must not live forever.
      */
     catalogVerifyTtlMs: Number(env.CATALOG_VERIFY_TTL_MS ?? 24 * 60 * 60 * 1000),
+
+    /**
+     * Cross-encoder rerank endpoint (#170). A FULL URL to a rerank service —
+     * deliberately not derived from EMBEDDINGS_URL: the previous code POSTed to
+     * `${EMBEDDINGS_URL}/rerank`, a path invented for a hypothetical provider,
+     * and swallowed every failure. Unset means no reranking; set it and
+     * ENABLE_RERANKING=true to run the second pass. The accepted request and
+     * response shapes are documented in docs/BAZAAR.md.
+     */
+    rerankUrl,
     enableReranking: env.ENABLE_RERANKING === 'true',
 
     /**

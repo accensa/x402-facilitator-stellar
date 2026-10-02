@@ -76,6 +76,16 @@ cataloguing outcome. Verified over real HTTP (see
 - **`Retry-After`**: set with a positive second count on every `429`
   (`handleRateLimit` when not allowed). Verified on `/verify`, `/settle` and the
   discovery reads.
+- **One decision per request (#209):** all five limited routes derive these
+  headers through the single `handleRateLimit` helper, called exactly once on
+  each request path and preferring the limiter's *post-record* state (issue
+  #141). Its return value is honoured by every call site: when the limiter's
+  state is a refusal, that 429 **is** the response, so the route returns it
+  instead of continuing to `reply.send(...)` — a double send, which Fastify
+  answers with a 500. The fix also closed a gap this table had already
+  documented: POST `/discovery/resources` checked and recorded against the
+  catalog bucket but emitted no `RateLimit-*` header at all. Pinned by
+  `test/rate-limit-headers.test.js`, which counts header writes per request.
 - **`EXTENSION-RESPONSES`**: set on the `/verify` (automatic) and `/settle`
   cataloguing paths; always base64 of `{ bazaar: outcome }`. Now guaranteed
   present even when cataloguing parsing throws (F2).

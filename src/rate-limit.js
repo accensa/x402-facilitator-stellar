@@ -249,9 +249,25 @@ export class RateLimiter {
     return res;
   }
 
+  /**
+   * Records a catalogue write and returns the limiter state AFTER the request
+   * was counted, the same shape `recordVerify` returns (#209). The transport
+   * advertises `RateLimit-*` from whichever state it is handed — returning the
+   * post-record one keeps the two write paths consistent instead of leaving
+   * this call site to fall back to a pre-record projection.
+   *
+   * @returns {{allowed: true, limit: number, remaining: number, resetAt: number}}
+   */
   async recordCatalog(req) {
     const ownerId = req.keyId || req.ip;
-    await this._increment(ownerId, 'catalog', 60, 1);
+    const limits = this._getKeyConfig(req.keyId);
+    const bucket = await this._increment(ownerId, 'catalog', 60, 1);
+    return {
+      allowed: true,
+      limit: limits.catalogRpm,
+      remaining: this._postRecordRemaining(limits.catalogRpm, bucket),
+      resetAt: bucket?.resetAt,
+    };
   }
 
   /**
@@ -266,9 +282,22 @@ export class RateLimiter {
     return res;
   }
 
+  /**
+   * Records a catalogue read and returns the post-record state, mirroring
+   * `recordCatalog` (#209).
+   *
+   * @returns {{allowed: true, limit: number, remaining: number, resetAt: number}}
+   */
   async recordCatalogRead(req) {
     const ownerId = req.keyId || req.ip;
-    await this._increment(ownerId, 'catalog_read', 60, 1);
+    const limit = this._getKeyConfig(req.keyId).catalogReadRpm ?? 60;
+    const bucket = await this._increment(ownerId, 'catalog_read', 60, 1);
+    return {
+      allowed: true,
+      limit,
+      remaining: this._postRecordRemaining(limit, bucket),
+      resetAt: bucket?.resetAt,
+    };
   }
 
   async getUsage(keyId) {

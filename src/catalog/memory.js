@@ -7,11 +7,15 @@
  * passed to these methods. The catalog interface guarantees that limit and
  * offset are safe integers within acceptable bounds.
  */
-import { scoreResource } from './search.js';
+import { scoreResource, toEpochMillis } from './search.js';
 import { EmbeddingClient } from './embeddings.js';
+import { CatalogStore } from './interface.js';
 
 /** Stable reason code for the catalog-flooding guard (#186). */
 export const MAX_RESOURCES_PER_PAYTO_CODE = 'maximum_resources_per_payto_exceeded';
+
+/** Stable reason code for the overall catalog size limit (#224). */
+export const MAX_CATALOG_SIZE_CODE = 'maximum_catalog_size_exceeded';
 
 /** Typed catalog error with a stable code, surfaced identically on every path. */
 export class CatalogError extends Error {
@@ -36,19 +40,33 @@ function cosineSimilarity(vecA, vecB) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export class MemoryCatalogStore {
+export class MemoryCatalogStore extends CatalogStore {
   constructor(config = {}) {
+    super();
     this.resources = new Map();
     // Per-payTo count kept in lockstep with `resources` so the cap check is
     // O(1) instead of a full catalog scan on every insert (#186).
     this.payToCounts = new Map();
     this.maxResourcesPerPayTo =
       config.maxResourcesPerPayTo ?? config.catalogMaxResourcesPerPayTo ?? 50;
+    // Overall catalog size limit (#224) to prevent unbounded growth.
+    this.maxCatalogSize = config.maxCatalogSize ?? config.catalogMaxSize ?? 10000;
     this.verifyTtlMs = config.catalogVerifyTtlMs ?? 24 * 60 * 60 * 1000;
     this.embeddingClient = new EmbeddingClient(config.embeddingsUrl, {
       timeoutMs: config.embeddingsTimeoutMs,
+      rerankUrl: config.rerankUrl,
     });
-    this.enableReranking = config.enableReranking;
+    // Reranking needs a real endpoint (#170): the flag on its own used to fall
+    // back to a guessed `${EMBEDDINGS_URL}/rerank` path that no provider serves,
+    // so "reranking enabled" and "reranking happening" were different things.
+    // resolveConfig refuses that combination in a real deployment; a store built
+    // directly (tests, the eval harness) degrades loudly instead of silently.
+    this.enableReranking = Boolean(config.enableReranking && config.rerankUrl);
+    if (config.enableReranking && !config.rerankUrl) {
+      console.warn(
+        '[Catalog] ENABLE_RERANKING is on but no RERANK_URL is configured — reranking stays off and results are served in fused order',
+      );
+    }
     // Track in-flight background embedding promises so callers can await
     // all of them via flush() instead of relying on a hardcoded sleep.
     this._pendingEmbeddings = new Set();
@@ -112,6 +130,13 @@ export class MemoryCatalogStore {
         throw new CatalogError(
           MAX_RESOURCES_PER_PAYTO_CODE,
           `maximum resources per payTo (${this.maxResourcesPerPayTo}) exceeded`,
+        );
+      }
+      // Overall catalog size limit (#224) to prevent unbounded growth.
+      if (this.resources.size >= this.maxCatalogSize) {
+        throw new CatalogError(
+          MAX_CATALOG_SIZE_CODE,
+          `maximum catalog size (${this.maxCatalogSize}) exceeded`,
         );
       }
     }
@@ -208,9 +233,11 @@ export class MemoryCatalogStore {
     return entry && this._isPublic(entry) ? entry : null;
   }
 
-  async listResources(params = {}) {
-    let items = Array.from(this.resources.values()).filter(item => this._isPublic(item));
-
+  /**
+   * Applies the common filter set used by both listResources and search (#227).
+   * Extracted to eliminate duplication and ensure consistent filtering behavior.
+   */
+  _applyCommonFilters(items, params) {
     if (params.type) items = items.filter(r => r.type === params.type);
     if (params.payTo) items = items.filter(r => r.payTo === params.payTo);
     if (params.scheme) items = items.filter(r => r.scheme === params.scheme);
@@ -221,10 +248,19 @@ export class MemoryCatalogStore {
         return params.extensions.every(ext => resourceExts.includes(ext));
       });
     }
+    return items;
+  }
+
+  async listResources(params = {}) {
+    let items = Array.from(this.resources.values()).filter(item => this._isPublic(item));
+    items = this._applyCommonFilters(items, params);
 
     // Sort by first_seen_at desc, then key asc to ensure deterministic order
+    // Use toEpochMillis for safe conversion (#223) instead of assuming Date
     items.sort((a, b) => {
-      const timeDiff = b.first_seen_at.getTime() - a.first_seen_at.getTime();
+      const timeA = toEpochMillis(a.first_seen_at);
+      const timeB = toEpochMillis(b.first_seen_at);
+      const timeDiff = (timeB ?? 0) - (timeA ?? 0);
       if (timeDiff !== 0) return timeDiff;
       const keyA = this._key(a);
       const keyB = this._key(b);
@@ -262,17 +298,7 @@ export class MemoryCatalogStore {
 
   async search(params) {
     let items = Array.from(this.resources.values()).filter(item => this._isPublic(item));
-
-    if (params.type) items = items.filter(r => r.type === params.type);
-    if (params.payTo) items = items.filter(r => r.payTo === params.payTo);
-    if (params.scheme) items = items.filter(r => r.scheme === params.scheme);
-    if (params.network) items = items.filter(r => r.network === params.network);
-    if (params.extensions && Array.isArray(params.extensions)) {
-      items = items.filter(r => {
-        const resourceExts = Object.keys(r.extensions || {});
-        return params.extensions.every(ext => resourceExts.includes(ext));
-      });
-    }
+    items = this._applyCommonFilters(items, params);
 
     let partialResults = false;
     let queryVector = null;
@@ -361,6 +387,10 @@ export class MemoryCatalogStore {
 
     let paginatedItems = combinedItems.slice(startIndex, startIndex + limit).map(s => s.item);
 
+    // Second pass over the page only — reranking reorders the fused page, it
+    // never adds candidates (#170). The client returns the page unchanged when
+    // the provider is unconfigured, down, or answers with something other than
+    // the documented contract, and logs why in each of those cases.
     if (this.enableReranking && paginatedItems.length > 0) {
       paginatedItems = await this.embeddingClient.rerank(params.query, paginatedItems);
     }

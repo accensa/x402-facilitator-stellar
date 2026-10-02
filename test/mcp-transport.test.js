@@ -190,15 +190,9 @@ test('#198: the initialize handshake works and failing notifications stay silent
   for (const m of msgs) assert.notEqual(m.id, undefined, 'every emitted frame carries an id');
 });
 
-test('#199: batches and malformed frames are answered, never ignored', async () => {
+test('#199: malformed frames and refused batches are answered, never ignored', async () => {
   const { send, stdin, stdout, server } = await setup();
-  // A valid batch: two requests, one of them a notification.
-  send([
-    { jsonrpc: '2.0', id: 1, method: 'ping' },
-    { jsonrpc: '2.0', method: 'notifications/initialized' },
-  ]);
   send([]); // empty batch
-  send([{ jsonrpc: '2.0', method: 'ping' }]); // batch of only notifications
   send('hello'); // valid JSON, not a request object
   send(42); // ditto
   stdin.write('this is not json\n'); // parse error
@@ -208,9 +202,31 @@ test('#199: batches and malformed frames are answered, never ignored', async () 
   const msgs = stdout.messages();
   assert.deepEqual(
     msgs.map(m => m.error.code),
-    [-32600, -32600, -32600, -32600, -32600, -32700],
+    [-32600, -32600, -32600, -32700],
     'every rejected frame gets an explicit response',
   );
   assert.match(msgs[0].error.message, /batch/i);
   for (const m of msgs) assert.equal(m.id, null, 'undetectable ids surface as null per JSON-RPC');
+});
+
+test('#428: a batch is answered with one array frame; notifications are omitted', async () => {
+  const { send, stdout, server } = await setup();
+  send([
+    { jsonrpc: '2.0', id: 1, method: 'ping' },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    { jsonrpc: '2.0', id: 'b', method: 'nope' },
+  ]);
+  send([{ jsonrpc: '2.0', method: 'ping' }]); // only notifications: no output
+  await server.flush();
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  const frames = stdout.chunks.join('').trim().split('\n');
+  assert.equal(frames.length, 1, 'one line for the batch, none for the all-notification batch');
+  const out = JSON.parse(frames[0]);
+  assert.deepEqual(
+    out.map(m => m.id),
+    [1, 'b'],
+  );
+  assert.deepEqual(out[0].result, {});
+  assert.equal(out[1].error.code, -32601);
 });

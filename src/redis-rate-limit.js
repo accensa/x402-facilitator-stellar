@@ -13,6 +13,7 @@
  * never takes the service down.
  */
 import { RateLimiter } from './rate-limit.js';
+import { createRedisConnection } from './redis-client.js';
 
 export class RedisRateLimiter extends RateLimiter {
   /**
@@ -25,21 +26,32 @@ export class RedisRateLimiter extends RateLimiter {
    */
   constructor(config, { client, redisUrl, warn = msg => console.warn(msg) } = {}) {
     super(config);
-    this.redis = client ?? null;
     this.warn = warn;
     this.degraded = false;
-    this.external = Boolean(client);
-    if (!this.redis && redisUrl) {
-      // Lazy import so the process still boots if the optional dependency is
-      // missing entirely — it then runs fully in memory.
-      import('ioredis')
-        .then(({ default: Redis }) => {
-          this.redis = new Redis(redisUrl);
-          this.redis.on('error', err => this._degrade(`Redis error: ${err.message}`));
-          this.redis.on('ready', () => this._recover());
-        })
-        .catch(err => this._degrade(`Redis unavailable (${err.message}); using in-memory buckets`));
-    }
+    // The connection itself (lazy import, error/recover wiring) is shared with
+    // the catalog search cache; the degrade *policy* stays here, because
+    // "per-instance rate limits" is a different operational statement than
+    // "stale search results".
+    this.connection = createRedisConnection({
+      client,
+      redisUrl,
+      onEvent: event => {
+        if (event.type === 'unavailable') {
+          this._degrade(`${event.message}; using in-memory buckets`);
+        } else if (event.type === 'degraded') {
+          this._degrade(event.message);
+        } else {
+          this._recover();
+        }
+      },
+    });
+    // Preserved for callers/tests that reach in. `this.redis` fills in once the
+    // lazy import resolves, exactly as it did before this was extracted.
+    this.redis = this.connection.client;
+    this.external = this.connection.external;
+    this.connection.ready.then(redis => {
+      this.redis = redis;
+    });
   }
 
   _degrade(message) {

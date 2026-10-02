@@ -4,10 +4,11 @@ This repository includes a standalone Model Context Protocol (MCP) server that e
 
 ## Features
 
-- **Agent-facing Discovery**: Exposes the facilitator catalog directly to the agent's context.
+- **Agent-facing Discovery**: Exposes the facilitator catalog directly to the agent's context, as tools, as semantic resources, and as prompt templates.
 - **Automated Payment Negotiation**: Handles HTTP 402 responses, `x402` payload signing, and payment injection transparently.
 - **Hard Spending Controls**: Enforces strict per-call and per-session max spending limits, rejecting any over-budget calls before money is moved.
 - **Secure Key Custody**: Key is provided at startup via environment variable and is never logged or exposed to the model.
+- **Injection-hardened Context**: Seller-controlled catalog text is stripped of invisible characters and framed as quoted data before it can reach a model's instructions.
 
 ## Installation & Configuration
 
@@ -68,6 +69,72 @@ The MCP server exposes three tools to the agent:
 2. **`get_resource` (Free)**: Get full metadata and pricing information for a specific resource URL.
 3. **`call_paid_resource` (Paid)**: Call a paid endpoint. The tool handles the 402 negotiation and payment automatically. **This tool will spend money.**
 
+## Semantic Discovery
+
+Tools take arguments and return JSON; the same catalog is also exposed through
+the other two halves of MCP, for clients that prefer to attach context rather
+than call a function.
+
+> The `prompts` and `resources` capabilities appear in `initialize` only when the
+> server can actually serve them. `resources` additionally requires
+> `FACILITATOR_URL` to be configured, since an `x402://catalog/...` URI is
+> resolved into a catalog query the server cannot answer on its own; with no
+> such endpoint the capability is withheld instead of advertised and failing on
+> first use. The endpoint is not probed at `initialize` time, so a facilitator
+> that is configured but down surfaces as a read error, not a missing
+> capability. A capability that is not advertised is answered with `-32601`,
+> which tells a client to re-read `initialize` instead of retrying.
+
+### Resources
+
+| URI | Contents |
+| --- | --- |
+| `x402://catalog/resources` | The whole public catalog: service name, description, payee, price, network. |
+| `x402://catalog/search?q={query}` | Ranked search, with the same ranking and recency decay as `/discovery/search`. |
+| `x402://catalog/resource?url={url}` | Metadata and pricing for one resource. `url` must be percent-encoded. |
+| `x402://catalog/network/{network}` | Catalog summary for one Stellar network. |
+
+The last three are advertised as templates (`resources/templates/list`) rather
+than concrete resources, because their URIs are not known until a client supplies
+a parameter. A miss is a readable answer, not an error: asking for a resource
+that is not in the catalog returns a body of `{"error": "not_found"}`.
+
+### Prompts
+
+| Prompt | Purpose | Arguments |
+| --- | --- | --- |
+| `generate_payment_uri` | Build the exact payment requirement for a resource: scheme, network, payee, amount, and the header to send. | `resource_url` (required), `network`, `max_amount_stroops` |
+| `query_dispute_status` | Report whether a settled payment was reversed, and on what evidence. | `transaction_hash` (required), `network` |
+| `audit_transaction` | Audit a settled payment end to end: amount matches, payee is the expected account, receipt is consistent. | `transaction_hash` (required), `network`, `expected_payee`, `include_timeline` |
+
+**Prompts describe a payment; they never make one.** These templates are
+server-authored instructions the agent executes — signing and submitting remains
+the caller's decision, so a rendered prompt is not a payment credential.
+
+### Handling untrusted content
+
+The catalog is open: anyone can publish a resource and choose its `description`.
+That text is a prompt-injection vector, so the two sides of the context are
+defended differently.
+
+- **Arguments are validated, not sanitised.** A transaction hash is 64 hex
+  characters, a network is one of three allowlisted identifiers, a resource URL
+  must be `http`/`https`. A value that does not fit is rejected with
+  `isError: true` naming the field — the raw value is never echoed back, since
+  an error message is itself read into the agent's context.
+- **Catalog text is framed, not filtered.** A seller is entitled to write "ignore
+  your instructions" in a description, and a phrase blacklist cannot catch every
+  phrasing without also corrupting legitimate descriptions. Instead the text is
+  neutralised (control characters, ANSI escapes, zero-width and bidirectional
+  overrides stripped), bounded in length, and emitted inside an explicitly
+  labelled data block. The surrounding template states in its own words that the
+  block is data and carries no instructions.
+
+`url` parameters are a request-forgery surface rather than an injection one: they
+end up in an outbound request to the facilitator, so the scheme is checked
+before any request is made. Query parameters in a search URI are passed as
+values, never concatenated, so a URI cannot smuggle an extra parameter.
+
 ## Error Contract
 
 The MCP server follows the MCP spec's two-tier error handling, and the three
@@ -80,6 +147,9 @@ failure shapes a client can see are deliberately distinct:
 | Unknown method (a request the server does not speak) | JSON-RPC error `-32601` (method not found) | no `error.data` |
 | A tool's handler returns a deliberate error (`isToolError`) | a `result`, not an error | `result.isError: true` with the error detail in `content[0].text` |
 | A tool's handler throws unexpectedly | JSON-RPC error `-32603` (internal error) | `error.message` carries the thrown message |
+| Unknown prompt name in `prompts/get`, or a malformed prompt argument | a `result`, not an error | `result.isError: true`; `content[0].text` is `{"code":"invalid_input","message":…}`, with `validPrompts` or the offending `field` alongside so a client can correct itself |
+| Unknown or malformed `uri` in `resources/read` | a `result`, not an error | as above, with `knownResources` listing the URIs this server serves |
+| A `prompts/` or `resources/` method that is not implemented, or a capability that is not advertised | JSON-RPC error `-32601` (method not found) | no `error.data` |
 
 The distinction matters to an agent: `-32601` means this server does not speak
 the protocol, so the agent should fall back to another transport or give up;
@@ -87,6 +157,34 @@ the protocol, so the agent should fall back to another transport or give up;
 agent should `tools/list` again and pick a real tool. `isError: true` results
 are a successful tool *call* that failed in the tool's own logic — business
 failure, not protocol failure.
+
+## Protocol Version Negotiation
+
+The server speaks the **handshake-era** revisions of MCP, oldest first:
+
+| Revision | Status |
+| --- | --- |
+| `2024-11-05` | supported |
+| `2025-03-26` | supported |
+| `2025-06-18` | supported |
+| `2025-11-25` | supported — the newest revision reachable via `initialize`, and therefore the server's counter-offer |
+
+The tools surface this server implements (`initialize`, `tools/list`,
+`tools/call`, `ping`, `notifications/initialized`) is the same in all four, so
+the revision the client asked for is the revision it gets back. The rules
+(`initialize` follows the spec's negotiation section):
+
+| Client sends in `params.protocolVersion` | Server answers with |
+| --- | --- |
+| a revision in the table above | **that same revision** — the connection will use it |
+| a revision the server does not implement (including a malformed, non-string value) | `2025-11-25`, plus a warning on stderr naming the requested version and the list above, so the negotiation attempt is visible rather than silent |
+| nothing at all | `2025-11-25` |
+
+The revision is *negotiated*, not asserted: a client that cannot speak the
+counter-offer is expected to disconnect rather than continue, and the warning
+line is what tells an operator which revision was asked for. The modern
+(no-handshake) era of MCP is out of scope for this stdio server — those clients
+never send `initialize`, so there is nothing here to negotiate with them.
 
 ## Transport behavior
 
@@ -111,15 +209,25 @@ contract above, the server keeps four transport-level promises:
 
 ### Batches
 
-JSON-RPC 2.0 batch requests — a JSON array of requests, answered with an array
-of responses — are **not supported**; the MCP protocol does not use them. They
-are rejected explicitly rather than silently ignored, and every malformed
-frame is answered, so a client can never time out waiting on something the
-server refused to understand:
+A JSON array is a JSON-RPC 2.0 batch (#428) and is answered with a single JSON
+array of responses, on both the stdio and HTTP (`POST /mcp`) transports:
+
+- Members run **concurrently** and fail independently; a tool error, unknown
+  method or invalid member never affects its neighbours.
+- Each response carries the `id` of the request it answers, in request order.
+- Notifications (no `id`) get no response; a batch of only notifications
+  produces no output (HTTP: `204`).
+- A batch larger than **25** requests is refused whole. The limit is the
+  `maxBatchSize` option of `McpServer`.
+
+Every malformed frame is answered, so a client can never time out waiting on
+something the server refused to understand:
 
 | Input | Response |
 | --- | --- |
-| Any JSON array (including `[]` and arrays of only notifications) | single `-32600` error whose message names that batches are not supported |
+| `[]` | single `-32600` error, `id: null` ("batch must not be empty") |
+| More than 25 requests | single `-32600` error, `id: null`, naming the limit |
+| A batch member that is not an object with a string `method` | `-32600` entry for that member (its `id` if detectable, else `null`); the others still run |
 | Valid JSON that is not an object with a string `method` | `-32600` with `id: null` |
 | A line that is not valid JSON | `-32700` "Parse error" with `id: null` |
 

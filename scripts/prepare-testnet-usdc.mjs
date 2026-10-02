@@ -51,7 +51,10 @@ import {
 import { installRpcRetry } from '../src/rpc-retry.js';
 
 // Same IPv4 dead-end as friendbot and Soroban RPC — see src/rpc-retry.js.
-installRpcRetry({ log: msg => console.error(`  ${msg}`) });
+installRpcRetry({
+  log: msg => console.error(`  ${msg}`),
+  rpcForceIpv4: process.env.RPC_FORCE_IPV4 !== 'false',
+});
 
 const HORIZON = process.env.HORIZON_URL ?? 'https://horizon-testnet.stellar.org';
 

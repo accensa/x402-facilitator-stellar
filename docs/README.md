@@ -24,6 +24,7 @@ Welcome to the X402 Facilitator documentation. Choose the path that best matches
 - [Event Sourcing](./EVENT-SOURCING.md): The append-only settlement state machine and its audit trail
  main
 - [Glossary](./GLOSSARY.md): Terminology (Stellar, X402, and Facilitator concepts)
+- [Changelog](../CHANGELOG.md): What changed between releases, in Keep a Changelog form
 - [Deployment](./DEPLOYMENT.md): Containers, topology, environment variables, shared stores
 - [Operations](./OPERATIONS.md): Rate limiting, metering, multi-signer pools, health endpoints
 - [Authentication](./AUTHENTICATION.md): What is authenticated, what is open, and why

@@ -6,6 +6,38 @@ import {
   extractDiscoveryInfo,
   validateDiscoveryExtension,
 } from '@x402/extensions';
+import { validateAmount } from '../sdk/validation.js';
+
+// Pre-compiled regex patterns to avoid recompilation overhead and garbage collection pressure
+const ROUTE_PARAM_REGEX = /\{([^}]+)\}/g;
+const HTML_TAG_REGEX = /<[^>]*>?/gm;
+
+/** Longest description the catalog will index, in UTF-16 code units. */
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/**
+ * Truncates a description to at most `maxLength` UTF-16 code units without
+ * splitting a surrogate pair (#218).
+ *
+ * `String.prototype.slice`/`substring` cut on code-unit boundaries, so a cut
+ * landing between the two halves of an astral character (an emoji in a listing
+ * blurb) leaves an unpaired surrogate behind. That is not valid UTF-16: it
+ * survives `JSON.stringify` as a lone `\udXXX` escape which conformant clients
+ * reject or render as U+FFFD, and it cannot be round-tripped through a
+ * `jsonb` column. Losing one code unit off the end is strictly better than
+ * emitting a value that is not text.
+ *
+ * The fast path returns the input untouched when it already fits, so the
+ * common short description pays nothing for the guard.
+ */
+function truncateDescription(value, maxLength = MAX_DESCRIPTION_LENGTH) {
+  if (value.length <= maxLength) return value;
+  // Walking back one unit when the cut lands on a high surrogate keeps the
+  // pair whole; the result is then at most maxLength - 1 code units long.
+  const boundary = value.charCodeAt(maxLength - 1);
+  const end = boundary >= 0xd800 && boundary <= 0xdbff ? maxLength - 1 : maxLength;
+  return value.slice(0, end);
+}
 
 /**
  * Distinguishes a hostile routeTemplate (path traversal, protocol smuggling,
@@ -14,13 +46,22 @@ import {
  */
 function isHostileRouteTemplate(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
+  // Fast path: avoid expensive decodeURIComponent native call when no encoded characters or path traversal markers exist
+  if (
+    !value.includes('%') &&
+    !value.includes('..') &&
+    !value.includes('://') &&
+    !value.includes('\\')
+  ) {
+    return false;
+  }
   let decoded;
   try {
     decoded = decodeURIComponent(value);
   } catch {
     return true;
   }
-  return decoded.includes('..') || decoded.includes('://');
+  return decoded.includes('..') || decoded.includes('://') || decoded.includes('\\');
 }
 
 function createResult() {
@@ -40,7 +81,7 @@ function addAdvisories(result, declaration) {
 
   const matches =
     typeof declaration.routeTemplate === 'string'
-      ? declaration.routeTemplate.match(/\{([^}]+)\}/g)
+      ? declaration.routeTemplate.match(ROUTE_PARAM_REGEX)
       : null;
   if (matches) {
     for (const match of matches) {
@@ -60,7 +101,17 @@ function addAdvisories(result, declaration) {
 }
 
 function validatePolicy(paymentPayload, paymentRequirements, result) {
-  const extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
+  let extracted;
+  try {
+    extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
+  } catch (err) {
+    result.hardDrop = true;
+    result.reason =
+      err?.code === 'ERR_INVALID_URL' || err?.message?.includes('Invalid URL')
+        ? 'invalid_url'
+        : 'missing_or_invalid_discovery_extension';
+    return result;
+  }
   if (!extracted) {
     result.hardDrop = true;
     result.reason = 'missing_or_invalid_discovery_extension';
@@ -74,6 +125,15 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
       result.hardDrop = true;
       result.reason = 'invalid_extension_schema';
       return result;
+    }
+    // Validate pricing.amount format (#225) to prevent toStroops from throwing later
+    if (rawBazaar.pricing?.amount !== undefined) {
+      const amountErrors = validateAmount(rawBazaar.pricing.amount);
+      if (amountErrors.length > 0) {
+        result.hardDrop = true;
+        result.reason = 'invalid_pricing_amount';
+        return result;
+      }
     }
   }
 
@@ -109,9 +169,11 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
 
   const rawDescription = paymentPayload.resource?.description;
   if (typeof rawDescription === 'string') {
-    let description = rawDescription.replace(/<[^>]*>?/gm, '').trim();
-    if (description.length > 200) {
-      description = description.substring(0, 200);
+    let description = rawDescription.includes('<')
+      ? rawDescription.replace(HTML_TAG_REGEX, '').trim()
+      : rawDescription.trim();
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      description = truncateDescription(description);
       result.softDrops.push('description_truncated');
     }
     extracted.description = description;
@@ -119,8 +181,19 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
 
   const rawTags = paymentPayload.resource?.tags;
   if (Array.isArray(rawTags)) {
-    const tags = sanitizeTags(rawTags);
-    if (tags.length !== rawTags.length || JSON.stringify(tags) !== JSON.stringify(rawTags)) {
+    // sanitizeTags returns undefined (not []) when every entry is filtered
+    // out, e.g. all tags are oversized or duplicates.
+    const tags = sanitizeTags(rawTags) ?? [];
+    let isFiltered = tags.length !== rawTags.length;
+    if (!isFiltered) {
+      for (let i = 0; i < tags.length; i++) {
+        if (tags[i] !== rawTags[i]) {
+          isFiltered = true;
+          break;
+        }
+      }
+    }
+    if (isFiltered) {
       result.softDrops.push('tags_filtered');
     }
     extracted.tags = tags;
@@ -139,6 +212,22 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
     extensions: extracted.extensions,
     payTo: paymentRequirements.payTo,
   };
+
+  if (result.resource.url) {
+    try {
+      const parsedUrl = new URL(result.resource.url);
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        result.hardDrop = true;
+        result.reason = 'invalid_url_scheme';
+        return result;
+      }
+    } catch {
+      result.hardDrop = true;
+      result.reason = 'invalid_url';
+      return result;
+    }
+  }
+
   return result;
 }
 
@@ -155,7 +244,20 @@ export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
     return result;
   }
 
-  if (input.paymentPayload && input.paymentRequirements) {
+  if (
+    Object.prototype.hasOwnProperty.call(input, 'paymentPayload') ||
+    Object.prototype.hasOwnProperty.call(input, 'paymentRequirements')
+  ) {
+    if (!input.paymentPayload || typeof input.paymentPayload !== 'object') {
+      result.hardDrop = true;
+      result.reason = 'missing_or_invalid_discovery_extension';
+      return result;
+    }
+    if (!input.paymentRequirements || typeof input.paymentRequirements !== 'object') {
+      result.hardDrop = true;
+      result.reason = 'invalid_declaration';
+      return result;
+    }
     return validatePolicy(input.paymentPayload, input.paymentRequirements, result);
   }
 

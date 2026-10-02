@@ -1,210 +1,287 @@
 /**
- * Covers scripts/select-conformance-components.mjs — the step that decides
- * which upstream e2e components the conformance job runs against.
+ * @file select-conformance-components.test.js
+ * @description Tests for scripts/select-conformance-components.mjs — the CI
+ * step that decides which upstream e2e components the conformance job runs
+ * against.
  *
- * The fixtures below mirror the real x402 harness layout
- * (role/language/transport/component) and the exact shape of setup.sh's
- * failure report, because both are what the script parses. If upstream changes
- * either, these tests are where it should surface.
+ * ### Why this file exists
+ * The upstream x402 harness builds every component (TypeScript, Go, Python)
+ * before running any scenario. When one component fails to build, the harness
+ * exits non-zero and no scenario runs at all. `select-conformance-components.mjs`
+ * discovers the available components dynamically, subtracts the ones whose
+ * builds failed, and emits a GitHub Actions output matrix — so a broken
+ * third-party server can never kill our conformance run.
+ *
+ * ### Fixture design
+ * The fixtures mirror the real x402 harness directory layout exactly:
+ *   `<role>/<language>/<transport>/<component>`
+ * with `config/mechanisms_<family>.json` controlling which languages are
+ * considered for a given payment family. Both shapes are what the script
+ * actually parses, so a breaking upstream change surfaces here first.
+ *
+ * Modular helpers are extracted to `test/helpers/conformance-components.js`.
  */
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import {
+  createE2eFixture,
+  cleanupE2eFixture,
+  makeSetupLog,
+  parseGithubOutput,
+  executeSelector,
+  assertSelectorOutputs,
+} from './helpers/conformance-components.js';
+
+/** Absolute path to the script under test. Resolved once at module load. */
 const SCRIPT = fileURLToPath(
   new URL('../scripts/select-conformance-components.mjs', import.meta.url),
 );
 
-/** Builds a throwaway e2e tree with the components named in `layout`. */
+/**
+ * Backwards-compatible fixture builder wrapper for existing test definitions.
+ *
+ * @param {import('./helpers/conformance-components.js').E2eLayout} [layout={}]
+ * @returns {string}
+ */
 function makeE2eDir(layout = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'x402-e2e-'));
-
-  mkdirSync(join(dir, 'config'), { recursive: true });
-  writeFileSync(
-    join(dir, 'config', 'mechanisms_stellar.json'),
-    JSON.stringify({
-      routes: { '/exact/stellar': { scheme: 'exact', sdks: layout.sdks ?? ['typescript'] } },
-    }),
-  );
-
-  const components = {
-    servers: layout.servers ?? [
-      'typescript/http/express',
-      'typescript/http/next',
-      'typescript/mcp',
-    ],
-    clients: layout.clients ?? ['typescript/http/fetch', 'typescript/mcp'],
-  };
-  for (const [role, names] of Object.entries(components)) {
-    for (const name of names) {
-      const componentDir = join(dir, role, ...name.split('/'));
-      mkdirSync(componentDir, { recursive: true });
-      // index.ts is one of the markers component.ts treats as "this is a component".
-      writeFileSync(join(componentDir, 'index.ts'), '');
-    }
-  }
-
-  // Directories the harness skips must not be picked up as components.
-  const noise = join(dir, 'servers', 'typescript', 'http', 'node_modules');
-  mkdirSync(noise, { recursive: true });
-  writeFileSync(join(noise, 'index.ts'), '');
-
-  return dir;
+  return createE2eFixture(layout);
 }
 
-/** Writes a setup.sh log whose failure section lists `failures`. */
-function makeSetupLog(dir, failures) {
-  const path = join(dir, 'setup-output.txt');
-  const body = [
-    '🚀 X402 E2E Setup',
-    '',
-    '📦 server/typescript/http/express',
-    '   ✅ Install completed',
-    '',
-    '═══════════════════════════════════════════════════════',
-    '                 Setup Summary',
-    '═══════════════════════════════════════════════════════',
-    `✅ Successful: ${15 - failures.length}`,
-    `❌ Failed:     ${failures.length}`,
-    '📈 Total:      15',
-    '',
-    ...(failures.length > 0
-      ? ['❌ FAILED COMPONENTS:', ...failures.map(f => `   • ${f}`), '']
-      : ['✅ All setup tasks completed successfully!']),
-  ].join('\n');
-  writeFileSync(path, body);
-  return path;
+/**
+ * Backwards-compatible runner wrapper for existing test definitions.
+ *
+ * @param {string} e2eDir
+ * @param {string|null} setupLog
+ * @param {object} [opts={}]
+ * @returns {{ stdout: string, outputs: Record<string, string>, failed: boolean }}
+ */
+function run(e2eDir, setupLog, opts = {}) {
+  return executeSelector(SCRIPT, e2eDir, setupLog, opts);
 }
 
-function run(e2eDir, setupLog, { expectFailure = false } = {}) {
-  const outputFile = join(e2eDir, 'github-output.txt');
-  writeFileSync(outputFile, '');
+// ---------------------------------------------------------------------------
+// Conformance Component Selection Tests
+// ---------------------------------------------------------------------------
 
-  const args = [SCRIPT, `--e2e-dir=${e2eDir}`, '--family=stellar', '--github-output'];
-  if (setupLog) args.push(`--setup-log=${setupLog}`);
+describe('select-conformance-components.mjs', () => {
+  /**
+   * When setup.sh reports no failures, every discovered component must be
+   * selected and the excluded list must be empty.
+   */
+  test('selects every component when nothing failed to build', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
 
-  let stdout = '';
-  let failed = false;
-  try {
-    stdout = execFileSync(process.execPath, args, {
-      encoding: 'utf8',
-      env: { ...process.env, GITHUB_OUTPUT: outputFile },
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const { outputs } = run(dir, makeSetupLog(dir, []));
+
+    assertSelectorOutputs(outputs, {
+      servers: 'typescript/http/express,typescript/http/next,typescript/mcp',
+      clients: 'typescript/http/fetch,typescript/mcp',
+      excluded: '',
+      excludedCount: 0,
     });
-  } catch (err) {
-    failed = true;
-    stdout = `${err.stdout ?? ''}${err.stderr ?? ''}`;
-  }
-
-  assert.equal(
-    failed,
-    expectFailure,
-    `expected ${expectFailure ? 'failure' : 'success'}:\n${stdout}`,
-  );
-
-  const outputs = Object.fromEntries(
-    readFileSync(outputFile, 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map(line => {
-        const eq = line.indexOf('=');
-        return [line.slice(0, eq), line.slice(eq + 1)];
-      }),
-  );
-  return { stdout, outputs };
-}
-
-test('selects every component when nothing failed to build', t => {
-  const dir = makeE2eDir();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-
-  const { outputs } = run(dir, makeSetupLog(dir, []));
-
-  assert.equal(outputs.servers, 'typescript/http/express,typescript/http/next,typescript/mcp');
-  assert.equal(outputs.clients, 'typescript/http/fetch,typescript/mcp');
-  assert.equal(outputs.excluded, '');
-  assert.equal(outputs.excluded_count, '0');
-});
-
-test('drops only the component that failed, and names it', t => {
-  const dir = makeE2eDir();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-
-  // The real 2026-08-12 failure.
-  const { outputs, stdout } = run(dir, makeSetupLog(dir, ['server/typescript/http/next']));
-
-  assert.equal(outputs.servers, 'typescript/http/express,typescript/mcp');
-  assert.equal(outputs.clients, 'typescript/http/fetch,typescript/mcp');
-  assert.equal(outputs.excluded, 'typescript/http/next');
-  assert.equal(outputs.excluded_count, '1');
-  assert.match(stdout, /✗ \(build failed\) typescript\/http\/next/);
-});
-
-test('a client build failure drops a client, not a server', t => {
-  const dir = makeE2eDir();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-
-  const { outputs } = run(dir, makeSetupLog(dir, ['client/typescript/mcp']));
-
-  assert.equal(outputs.servers, 'typescript/http/express,typescript/http/next,typescript/mcp');
-  assert.equal(outputs.clients, 'typescript/http/fetch');
-  assert.equal(outputs.excluded, 'typescript/mcp');
-});
-
-test('fails rather than running an empty matrix when every server is broken', t => {
-  const dir = makeE2eDir({ servers: ['typescript/http/express'] });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-
-  const { stdout } = run(dir, makeSetupLog(dir, ['server/typescript/http/express']), {
-    expectFailure: true,
   });
 
-  assert.match(stdout, /every discovered server failed to build/);
-});
+  /**
+   * A single build failure drops only that component. The remaining servers and
+   * all clients are unaffected. The excluded component name must appear in stdout
+   * so the reason is visible in the CI log.
+   */
+  test('drops only the component that failed, and names it', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
 
-test('a facilitator build failure is fatal — ours is the thing under test', t => {
-  const dir = makeE2eDir();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+    // Mirrors the real 2026-08-12 conformance failure: next.js failed to build.
+    const { outputs, stdout } = run(dir, makeSetupLog(dir, ['server/typescript/http/next']));
 
-  const { stdout } = run(dir, makeSetupLog(dir, ['facilitator/external-proxies/accensa']), {
-    expectFailure: true,
+    assertSelectorOutputs(outputs, {
+      servers: 'typescript/http/express,typescript/mcp',
+      clients: 'typescript/http/fetch,typescript/mcp',
+      excluded: 'typescript/http/next',
+      excludedCount: 1,
+    });
+    assert.match(stdout, /✗ \(build failed\) typescript\/http\/next/);
   });
 
-  assert.match(stdout, /facilitator components failed to build/);
-});
+  /**
+   * Multiple server build failures drop each failed server while retaining surviving servers.
+   */
+  test('drops multiple failing servers while keeping surviving server', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
 
-test('ignores languages the mechanisms file does not list for the family', t => {
-  const dir = makeE2eDir({
-    sdks: ['typescript'],
-    servers: ['typescript/http/express', 'go/http/gin', 'python/http/flask'],
+    const { outputs } = run(
+      dir,
+      makeSetupLog(dir, ['server/typescript/http/express', 'server/typescript/http/next']),
+    );
+
+    assertSelectorOutputs(outputs, {
+      servers: 'typescript/mcp',
+      clients: 'typescript/http/fetch,typescript/mcp',
+      excluded: 'typescript/http/express,typescript/http/next',
+      excludedCount: 2,
+    });
   });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
 
-  const { outputs } = run(dir, makeSetupLog(dir, []));
+  /**
+   * A client build failure must drop the failing client only, not any server.
+   * Role isolation is critical: a broken client must not prevent server testing.
+   */
+  test('a client build failure drops a client, not a server', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
 
-  // Stellar declares typescript SDKs only; a Go server cannot serve the route,
-  // so failing to build it is irrelevant to this run.
-  assert.equal(outputs.servers, 'typescript/http/express');
+    const { outputs } = run(dir, makeSetupLog(dir, ['client/typescript/mcp']));
+
+    assertSelectorOutputs(outputs, {
+      servers: 'typescript/http/express,typescript/http/next,typescript/mcp',
+      clients: 'typescript/http/fetch',
+      excluded: 'typescript/mcp',
+      excludedCount: 1,
+    });
+  });
+
+  /**
+   * When every discovered server fails to build, there is no server left to run
+   * scenarios against. The script must exit non-zero with a message explaining
+   * why, rather than producing a silent empty matrix that appears to succeed.
+   */
+  test('fails rather than running an empty matrix when every server is broken', t => {
+    // Use a layout with a single server so a single failure empties the list.
+    const dir = makeE2eDir({ servers: ['typescript/http/express'] });
+    t.after(() => cleanupE2eFixture(dir));
+
+    const { stdout } = run(dir, makeSetupLog(dir, ['server/typescript/http/express']), {
+      expectFailure: true,
+    });
+
+    assert.match(stdout, /every discovered server failed to build/);
+  });
+
+  /**
+   * When every discovered client fails to build, there is no client left to run
+   * scenarios against. The script must exit non-zero.
+   */
+  test('fails rather than running an empty matrix when every client is broken', t => {
+    const dir = makeE2eDir({ clients: ['typescript/http/fetch'] });
+    t.after(() => cleanupE2eFixture(dir));
+
+    const { stdout } = run(dir, makeSetupLog(dir, ['client/typescript/http/fetch']), {
+      expectFailure: true,
+    });
+
+    assert.match(stdout, /every discovered client failed to build/);
+  });
+
+  /**
+   * The facilitator is the service under test. If it fails to build, the entire
+   * conformance run is meaningless — any result would be untestable. The script
+   * must exit non-zero immediately rather than proceeding with a broken facilitator.
+   */
+  test('a facilitator build failure is fatal — ours is the thing under test', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
+
+    const { stdout } = run(dir, makeSetupLog(dir, ['facilitator/external-proxies/accensa']), {
+      expectFailure: true,
+    });
+
+    assert.match(stdout, /facilitator components failed to build/);
+  });
+
+  /**
+   * Components in languages not declared in `mechanisms_<family>.json` are
+   * irrelevant to the payment family under test and must be silently filtered out.
+   * Stellar declares TypeScript only; a Go or Python server cannot serve the
+   * exact/stellar route, so its build result is irrelevant.
+   */
+  test('ignores languages the mechanisms file does not list for the family', t => {
+    const dir = makeE2eDir({
+      sdks: ['typescript'],
+      servers: ['typescript/http/express', 'go/http/gin', 'python/http/flask'],
+    });
+    t.after(() => cleanupE2eFixture(dir));
+
+    const { outputs } = run(dir, makeSetupLog(dir, []));
+
+    // Only the TypeScript server is relevant for Stellar; Go and Python are
+    // filtered before the script even considers their build status.
+    assert.equal(outputs.servers, 'typescript/http/express');
+  });
+
+  /**
+   * `node_modules` is a harness infrastructure directory that must never be
+   * treated as a component, even when it contains an `index.ts` marker file.
+   * The `makeE2eDir` fixture injects one explicitly to verify this invariant.
+   */
+  test('skips harness infrastructure directories', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
+
+    const { outputs } = run(dir, makeSetupLog(dir, []));
+
+    assert.ok(
+      !outputs.servers.includes('node_modules'),
+      `servers output must not include node_modules, got: ${outputs.servers}`,
+    );
+  });
+
+  /**
+   * When `--setup-log` is absent or points to a non-existent file, the script
+   * must treat it as zero failures (graceful degradation) rather than crashing.
+   * This handles the case where setup.sh was never run (e.g. a dry-run branch).
+   */
+  test('treats a missing setup log as nothing-failed rather than crashing', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
+
+    // Pass null to omit --setup-log entirely.
+    const { outputs } = run(dir, null);
+
+    assert.equal(outputs.excluded_count, '0');
+  });
 });
 
-test('skips harness infrastructure directories', t => {
-  const dir = makeE2eDir();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+// ---------------------------------------------------------------------------
+// Unit tests for conformance helper components
+// ---------------------------------------------------------------------------
 
-  const { outputs } = run(dir, makeSetupLog(dir, []));
+describe('conformance helper utilities', () => {
+  test('parseGithubOutput parses multiline key=value content', () => {
+    const text = 'servers=ts/express\nclients=ts/fetch\nexcluded=\nexcluded_count=0\n';
+    const parsed = parseGithubOutput(text);
+    assert.deepEqual(parsed, {
+      servers: 'ts/express',
+      clients: 'ts/fetch',
+      excluded: '',
+      excluded_count: '0',
+    });
+  });
 
-  assert.ok(!outputs.servers.includes('node_modules'));
-});
+  test('makeSetupLog formats clean setup log without failures', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
 
-test('treats a missing setup log as nothing-failed rather than crashing', t => {
-  const dir = makeE2eDir();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const logPath = makeSetupLog(dir, []);
+    assert.ok(logPath.endsWith('setup-output.txt'));
+  });
 
-  const { outputs } = run(dir, null);
+  test('assertSelectorOutputs validates expected keys and throws on mismatch', () => {
+    const actual = {
+      servers: 'a',
+      clients: 'b',
+      excluded: '',
+      excluded_count: '0',
+    };
 
-  assert.equal(outputs.excluded_count, '0');
+    assert.doesNotThrow(() => {
+      assertSelectorOutputs(actual, { servers: 'a', clients: 'b', excludedCount: 0 });
+    });
+
+    assert.throws(() => {
+      assertSelectorOutputs(actual, { servers: 'other' });
+    });
+  });
 });

@@ -6,8 +6,10 @@ Sensitive operations are recorded by `src/audit.js` as one JSON object per
 line, each carrying `"channel": "audit"` so records are separable from
 diagnostic logs (filterable at shipment; optionally mirrored to `AUDIT_LOG_FILE`
 for independent retention). Every record carries a timestamp (`ts`), the
-authenticated caller (`actor`: `keyId`, or `ip:<addr>` in open mode), the
-action (`event`) and the outcome.
+authenticated caller (`actor`: `keyId`, or `ip:<pseudonym>` in open mode),
+the action (`event`) and the outcome. The open-mode actor is a keyed,
+non-reversible pseudonym of the source address, never the address itself — see
+docs/PRIVACY.md §2 and §3a.
 
 ### What is audited, and why
 
@@ -16,7 +18,7 @@ action (`event`) and the outcome.
 | `settlement` | Money moved (or was attempted). Carries the **transaction hash**, network, fee and outcome, so a disputed settlement can be reconstructed against the chain. This is the record the audit trail exists for. |
 | `verification` | The gate before settlement. Outcomes and rejection reasons are needed to reconstruct why a payment never proceeded. |
 | `catalog_write` | A public listing is created or overwritten. Without it, a spoofed or hijacked listing cannot be investigated after the fact. Records url, tool name, source (payment/manual) and whether an existing entry was overwritten. |
-| `auth_failure` | Authentication probing/brute force. Records the reason code and source IP — never the presented key material. |
+| `auth_failure` | Authentication probing/brute force. Records the reason code and the pseudonymised source identifier — never the presented key material, and never the raw source address. |
 | `rate_limit_rejected` | Abuse signal and evidence trail for callers hitting ceilings, including `fee_ceiling_exceeded` and store-unavailable refusals. |
 | `rpc_unreachable` | An open circuit breaker caused a caller-visible failure. Distinguishes "our dependency died" from "your payment was rejected" in the trail. |
 

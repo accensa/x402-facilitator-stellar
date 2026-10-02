@@ -42,7 +42,10 @@ import { installRpcRetry } from '../src/rpc-retry.js';
 // succeeds — the same dead-end src/rpc-retry.js exists to fix for Soroban RPC,
 // and it bites here for exactly the same reason. Reuse it rather than writing a
 // second IPv4 connector.
-installRpcRetry({ log: msg => console.error(`  ${msg}`) });
+installRpcRetry({
+  log: msg => console.error(`  ${msg}`),
+  rpcForceIpv4: process.env.RPC_FORCE_IPV4 !== 'false',
+});
 
 const FRIENDBOT = process.env.FRIENDBOT_URL ?? 'https://friendbot.stellar.org';
 const ATTEMPTS = Number(process.env.FRIENDBOT_ATTEMPTS ?? 5);

@@ -98,7 +98,7 @@ checklist. The groups:
 | --- | --- |
 | **Signers** (testnet) | `FACILITATOR_SECRET` or `FACILITATOR_SECRETS` (pool), optional `FEE_BUMP_SECRET` |
 | **Signers** (pubnet, opt-in) | `ENABLE_PUBNET=true`, `FACILITATOR_SECRET_PUBNET` / `FACILITATOR_SECRETS_PUBNET`, optional `FEE_BUMP_SECRET_PUBNET`, required `STELLAR_RPC_URL_PUBNET` |
-| **Network / fees** | `STELLAR_RPC_URL` (testnet RPC, defaults to public), `MAX_TX_FEE_STROOPS`, `MAX_TX_FEE_STROOPS_PUBNET` |
+| **Network / fees** | `STELLAR_RPC_URL` (testnet RPC, defaults to public), `MAX_TX_FEE_STROOPS`, `MAX_TX_FEE_STROOPS_PUBNET`, `HORIZON_URL`, `HORIZON_URL_PUBNET` |
 | **Caller auth** | `FACILITATOR_API_KEYS` (unset = open mode) |
 | **Rate limits / metering** | `RATE_LIMIT_GLOBAL`, `RATE_LIMIT_<keyId>` per-key overrides, `RATE_LIMIT_STORE`, `DATABASE_URL`, `REDIS_URL` |
 | **HTTP / CORS / proxy** | `PORT`, `CORS_ALLOWED_ORIGINS`, `TRUST_PROXY`, `NODE_ENV` |
@@ -299,9 +299,9 @@ status page exists.
 
 ### Upgrading
 
-1. Check `docs/CONFORMANCE.md` and the diff of `package.json` for wire-format
-   changes before upgrading — a bump of `@x402/*` can change response shapes
-   (a CHANGELOG is tracked in [#212](https://github.com/accensa/x402-facilitator-stellar/issues/212)).
+1. Read [`CHANGELOG.md`](../CHANGELOG.md) and the diff of `package.json` for
+   wire-format changes before upgrading — a bump of `@x402/*` can change
+   response shapes. Also check `docs/CONFORMANCE.md` for the pinned behaviour.
 2. Rolling restart; both old and new must be able to serve `/verify` during the cutover.
 3. If a database migration shipped, verify forward compatibility (the repo's migrations
    are designed to be; verify the previous image can still read the schema).

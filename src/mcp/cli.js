@@ -42,6 +42,12 @@ if (AGENT_PAYER_SECRET_KEY) {
   }
 }
 
+import { installRpcRetry } from '../rpc-retry.js';
+installRpcRetry({
+  log: msg => console.warn(`[MCP] ${msg}`),
+  rpcForceIpv4: process.env.RPC_FORCE_IPV4 !== 'false',
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -90,9 +96,13 @@ function assertCanSpend(amountStroops) {
 // ---------------------------------------------------------------------------
 // MCP Server Initialization
 // ---------------------------------------------------------------------------
+// `fetchDiscovery` is what backs the semantic resources (#391): an
+// `x402://catalog/...` URI is resolved into a live facilitator catalog query.
+// Prompts are served without it, so the two capabilities are independent.
 const server = new McpServer({
   name: 'x402-facilitator-stellar-mcp',
   version: '0.0.1',
+  fetchDiscovery,
 });
 
 // Tool 1: search_resources

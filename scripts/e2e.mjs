@@ -39,7 +39,10 @@ import { installRpcRetry } from '../src/rpc-retry.js';
 // SDK wraps transport errors in an AxiosError that drops `cause.code`, so by the
 // time the call returns, a connection timeout is indistinguishable from any
 // other failure.
-installRpcRetry({ log: msg => console.log(`    ${msg}`) });
+installRpcRetry({
+  log: msg => console.log(`    ${msg}`),
+  rpcForceIpv4: process.env.RPC_FORCE_IPV4 !== 'false',
+});
 
 const NETWORK = 'stellar:testnet';
 const XLM_SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';

@@ -7,6 +7,11 @@ name: Conformance (upstream x402 e2e)
 # anything being wrong with this service. Wiring it into ci.yml would mean a
 # Stellar testnet outage turns a docs PR red, and a red build that nobody
 # believes is worse than no build at all.
+#
+# This file only decides *when* the suite runs. The steps live in
+# conformance-run.yml, which is a call-only reusable workflow, because a file
+# that declares `workflow_call` alongside these triggers produces a zero-job run
+# titled by its path — and the schedule stops firing. See that file's header.
 on:
   schedule:
     # Daily. Spec drift and upstream harness changes are the thing being watched
@@ -22,15 +27,6 @@ on:
   # waiting for a nightly run or merging an untested workflow to main.
   push:
     branches: ['conformance/**']
-  # Reusable: a @x402/* version-bump PR calls this directly so a breaking bump
-  # fails the PR instead of surfacing a month later in production. See
-  # conformance-on-bump.yml and docs/UPSTREAM.md.
-  workflow_call:
-    inputs:
-      x402_ref:
-        description: 'Ref of x402-foundation/x402 to test against'
-        required: false
-        default: 'main'
 
 concurrency:
   group: conformance
@@ -38,231 +34,8 @@ concurrency:
 
 jobs:
   upstream-e2e:
-    name: upstream e2e (stellar, testnet)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-      - name: Check out the facilitator
-        uses: actions/checkout@v4
-        with:
-          path: facilitator
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install facilitator dependencies
-        working-directory: facilitator
-        run: npm ci
-
-      - name: Check out the x402 e2e suite
-        uses: actions/checkout@v4
-        with:
-          repository: x402-foundation/x402
-          ref: ${{ inputs.x402_ref || github.event.inputs.x402_ref || 'main' }}
-          path: x402
-
-      # Recorded so a failure can be attributed to an upstream change rather
-      # than guessed at. docs/UPSTREAM.md holds the last reviewed SHA.
-      - name: Record the upstream revision under test
-        id: upstream
-        working-directory: x402
-        run: |
-          SHA=$(git rev-parse HEAD)
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Testing against x402-foundation/x402 @ $SHA" >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      # setup.sh shells out to Go and uv for the non-TypeScript components. Go
-      # is preinstalled on the runner; uv is not.
-      - name: Install uv (needed by the harness setup for python components)
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      # The SDK monorepo has to be built before the harness, and upstream's own
-      # instructions do not say so. e2e/pnpm-workspace.yaml pulls in
-      # `../typescript/packages/*` as workspace packages, so `pnpm install`
-      # symlinks them — but nothing builds them, and every spawned server
-      # imports `@x402/<adapter>/dist/cjs/index.js`. Without this step each
-      # server dies at startup with MODULE_NOT_FOUND on a path inside
-      # `e2e/servers/typescript/node_modules/@x402/…`, which reads like a
-      # missing dependency and is really an unbuilt one.
-      #
-      # Everything is built rather than a filtered subset: servers/typescript
-      # declares a workspace dependency on all eighteen @x402/* packages and
-      # registers schemes for them at boot, so a filtered build just moves the
-      # same failure to whichever package the filter missed.
-      - name: Build the @x402/* workspace packages
-        working-directory: x402/typescript
-        run: |
-          pnpm install
-          pnpm build
-
-      - name: Install the e2e harness
-        working-directory: x402/e2e
-        run: pnpm install
-
-      # Split from install, and allowed to fail, because setup.sh builds all
-      # fifteen upstream components and exits non-zero if any one of them fails
-      # — including components on no Stellar code path. On 2026-08-12 a broken
-      # `server/typescript/http/next` build ended this job before a single
-      # scenario ran. Which failures actually matter is decided in the next
-      # step, not by setup.sh's exit code.
-      #
-      # -v because setup.sh swallows all build output without it, and a failure
-      # you cannot read is a failure you cannot report upstream.
-      - name: Build the e2e components
-        id: setup
-        working-directory: x402/e2e
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          ./setup.sh -v 2>&1 | tee "$GITHUB_WORKSPACE/setup-output.txt"
-
-      # Drops components whose build failed, and fails outright if that would
-      # leave nothing to run or if our own facilitator is the thing that broke.
-      - name: Select the components that built
-        id: select
-        run: |
-          node facilitator/scripts/select-conformance-components.mjs \
-            --e2e-dir="$GITHUB_WORKSPACE/x402/e2e" \
-            --setup-log="$GITHUB_WORKSPACE/setup-output.txt" \
-            --family=stellar \
-            --github-output | tee "$GITHUB_WORKSPACE/component-selection.txt"
-
-      # The upstream directory is gitignored, which is the documented place for
-      # a facilitator whose implementation does not live in that repository.
-      - name: Install our facilitator as an external proxy
-        run: |
-          mkdir -p x402/e2e/facilitators/external-proxies/accensa
-          cp facilitator/e2e/accensa-proxy/run.sh \
-             facilitator/e2e/accensa-proxy/test.config.json \
-             x402/e2e/facilitators/external-proxies/accensa/
-          chmod +x x402/e2e/facilitators/external-proxies/accensa/run.sh
-
-      # Fresh accounts per run rather than repository secrets. Three funded
-      # testnet keys stored in CI configuration forever, rotated by nobody, is a
-      # worse arrangement than generating them for the ninety seconds they are
-      # needed. There is deliberately no pubnet path here.
-      - name: Generate and fund testnet accounts
-        working-directory: facilitator
-        run: node scripts/fund-testnet-accounts.mjs --github-env
-
-      - name: Write the harness environment
-        working-directory: x402/e2e
-        run: |
-          {
-            echo "CLIENT_STELLAR_PRIVATE_KEY=$CLIENT_STELLAR_PRIVATE_KEY"
-            echo "SERVER_STELLAR_ADDRESS=$SERVER_STELLAR_ADDRESS"
-            echo "FACILITATOR_STELLAR_PRIVATE_KEY=$FACILITATOR_STELLAR_PRIVATE_KEY"
-            echo "FACILITATOR_SECRET=$FACILITATOR_SECRET"
-            # Unfunded throwaways for families this run does not exercise. The
-            # harness's TypeScript client constructs EVM and SVM signers before
-            # any family filter applies, so a Stellar-only run still needs them.
-            echo "CLIENT_EVM_PRIVATE_KEY=$CLIENT_EVM_PRIVATE_KEY"
-            echo "CLIENT_SVM_PRIVATE_KEY=$CLIENT_SVM_PRIVATE_KEY"
-            echo "ACCENSA_FACILITATOR_DIR=$GITHUB_WORKSPACE/facilitator"
-          } > .env
-          # Prove the file was written without printing key material.
-          echo "wrote $(wc -l < .env) variables"
-
-      # The $0.001 route is priced in USDC, not XLM, so friendbot funding alone
-      # leaves the payer with no trustline and no balance and every scenario
-      # dies in simulation with Error(Contract, #13). Trustlines are free and
-      # created here; the balance needs a pre-funded treasury, because nobody
-      # can mint Circle's testnet USDC on demand.
-      #
-      # TESTNET_USDC_TREASURY_SECRET is a TESTNET-ONLY key. There is no pubnet
-      # path in that script and no pubnet secret is available to this job.
-      - name: Give the payer and payee testnet USDC
-        id: usdc
-        working-directory: facilitator
-        env:
-          TESTNET_USDC_TREASURY_SECRET: ${{ secrets.TESTNET_USDC_TREASURY_SECRET }}
-        run: node scripts/prepare-testnet-usdc.mjs --github-output
-
-      - name: Run the upstream suite against this facilitator
-        id: run
-        working-directory: x402/e2e
-        # Skipped, rather than run and failed, when the payer cannot hold the
-        # asset: that is a missing prerequisite on our side, and reporting it as
-        # a conformance failure would misattribute it to the service.
-        if: steps.usdc.outputs.usdc_ready == 'true'
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          # --facilitators=accensa matters. Without it the harness also starts
-          # its own reference facilitators, and a failure in one of those aborts
-          # the run before ours is ever exercised — which is what happened on the
-          # first run of this job, and is a fact about the harness rather than
-          # evidence about this service.
-          pnpm test --testnet --families=stellar --facilitators=accensa \
-            --servers="${{ steps.select.outputs.servers }}" \
-            --clients="${{ steps.select.outputs.clients }}" \
-            --min -v 2>&1 \
-            | tee ../../conformance-output.txt
-
-      - name: Summarise
-        if: always()
-        run: |
-          {
-            echo "## Upstream conformance run"
-            echo
-            echo "- upstream: \`x402-foundation/x402@${{ steps.upstream.outputs.sha }}\`"
-            echo "- facilitator: \`${{ github.sha }}\`"
-            echo "- family: stellar · network: testnet · scheme: exact"
-            echo "- servers: \`${{ steps.select.outputs.servers || '(selection did not run)' }}\`"
-            echo "- clients: \`${{ steps.select.outputs.clients || '(selection did not run)' }}\`"
-            echo "- result: **${{ steps.run.outcome == 'skipped' && 'not attempted' || steps.run.outcome }}**"
-            echo
-            if [ "${{ steps.usdc.outputs.usdc_ready }}" != "true" ]; then
-              echo "> ⛔ **The suite was not run.** The payer could not be given the USDC the"
-              echo "> \`/exact/stellar\` route is priced in:"
-              echo ">"
-              echo "> ${{ steps.usdc.outputs.usdc_reason }}"
-              echo ">"
-              echo "> This is a missing prerequisite on our side, not a conformance result."
-              echo
-            fi
-            # Exclusions are reported at the top rather than buried in a log.
-            # A conformance run that quietly tested less than it claims to is
-            # the exact failure this job exists to avoid.
-            if [ "${{ steps.select.outputs.excluded_count || 0 }}" -gt 0 ]; then
-              echo "> ⚠️ **${{ steps.select.outputs.excluded_count }} upstream component(s) excluded — build failed in the harness, not on our side:**"
-              echo "> \`${{ steps.select.outputs.excluded }}\`"
-              echo ">"
-              echo "> See the \`conformance-output\` artifact for the build errors, and"
-              echo "> \`docs/CONFORMANCE.md\` for whether it has been filed upstream."
-              echo
-            fi
-            echo '```'
-            tail -60 conformance-output.txt 2>/dev/null || echo "(no output captured)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish the full output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: conformance-output
-          # The build log is part of the evidence, not debris: it is where an
-          # excluded component's reason actually lives.
-          path: |
-            conformance-output.txt
-            setup-output.txt
-            component-selection.txt
-          if-no-files-found: warn
-          retention-days: 90
-
-      # Failing loudly is the point. A conformance job that is allowed to go
-      # quietly amber is the same as not running it — but the failure lands
-      # here, after the artifact is published, so a failed run is still
-      # diagnosable rather than just red.
-      - name: Fail if the suite failed
-        if: steps.run.outcome == 'failure'
-        run: |
-          echo "::error::The upstream e2e suite did not pass. See the conformance-output artifact."
-          exit 1
+    uses: ./.github/workflows/conformance-run.yml
+    with:
+      # Empty on schedule and push events, where no input was supplied.
+      x402_ref: ${{ inputs.x402_ref || 'main' }}
+    secrets: inherit

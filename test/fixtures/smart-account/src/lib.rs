@@ -139,12 +139,7 @@ impl CustomAccountInterface for SmartAccountContract {
                     if c.fn_name == TRANSFER_FN {
                         // 'amount' is the third argument of the standard
                         // token transfer interface (from, to, amount).
-                        let amount: i128 = c
-                            .args
-                            .get(2)
-                            .unwrap()
-                            .try_into_val(&env)
-                            .unwrap();
+                        let amount: i128 = c.args.get(2).unwrap().try_into_val(&env).unwrap();
                         if amount < 0 {
                             return Err(SmartAccountError::NegativeAmount);
                         }

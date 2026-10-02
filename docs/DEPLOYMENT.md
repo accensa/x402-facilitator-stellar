@@ -134,6 +134,8 @@ keeps open-mode callers out of each other's buckets.
 | `STELLAR_RPC_URL_PUBNET` | Yes (if pubnet) | A provider URL is required for pubnet (see RPC Provider Decision). |
 | `MAX_TX_FEE_STROOPS` | No | Fee ceiling per settlement on testnet (default `50000`). |
 | `MAX_TX_FEE_STROOPS_PUBNET`| No | Fee ceiling per settlement on pubnet (default `50000`). |
+| `HORIZON_URL` | No | Horizon base URL for `/fee_stats` dynamic fee estimation on testnet (default `https://horizon-testnet.stellar.org`). Stats are cached for 5s; estimates are clamped to `MAX_TX_FEE_STROOPS`. |
+| `HORIZON_URL_PUBNET` | No | Same, for pubnet (default `https://horizon.stellar.org`). |
 | `FACILITATOR_API_KEYS` | No | Comma-separated API keys. Unset means open (correct for free testnet). |
 | `ENABLE_PUBNET` | No | Set to `true` to enable pubnet. |
 | `FACILITATOR_SECRET_PUBNET`| Yes (if pubnet) | `S…` secret for the pubnet signer. |
@@ -368,6 +370,12 @@ npm run db:migrate
 # Or in a Docker entrypoint:
 node scripts/db-migrate.js up && node src/server.js
 ```
+
+**What the image ships:** `scripts/` and `migrations/` are copied into the
+image at the same paths as the checkout, so the entrypoint above works as
+printed (#211). `scripts/db-migrate.js` resolves `../migrations` relative to its
+own location and applies the `.js` files there; the legacy `.sql` files are
+shipped as well, for the `psql` path below.
 
 **For databases that already have the original SQL tables:**
 
