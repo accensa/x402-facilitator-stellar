@@ -16,6 +16,8 @@
  *   x402_signer_inflight{network,signer}
  *   x402_dlq_depth{status} - dead-letter queue depth; alert if pending+exhausted
  *     exceeds DLQ_ALERT_THRESHOLD (see src/dlq/worker.js)
+ *   x402_catalog_cache_lookups_total{tier,outcome} - catalog search cache hits,
+ *     misses and errors per tier (see src/catalog/cache.js, #392)
  */
 
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
@@ -192,6 +194,11 @@ export function createMetrics() {
     'Dead-letter queue depth by status (pending, exhausted). Alert when pending+exhausted exceeds DLQ_ALERT_THRESHOLD.',
     ['status'],
   );
+  const catalogCache = new Counter(
+    'x402_catalog_cache_lookups_total',
+    'Catalog search cache lookups by tier (l1|l2) and outcome (hit|miss|error). Hit ratio per tier is the Postgres-CPU signal (#392); a rising l2 error rate means Redis is timing out, not that the cache is cold.',
+    ['tier', 'outcome'],
+  );
 
   const activeVerifications = new Gauge(
     'active_verifications',
@@ -239,6 +246,12 @@ export function createMetrics() {
     setSignerInflight: ({ network, signer, value }) =>
       signerInflight.set({ network, signer }, value),
     setDlqDepth: ({ status, value }) => dlqDepth.set({ status }, value),
+    /**
+     * Records one catalog-cache lookup. Sink for `CatalogSearchCache`'s
+     * `onLookup` option; see src/catalog/cache.js.
+     */
+    incCatalogCacheLookup: ({ tier, outcome }) =>
+      catalogCache.inc({ tier: tier ?? 'unknown', outcome: outcome ?? 'unknown' }),
     incActiveVerifications: () => activeVerifications.inc({}),
     decActiveVerifications: () => activeVerifications.dec({}),
 
@@ -257,6 +270,7 @@ export function createMetrics() {
         rpcRetries,
         signerInflight,
         dlqDepth,
+        catalogCache,
         activeVerifications,
         projectionLag,
         projectionEventsProcessed,

@@ -99,22 +99,40 @@ export async function serve({
     { distributedLock, webhooks, ...extras },
   );
 
-  // Fastify's listen resolves with the bound address once the server is up.
-  await app.listen({ port: 0, host: '127.0.0.1' });
-  const base = `http://127.0.0.1:${app.server.address().port}`;
+  await app.ready();
+
+  const adapt = res => ({
+    status: res.statusCode,
+    headers: { get: name => res.headers[name.toLowerCase()] ?? null },
+    json: async () => res.json(),
+    text: async () => res.payload,
+  });
 
   return {
-    base,
     app,
-    close: () => app.close(),
-    get: (path, headers = {}) => fetch(`${base}${path}`, { headers }),
-    post: (path, body, headers = {}) =>
-      fetch(`${base}${path}`, {
+    close: async () => app.close(),
+    get: async (path, headers = {}) => {
+      const res = await app.inject({ method: 'GET', url: path, headers });
+      return adapt(res);
+    },
+    post: async (path, body, headers = {}) => {
+      const res = await app.inject({
         method: 'POST',
+        url: path,
         headers: { 'content-type': 'application/json', ...headers },
-        body: typeof body === 'string' ? body : JSON.stringify(body),
-      }),
-    request: (path, options = {}) => fetch(`${base}${path}`, options),
+        payload: typeof body === 'string' ? body : JSON.stringify(body),
+      });
+      return adapt(res);
+    },
+    request: async (path, options = {}) => {
+      const res = await app.inject({
+        method: options.method || 'GET',
+        url: path,
+        headers: options.headers || {},
+        payload: options.body,
+      });
+      return adapt(res);
+    },
   };
 }
 

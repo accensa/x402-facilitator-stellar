@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8').replace(/\r/g, '');
 const deployment = readFileSync(join(ROOT, 'docs', 'DEPLOYMENT.md'), 'utf8');
 
 /**
@@ -28,6 +28,7 @@ function copiesDir(dir) {
     if (!instruction) return false;
     const args = instruction[1]
       .split(/\s+/)
+      .map(token => token.trim())
       .filter(token => token.length > 0 && !token.startsWith('--'));
     if (args.length !== 2) return false;
     const [source, destination] = args;

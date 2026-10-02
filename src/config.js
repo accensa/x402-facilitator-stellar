@@ -101,6 +101,7 @@ export function resolveConfig(env = process.env) {
       secret: testnetSecrets[0],
       feeBumpSecret: testnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL,
+      horizonUrl: env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS, {
         name: 'MAX_TX_FEE_STROOPS',
         defaultValue: 50_000,
@@ -205,6 +206,7 @@ export function resolveConfig(env = process.env) {
       secret: pubnetSecrets[0],
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
+      horizonUrl: env.HORIZON_URL_PUBNET || 'https://horizon.stellar.org',
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS_PUBNET, {
         name: 'MAX_TX_FEE_STROOPS_PUBNET',
         defaultValue: 50_000,
@@ -324,6 +326,20 @@ export function resolveConfig(env = process.env) {
     /** Optional shared stores. Unset means in-memory, single-instance. */
     redisUrl: env.REDIS_URL || null,
     databaseUrl: env.DATABASE_URL || null,
+
+    /**
+     * Two-tier catalog search cache (#392). Off by default so the behaviour
+     * change is opt-in: with it on, a discovery search can be answered from
+     * this process's L1 for up to CATALOG_CACHE_L1_TTL_MS, and from a shared
+     * L2 for up to 60s. Freshness is still guaranteed by the catalog write
+     * version, which is part of the cache key — the TTLs only bound memory and
+     * bound how long a *missed* cross-node invalidation can linger.
+     *
+     * Set CATALOG_SEARCH_CACHE=1 to enable. It implies a shared L2 only when
+     * REDIS_URL is also set; without it this is a per-process L1, which is
+     * still the majority of the win because discovery traffic is repetitive.
+     */
+    catalogSearchCache: env.CATALOG_SEARCH_CACHE === '1' || env.CATALOG_SEARCH_CACHE === 'true',
 
     /**
      * CQRS read replica (#121): when DATABASE_URL_REPLICA is set, settlement

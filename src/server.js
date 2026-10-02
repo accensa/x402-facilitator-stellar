@@ -23,6 +23,7 @@ import { CrdtRateLimitStore } from './crdt-rate-limit-store.js';
 import { createDistributedLock } from './distributed-lock.js';
 import { buildIdempotencyStore } from './idempotency.js';
 import { buildCatalogStore } from './catalog/postgres.js';
+import { withSearchCache } from './catalog/cache.js';
 import { createWebhookDispatcher } from './webhooks/dispatcher.js';
 import { FailoverHealthChecker } from './failover-health.js';
 import { initTracing } from './tracing.js';
@@ -145,10 +146,26 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
   });
   rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
 }
-const catalog = buildCatalogStore(config, {
+const catalogStore = buildCatalogStore(config, {
   log: msg => console.warn(`  ${msg}`),
   pool: vaultDatabase?.pool,
 });
+// Two-tier read-through cache for discovery searches (#392). Absent config
+// means no L2, and the wrapper then behaves as a per-process L1 — still a win
+// for the repeat-query traffic that dominates discovery, just not shared.
+const catalog = config.catalogSearchCache
+  ? withSearchCache(catalogStore, {
+      redisUrl: config.redisUrl,
+      warn: msg => console.warn(msg),
+    })
+  : catalogStore;
+if (config.catalogSearchCache) {
+  // Fire-and-forget: a failed subscribe only costs cross-node freshness, which
+  // the version check already guarantees.
+  catalog.searchCache
+    .start()
+    .catch(err => console.warn(`[CatalogCache] start failed: ${err.message}`));
+}
 // Off the hot path: a periodic sweep physically removes expired provisional
 // (verify-only) listings so they do not accumulate forever (#140).
 const catalogPruneTimer =
@@ -420,6 +437,11 @@ async function shutdown(signal) {
       failoverHealth?.stop();
 
       if (catalogPruneTimer) globalThis.clearInterval(catalogPruneTimer);
+      // Release the Redis Pub/Sub subscriber opened at boot (#392). It is a
+      // live connection, so leaving it open outlives the drain and holds the
+      // event loop; optional because the subscriber only exists when the cache
+      // is enabled.
+      await catalog.searchCache?.stop?.().catch(() => {});
 
       await rateLimiter?.close?.().catch(() => {});
 

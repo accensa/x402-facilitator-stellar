@@ -65,6 +65,8 @@ const RETRYABLE = new Set([
   'UND_ERR_SOCKET',
 ]);
 
+const RPC_RETRY_HANDLE = Symbol.for('x402.rpc-retry.handle');
+
 /**
  * Thrown without dialling when a host's breaker is open. Carries a distinct
  * code so route handlers can return a specific reason code — a caller must be
@@ -213,6 +215,11 @@ export function installRpcRetry({
   now = Date.now,
   sleep = ms => new Promise(r => setTimeout(r, ms)),
 } = {}) {
+  const existingHandle = globalThis.fetch?.[RPC_RETRY_HANDLE];
+  if (existingHandle) {
+    return existingHandle;
+  }
+
   const builtinFetch = globalThis.fetch;
   const effectiveForceIpv4 = rpcForceIpv4 ?? forceIpv4 ?? process.env.RPC_FORCE_IPV4 !== 'false';
 
@@ -391,5 +398,7 @@ export function installRpcRetry({
     return out;
   }
 
-  return { getBreakerStates };
+  const handle = { getBreakerStates };
+  globalThis.fetch[RPC_RETRY_HANDLE] = handle;
+  return handle;
 }

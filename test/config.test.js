@@ -26,14 +26,20 @@ import { resolveConfig, TESTNET, PUBNET } from '../src/config.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Minimal valid env object for testnet-only configurations.
- * Every test that needs a valid base extends this rather than repeating the
- * mandatory `FACILITATOR_SECRET` key.
+ * Minimal valid env object for testnet-only configurations, shared by every
+ * test in this file (~90 call sites). Frozen rather than reconstructed per
+ * call (#337): `resolveConfig` only reads from its `env` argument, so the
+ * same object can be reused everywhere it would otherwise have been spread
+ * or passed as-is, cutting one object allocation per test. Freezing also
+ * turns an accidental write through a shared reference into an immediate
+ * `TypeError` instead of silent cross-test state leakage (#338).
  *
- * @returns {Record<string, string>} A fresh copy of the minimal env.
+ * @returns {Readonly<Record<string, string>>} The shared minimal env.
  */
+const BASE_ENV = Object.freeze({ FACILITATOR_SECRET: 'S123' });
+
 function baseEnv() {
-  return { FACILITATOR_SECRET: 'S123' };
+  return BASE_ENV;
 }
 
 /**
@@ -932,7 +938,9 @@ test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE default', () => {
   assert.strictEqual(config.requireDurableSettlementStore, false);
 });
 
-// Edge case tests
+// ---------------------------------------------------------------------------
+// Edge cases: empty / whitespace-only / malformed list values
+// ---------------------------------------------------------------------------
 
 test('resolveConfig: handles empty string for FACILITATOR_API_KEYS', () => {
   const env = {
