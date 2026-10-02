@@ -168,6 +168,10 @@ export async function createApp(
     done?.();
   });
 
+  // Audit records — who did what (settlements, auth failures, catalog writes) —
+  // are a different artifact from the request log: every line carries a
+  // `channel: "audit"` marker and goes to stdout, plus AUDIT_LOG_FILE when one
+  // is configured. See src/audit.js and docs/AUDIT.md.
   const audit = extras.audit ?? createAuditLogger();
 
   const readiness =
@@ -179,6 +183,9 @@ export async function createApp(
         })
       : null);
 
+  // Decorated rather than kept local: server.js reads app.readiness during
+  // graceful shutdown to flip the probe into its shutting-down state, so the
+  // load balancer stops sending new work before the drain starts.
   app.decorate('readiness', readiness);
 
   app.addHook('onRequest', async (req, reply) => {
@@ -308,6 +315,15 @@ export async function createApp(
   // Core and Operational Routes
   // ---------------------------------------------------------------------------
 
+  /**
+   * GET /healthz — liveness, and the one probe that never fails.
+   *
+   * It answers as long as the event loop is serving requests, which is exactly
+   * what an orchestrator needs to decide "restart this container" (see the
+   * Dockerfile HEALTHCHECK): a dependency outage must not be reported here, or a
+   * restart loop would make someone else's RPC outage worse. Dependency state
+   * belongs on /readyz below.
+   */
   app.get('/healthz', async () => ({ ok: true }));
 
   app.get('/readyz', async (_req, reply) => {
@@ -335,6 +351,12 @@ export async function createApp(
 
   app.get('/supported', { onRequest: cors('public') }, async () => facilitator.getSupported());
 
+  /**
+   * GET /usage — the caller's own meter: spend, rate-limit budgets, remaining
+   * fee allowance. Read-only and never rate limited (it reads the meter rather
+   * than consuming a bucket), but it is the one route that refuses open mode
+   * (requireApiKeyStrict) because an unmetered caller has no meter to read.
+   */
   app.get('/usage', { preHandler: requireApiKeyStrict }, async req => {
     annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/usage' });
     return rateLimiter.getUsage(req.keyId);
@@ -461,6 +483,33 @@ export async function createApp(
     },
   );
 
+  /**
+   * POST /settle — settle a verified payment. This is the money-moving route,
+   * and the sequence below is part of its contract rather than an
+   * implementation detail:
+   *
+   *   1. the body is validated first (readPaymentBody), then the rate-limit check
+   *      runs against the settle bucket — note this is the reverse of /verify,
+   *      where the limiter gate is checked before the body is even shaped;
+   *   2. the settlement record is consulted next: a repeat of a *settled* key
+   *      replays the recorded response, and a *failed* key is only re-attempted
+   *      when its error_reason is retryable — a non-retryable failure stays
+   *      failed instead of letting a caller burn fees retrying it;
+   *   3. the request is recorded as 'submitted' BEFORE the scheme is called, so
+   *      a crash mid-flight leaves a traceable record instead of silence;
+   *   4. an idempotency-store replay short-circuits the scheme call entirely —
+   *      the key is the caller's when supplied and derived from the body
+   *      otherwise;
+   *   5. a distributed lock serialises concurrent settlement of the same payment
+   *      across pods (#116): the lock key is the payment, so unrelated payments
+   *      never contend;
+   *   6. the scheme call, the terminal state transition and the webhook enqueue
+   *      share one transaction where the store supports it (settleAndEnqueue);
+   *      where it does not, the event is handed to the dispatcher afterwards;
+   *   7. a timeout is reported as `submitted_outcome_unknown` when the request
+   *      had already reached the network, and `request_timeout` when it had not,
+   *      because only the caller can decide whether to reconcile or retry.
+   */
   app.post(
     '/settle',
     {
