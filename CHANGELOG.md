@@ -80,6 +80,13 @@ pinned.
 
 ### Fixed
 
+- Dependency advisories published 2026-10-02 cleared: `fastify` 5.12.5 (five
+  high-severity issues, including an authentication bypass through malformed
+  URLs), `@grpc/grpc-js` 1.14.5 (error-message leakage), and `axios` 1.20.0
+  pinned through a top-level `overrides` because `@stellar/stellar-sdk` pins it
+  exactly. `@stellar/stellar-sdk` moves to 16.3.1 inside the existing
+  `^16.2.0` range, so no direct dependency requirement changes.
+  `npm audit --audit-level=high` now reports 0 vulnerabilities.
 - Catalog descriptions are truncated at 200 characters without splitting a
   surrogate pair (#218). A description whose 200th UTF-16 code unit was the high
   half of an astral character (an emoji in a listing blurb) previously reached
