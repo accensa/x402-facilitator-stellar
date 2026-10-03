@@ -172,16 +172,20 @@ test('Description truncation is surrogate-safe (#218)', async t => {
     const description = 'A'.repeat(200);
     const res = validateForCatalog(payloadWithDescription(description), baseReq);
     assert.equal(res.resource.description, description);
-    assert.ok(
-      !res.softDrops.includes('description_truncated'),
-      'nothing was truncated, so nothing to flag',
-    );
+    assert.deepEqual(res.softDrops, [], 'nothing was dropped, so nothing to flag as a drop');
+    assert.deepEqual(res.truncations, [], 'nothing was shortened either');
   });
 
   await t.test('an ASCII description one unit past the limit truncates exactly at it', () => {
     const res = validateForCatalog(payloadWithDescription('A'.repeat(201)), baseReq);
     assert.equal(res.resource.description.length, 200);
-    assert.ok(res.softDrops.includes('description_truncated'));
+    // Truncation is reported as a truncation, not a drop (#219): the field
+    // landed, shortened.
+    assert.ok(res.truncations.includes('description'));
+    assert.ok(
+      !res.softDrops.includes('description'),
+      'a field that is stored must not be reported as dropped',
+    );
   });
 
   await t.test('a cut between a surrogate pair drops the split character whole', () => {
@@ -405,30 +409,100 @@ test('Hostile Inputs Validation', async t => {
     },
   );
 
-  await t.test('Soft drops script tags from description and truncates to 200 chars', () => {
-    // `<script>` injection in description is stripped (not hard-dropped) so
-    // the resource remains discoverable without the dangerous content.
-    // The 200-char cap prevents description-flooding that would push other
-    // entries out of ranked search results.
+  await t.test('Refuses a description containing markup rather than sanitizing it (#217)', () => {
+    // The old behaviour stripped tags with `/<[^>]*>?/gm` and kept whatever
+    // survived. That is not a boundary: sanitizing by regex cannot be made
+    // safe against nested tags (`<scr<script>ipt>`), entity-encoded markup
+    // (`&lt;script&gt;`), or a truncated tag with no closing `>` — which the
+    // optional-tail alternative silently swallowed. The policy is refusal:
+    // the field is dropped, the resource still lands.
     const rawDescription = 'Hello <script>alert(1)</script> world! ' + 'A'.repeat(300);
     const { paymentPayload } = makeFullPayload({}, { description: rawDescription });
     const res = validate(paymentPayload, baseReq);
 
-    assert.equal(res.hardDrop, false);
+    assert.equal(res.hardDrop, false, 'markup must not cost the seller the listing');
     assert.ok(
-      res.softDrops.includes('description_truncated'),
-      `expected 'description_truncated' in softDrops, got: ${JSON.stringify(res.softDrops)}`,
-    );
-    assert.ok(
-      !res.resource.description.includes('<script>'),
-      'script tags must be stripped from description',
+      res.softDrops.includes('description'),
+      `expected 'description' in softDrops, got: ${JSON.stringify(res.softDrops)}`,
     );
     assert.equal(
-      res.resource.description.length,
-      200,
-      'description must be truncated to exactly 200 characters',
+      res.resource.description,
+      undefined,
+      'a refused description must not be stored at all — not even sanitized',
+    );
+    // extractDiscoveryInfo populates `description` from the same source field,
+    // so this pins that the refusal deletes that copy too. Without the delete
+    // the raw markup is stored via the copy validatePolicy never wrote.
+    assert.ok(
+      !JSON.stringify(res.resource).includes('onerror') &&
+        !JSON.stringify(res.resource).includes('<script>'),
+      'no form of the refused markup may survive anywhere in the stored resource',
     );
   });
+
+  await t.test('Refuses entity-encoded and nested-tag markup (#217)', () => {
+    for (const rawDescription of [
+      '&lt;script&gt;alert(1)&lt;/script&gt;',
+      '&#' + '60;script&#62;alert(1)',
+      '&#x3c;script&#x3e;alert(1)',
+      '&#X3C;script&#X3E;alert(1)', // uppercase hex prefix is equally valid HTML
+      '&#0060;script&#0062;alert(1)', // zero-padded decimal
+      '<scr<script>ipt>alert(1)</scr</script>ipt>',
+      'Tom & Jerry <img src=x onerror=alert(1)>',
+    ]) {
+      const { paymentPayload } = makeFullPayload({}, { description: rawDescription });
+      const res = validate(paymentPayload, baseReq);
+      assert.equal(res.hardDrop, false);
+      assert.ok(
+        res.softDrops.includes('description'),
+        `expected the markup form to be refused: ${rawDescription}`,
+      );
+      assert.equal(res.resource.description, undefined);
+    }
+  });
+
+  await t.test('Plain prose with a bare ampersand is not markup (#217)', () => {
+    // The refusal must not be so broad that ordinary text is rejected: "&" is
+    // only markup when it introduces an entity the catalog would be storing
+    // a decoded form of.
+    const { paymentPayload } = makeFullPayload(
+      {},
+      {
+        description: 'Weather & tides for the Bay Area',
+      },
+    );
+    const res = validate(paymentPayload, baseReq);
+    assert.equal(res.hardDrop, false);
+    assert.deepEqual(res.softDrops, []);
+    assert.equal(res.resource.description, 'Weather & tides for the Bay Area');
+  });
+
+  await t.test(
+    'Truncates an oversized plain description and reports it as a truncation (#219)',
+    () => {
+      // The 200-char cap prevents description-flooding that would push other
+      // entries out of ranked search results. Shortening is not discarding: the
+      // field lands, so it is reported in `truncations`, never in `softDrops`.
+      const { paymentPayload } = makeFullPayload({}, { description: 'A'.repeat(300) });
+      const res = validate(paymentPayload, baseReq);
+
+      assert.equal(res.hardDrop, false);
+      assert.deepEqual(
+        res.softDrops,
+        [],
+        `a truncated field must not be reported as dropped: ${JSON.stringify(res.softDrops)}`,
+      );
+      assert.ok(
+        res.truncations.includes('description'),
+        `expected 'description' in truncations, got: ${JSON.stringify(res.truncations)}`,
+      );
+      assert.equal(
+        res.resource.description.length,
+        200,
+        'description must be truncated to exactly 200 characters',
+      );
+    },
+  );
 
   await t.test('Soft drops serviceName that exceeds the 32-character maximum', () => {
     // An oversized serviceName is dropped (set to undefined) rather than

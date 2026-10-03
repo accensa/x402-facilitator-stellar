@@ -1,6 +1,10 @@
 import Fastify from 'fastify';
 import compress from '@fastify/compress';
 import { validateForCatalog } from './catalog/validation.js';
+import {
+  encodeExtensionResponses,
+  MAX_EXTENSION_RESPONSES_HEADER_BYTES,
+} from './catalog/extension-responses.js';
 import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
 import { createRequestLog } from './log.js';
@@ -206,6 +210,30 @@ export async function createApp(
   const { requireApiKey, requireApiKeyStrict } = createAuthMiddleware({ config, audit });
 
   /**
+   * Writes the bounded EXTENSION-RESPONSES header (#202).
+   *
+   * Stays lazy (#368): the envelope is still only encoded when Fastify
+   * serializes the header, so the common case — a caller that never reads the
+   * header — still pays nothing. For an envelope that fits, the bytes are
+   * identical to the previous eager encoding; the bounding only engages when
+   * the value would have exceeded MAX_EXTENSION_RESPONSES_HEADER_BYTES, which
+   * is the case that used to get the whole response killed by a proxy.
+   */
+  function writeExtensionResponses(reply, outcome) {
+    reply.header('EXTENSION-RESPONSES', {
+      toString() {
+        const { header, omitted } = encodeExtensionResponses(outcome);
+        if (omitted) {
+          console.warn(
+            `[Catalog] EXTENSION-RESPONSES exceeded ${MAX_EXTENSION_RESPONSES_HEADER_BYTES} bytes; omitted: ${omitted}`,
+          );
+        }
+        return header;
+      },
+    });
+  }
+
+  /**
    * Catalogs a resource declared in a payment, off the hot path (#140, #146).
    */
   async function processCataloging(req, body, reply, source = 'verify') {
@@ -247,6 +275,22 @@ export async function createApp(
             outcome.code = 'catalog_success';
           }
 
+          // Truncations are reported alongside drops but never conflated with
+          // them (#219): the field landed, shortened. A seller reading
+          // "dropped: description" would go looking for a field that is still
+          // there.
+          if (validation.truncations.length > 0) {
+            if (outcome.status === 'landed') {
+              outcome.status = 'partially landed';
+              outcome.code = 'catalog_partial';
+              outcome.reason = `Truncated fields: ${validation.truncations.join(', ')}`;
+            }
+            outcome.truncated = [...validation.truncations];
+            console.warn(
+              `[Catalog] Truncated fields for ${validation.resource.url}: ${validation.truncations.join(', ')}`,
+            );
+          }
+
           await rateLimiter.recordCatalog(req);
 
           Promise.resolve().then(async () => {
@@ -275,29 +319,15 @@ export async function createApp(
         }
       }
 
-      reply.header(
-        'EXTENSION-RESPONSES',
-        // Encoded lazily (#368): the base64 EXTENSION-RESPONSES value was
-        // previously built eagerly on every catalogable verify/settle — a JSON
-        // stringify plus a Buffer copy plus the 4/3x base64 expansion — even
-        // though most callers never read the header. Computing it from the
-        // settled `outcome` only when Fastify serializes the headers keeps the
-        // hot path allocation-free for the common case while producing exactly
-        // the same bytes for callers that do read it (asserted in app.test.js,
-        // 'the lazy EXTENSION-RESPONSES encoding is byte-identical').
-        {
-          toString() {
-            return Buffer.from(JSON.stringify({ bazaar: outcome })).toString('base64');
-          },
-        },
-      );
+      // Encoded lazily (#368) and bounded (#202) — see
+      // writeExtensionResponses. For an envelope that fits, the value is
+      // byte-identical to the previous eager encoding (asserted in app.test.js,
+      // 'the lazy EXTENSION-RESPONSES encoding is byte-identical').
+      writeExtensionResponses(reply, outcome);
     } catch (err) {
       console.error('[Catalog] Unhandled error during processCataloging:', err);
       try {
-        reply.header(
-          'EXTENSION-RESPONSES',
-          Buffer.from(JSON.stringify({ bazaar: { status: 'not attempted' } })).toString('base64'),
-        );
+        writeExtensionResponses(reply, { status: 'not attempted' });
       } catch (headerErr) {
         console.error('[Catalog] Failed to write EXTENSION-RESPONSES fallback:', headerErr);
       }
@@ -870,7 +900,14 @@ export async function createApp(
           tool_name: validation.resource.toolName ?? null,
           overwritten: Boolean(existing),
         });
-        return reply.send({ ok: true, resource: entry, softDrops: validation.softDrops });
+        return reply.send({
+          ok: true,
+          resource: entry,
+          softDrops: validation.softDrops,
+          // Reported separately from softDrops (#219) so a caller can tell a
+          // field that was discarded from one that was kept but shortened.
+          truncations: validation.truncations,
+        });
       } catch (err) {
         console.error(`[Catalog] manual upsert error: ${err.message}`);
         const code = err && err.code ? err.code : 'catalog_error';

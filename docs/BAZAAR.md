@@ -243,12 +243,76 @@ live listing:
 | `routeTemplate` | A wildcard or malformed-but-not-hostile template (e.g. the bare `*` the stock SDK registers by default). | Provide a concrete template with named parameters. |
 | `serviceName` | Invalid or oversized service name. | A short, plain-text name. |
 | `iconUrl` | Invalid or private-IP URL. | A public HTTPS icon URL. |
-| `description_truncated` | Description contained HTML or exceeded 200 characters. | Short, plain text. |
+| `description` | The description contained markup (a tag, or an entity-encoded one such as `&lt;script&gt;`). See [why refusal replaces sanitising](#why-a-description-with-markup-is-refused-not-sanitised). | Plain text, no HTML and no HTML entities. |
 | `tags_filtered` | Invalid or oversized tags were dropped. | Fewer, well-formed tags. |
+
+#### Why a description with markup is refused, not sanitised
+
+The catalog used to strip tags with a regex and keep what survived. That is a
+sanitiser, and a regex cannot be a security boundary:
+
+- `<scr<script>ipt>` strips to `<script>` — the filter manufactures the tag it
+  was meant to remove.
+- `&lt;script&gt;` is not matched at all, and is markup to every consumer that
+  entity-decodes.
+- `<img src=x onerror=alert(1)` with no closing `>` was swallowed silently by
+  the pattern's optional tail, so the seller was never told anything had been
+  removed.
+
+A description is prose. Refusing a value that needs angle brackets to say what
+it means is the only policy that holds, so the field is dropped and the rest of
+the listing still lands (`partially landed`). Plain prose is unaffected — a
+bare `&`, as in "Weather & tides", is not markup and is kept.
+
+### Truncated fields (reported separately from drops)
+
+A field the catalog **stored, shortened** is not a dropped field, and reporting
+it as one was wrong on the wire (#219): `reason` would read
+`Dropped fields: description_truncated`, sending a seller to look for a field
+that was still in the catalog — and naming a field that does not exist.
+
+Truncations travel in a separate `truncated` array on the envelope instead, and
+also leave the status at `partially landed`:
+
+```json
+{ "bazaar": { "status": "partially landed", "code": "catalog_partial",
+              "reason": "Truncated fields: description",
+              "truncated": ["description"] } }
+```
+
+| Field in `truncated` | What happened | Fix |
+|---|---|---|
+| `description` | Kept, but cut to the 200-character index limit. The cut never splits an astral character, so the stored value is always valid UTF-16. | Keep descriptions under 200 characters. |
+
+`POST /discovery/resources` reports both lists separately in its response body
+(`softDrops` and `truncations`).
 
 The codes above are extracted from `src/catalog/validation.js` and
 `src/app.js`, and `test/extension-responses-doc.test.js` fails if a code is
 added to the cataloging path without being documented here.
+
+### Header size
+
+The envelope is encoded into the `EXTENSION-RESPONSES` response header, which
+is bounded (#202). The value is base64 of the JSON, so it is 4/3 the size of
+the JSON plus the envelope, and every hop in the request path caps headers:
+nginx to 8 KiB by default, Envoy to 60 KiB, common HTTP/2 stacks to 16 KiB. A
+header over the cap does not arrive truncated — the proxy answers **502** or
+drops the connection, on the payment path, for a payment that has already
+settled. The buyer's money moves and the response explaining it never arrives.
+
+So the header is capped at **4096 bytes** and degrades in tiers rather than
+failing:
+
+| Tier | When | What the client receives |
+|---|---|---|
+| 1 | The envelope fits. | The envelope exactly as described above — byte-for-byte what an unbounded encoder would have produced. |
+| 2 | It does not fit. | The same envelope with `reason` removed and `"detail_omitted": true` added. |
+| 3 | It still does not fit (a non-`reason` field was enormous). | `{ "status": ..., "code": "extension_response_omitted", "detail_omitted": true }`. |
+
+The `status` is preserved in every tier: a client learning `rejected` without
+learning why is a far better outcome than a client learning nothing. Every
+degradation is logged server-side, so an operator can see that detail was shed.
 
 ## Search Quality & Evaluation History
 

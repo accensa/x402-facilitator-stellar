@@ -66,8 +66,16 @@ An auditor should attempt to break the following invariants:
 4. API keys cannot be bypassed or brute-forced via timing attacks.
 5. Catalog entries cannot contain cross-site scripting (XSS) payloads or path traversals.
 
+   XSS is handled by refusal, not sanitization: a `description` containing a tag
+   (or an entity-encoded one such as `&lt;script&gt;`) is dropped from the
+   listing rather than scrubbed, because a tag-stripping regex is not a boundary
+   — `<scr<script>ipt>` strips *to* `<script>`, and `&lt;script&gt;` is not
+   matched at all. See
+   [BAZAAR.md](./BAZAAR.md#why-a-description-with-markup-is-refused-not-sanitised).
+   `routeTemplate` traversal remains a hard drop.
+
 ## Known Issues and Accepted Risks
-- **Single Signer Contention:** Currently, only a single signer is used. Under high load, sequence number contention may occur. This is an accepted risk for this conformance spike.
+- **Single Signer Contention:** A single signer is a throughput ceiling, now quantified rather than described (#203): with an 8-deep sequence window and a 2500 ms round trip it settles at most 3.2/sec (192/min), and *more* offered concurrency past that point makes it worse, not better. The conservative fully-serialized assumption gives 0.4/sec. See [OPERATIONS.md](./OPERATIONS.md#where-a-single-signer-stops-keeping-up-203) and `npm run bench:signer`. This remains an accepted risk for the conformance spike; the pool sizing above it is unattempted without funded accounts.
 - **RPC Outage Dependency:** The service will fail if the upstream Stellar RPC goes down.
 - **Database Access:** Operators with physical access to the DB can view settlement history up to the retention limit.
 

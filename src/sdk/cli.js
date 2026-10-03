@@ -19,7 +19,13 @@ try {
   }
 
   for (const field of result.softDrops) {
-    console.warn(`Warning: ${field} will be dropped or sanitized by the catalog.`);
+    console.warn(`Warning: ${field} will be dropped by the catalog.`);
+  }
+  // Truncation is not a drop (#219): the field is stored, only shortened.
+  // Saying "will be dropped or sanitized" for both left the seller unable to
+  // tell which of their fields had actually been discarded.
+  for (const field of result.truncations ?? []) {
+    console.warn(`Warning: ${field} will be kept but shortened by the catalog.`);
   }
   for (const advisory of result.advisories) {
     console.warn(`Advisory: ${advisory}`);
