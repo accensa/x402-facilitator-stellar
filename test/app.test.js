@@ -137,7 +137,9 @@ describe('GET /supported', () => {
   test('stays open when API keys are configured', async () => {
     // A client has to read /supported before it has any relationship with us.
     // Putting it behind auth breaks discovery.
-    const app = await serve({ config: testConfig({ apiKeys: ['admin:s3cret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
       assert.equal((await app.get('/supported')).status, 200);
       assert.equal((await app.get('/healthz')).status, 200);
@@ -425,7 +427,7 @@ describe('POST /settle', () => {
     });
 
     const app = await serve({
-      config: testConfig({ apiKeys: ['custom_key:secret'] }),
+      config: testConfig({ apiKeys: ['custom_key:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       rateLimiter,
       facilitator: stubFacilitator({
         settle: async () => ({
@@ -437,10 +439,14 @@ describe('POST /settle', () => {
     });
 
     try {
-      let res = await app.post('/settle', VALID_BODY, { authorization: 'Bearer secret' });
+      let res = await app.post('/settle', VALID_BODY, {
+        authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
       assert.equal(res.status, 200);
 
-      res = await app.post('/settle', VALID_BODY, { authorization: 'Bearer secret' });
+      res = await app.post('/settle', VALID_BODY, {
+        authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
       assert.equal(res.status, 429);
       const json = await res.json();
       assert.equal(json.reason, 'fee_ceiling_exceeded');
@@ -577,9 +583,13 @@ describe('GET /usage', () => {
   });
 
   test('returns the calling key own usage', async () => {
-    const app = await serve({ config: testConfig({ apiKeys: ['admin:s3cret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
-      const res = await app.get('/usage', { authorization: 'Bearer s3cret' });
+      const res = await app.get('/usage', {
+        authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
       assert.equal(res.status, 200);
       const json = await res.json();
       // Scoped to the presented key, not to the whole instance. Key ids are
@@ -591,7 +601,9 @@ describe('GET /usage', () => {
   });
 
   test('is refused without a key when keys are configured', async () => {
-    const app = await serve({ config: testConfig({ apiKeys: ['admin:s3cret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
       assert.equal((await app.get('/usage')).status, 401);
     } finally {
@@ -732,12 +744,12 @@ describe('RateLimit-Remaining reflects the post-count state (issue #141)', () =>
       keys: {},
     });
     const app = await serve({
-      config: testConfig({ apiKeys: ['custom_key:secret'] }),
+      config: testConfig({ apiKeys: ['custom_key:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       rateLimiter,
       facilitator: stubFacilitator(),
     });
     try {
-      const headers = { authorization: 'Bearer secret' };
+      const headers = { authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz' };
       const remaining = [];
       for (let i = 0; i < 4; i += 1) {
         const res = await app.post('/verify', VALID_BODY, headers);
@@ -766,14 +778,14 @@ describe('RateLimit-Remaining reflects the post-count state (issue #141)', () =>
       keys: {},
     });
     const app = await serve({
-      config: testConfig({ apiKeys: ['custom_key:secret'] }),
+      config: testConfig({ apiKeys: ['custom_key:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       rateLimiter,
       facilitator: stubFacilitator({
         settle: async () => ({ success: true, transaction: 'tx', network: 'stellar:testnet' }),
       }),
     });
     try {
-      const headers = { authorization: 'Bearer secret' };
+      const headers = { authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz' };
       const remaining = [];
       for (let i = 0; i < 4; i += 1) {
         // Distinct bodies so each call is a genuine settlement, not an
@@ -849,7 +861,7 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
       }),
     });
     try {
-      const headers = { authorization: 'Bearer secret' };
+      const headers = { authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz' };
       // First a verify-only pass leaves a provisional listing.
       await app.post('/verify', CATALOGABLE_BODY, headers);
       await new Promise(r => setTimeout(r, 50));
@@ -882,7 +894,9 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
       }),
     });
     try {
-      await app.post('/settle', CATALOGABLE_BODY, { authorization: 'Bearer secret' });
+      await app.post('/settle', CATALOGABLE_BODY, {
+        authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
       await new Promise(r => setTimeout(r, 50));
       const entry = (await (await app.get('/discovery/resources')).json()).items[0];
       assert.equal(entry.source, 'settle');
@@ -903,7 +917,7 @@ describe('catalog provenance and provisional lifecycle (issue #140)', () => {
       }),
     });
     try {
-      const headers = { authorization: 'Bearer secret' };
+      const headers = { authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz' };
       await app.post('/verify', CATALOGABLE_BODY, headers);
       // Give the enqueued (off-hot-path) catalog write time to land while the
       // TTL window still puts the listing in the public view.
@@ -1091,13 +1105,23 @@ describe('CORS preflight', () => {
  * malformed_auth_header, and an unknown key maps to invalid_api_key.
  */
 describe('API key header forms', () => {
-  const config = testConfig({ apiKeys: ['alice:a-secret'] });
+  const config = testConfig({ apiKeys: ['alice:a-secret-0123456789abcdefghijklmnopqrstuvwxyz'] });
 
   for (const [label, authorization, status, reason] of [
-    ['a bare key without the Bearer prefix', 'a-secret', 200, null],
+    [
+      'a bare key without the Bearer prefix',
+      'a-secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      200,
+      null,
+    ],
     ['a Bearer with nothing after it', 'Bearer', 401, 'malformed_auth_header'],
     ['a Bearer followed by only a space', 'Bearer ', 401, 'malformed_auth_header'],
-    ['a non-Bearer scheme', 'Basic a-secret', 401, 'malformed_auth_header'],
+    [
+      'a non-Bearer scheme',
+      'Basic a-secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      401,
+      'malformed_auth_header',
+    ],
     ['a Bearer token containing a space', 'Bearer a secret', 401, 'malformed_auth_header'],
     ['a wrong key', 'Bearer nope', 401, 'invalid_api_key'],
   ]) {
@@ -1610,9 +1634,14 @@ describe('POST /settle optional collaborators', () => {
  * through it.
  */
 describe('GET /settlements/:idempotencyKey', () => {
-  const config = testConfig({ apiKeys: ['alice:a-secret', 'bob:b-secret'] });
-  const alice = { authorization: 'Bearer a-secret' };
-  const bob = { authorization: 'Bearer b-secret' };
+  const config = testConfig({
+    apiKeys: [
+      'alice:a-secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      'bob:b-secret-0123456789abcdefghijklmnopqrstuvwxyz',
+    ],
+  });
+  const alice = { authorization: 'Bearer a-secret-0123456789abcdefghijklmnopqrstuvwxyz' };
+  const bob = { authorization: 'Bearer b-secret-0123456789abcdefghijklmnopqrstuvwxyz' };
 
   test('the owner reads the record and its event log; anyone else gets a 404', async () => {
     await withApp({ config }, async app => {
@@ -2022,8 +2051,8 @@ describe('RateLimit headers fall back to the pre-record check', () => {
  */
 describe('DLQ operator routes', () => {
   test('are registered only when a dead-letter store is supplied', async () => {
-    const config = testConfig({ apiKeys: ['ops:o-secret'] });
-    const headers = { authorization: 'Bearer o-secret' };
+    const config = testConfig({ apiKeys: ['ops:o-secret-0123456789abcdefghijklmnopqrstuvwxyz'] });
+    const headers = { authorization: 'Bearer o-secret-0123456789abcdefghijklmnopqrstuvwxyz' };
     const dlq = {
       store: { list: async () => ({ items: [], total: 0 }) },
       publish: async () => {},
@@ -2035,6 +2064,32 @@ describe('DLQ operator routes', () => {
     });
     await withApp({ config }, async app => {
       assert.equal((await app.get('/admin/dlq', headers)).status, 404);
+    });
+  });
+
+  test('each preflight advertises the verbs its route actually serves', async () => {
+    // These routes passed a method list that the preflight handler used to
+    // ignore, so every DLQ preflight advertised `POST, OPTIONS` — including the
+    // GET-only listing.
+    const config = testConfig({ apiKeys: ['ops:o-secret-0123456789abcdefghijklmnopqrstuvwxyz'] });
+    const dlq = {
+      store: { list: async () => ({ items: [], total: 0 }) },
+      publish: async () => {},
+    };
+    await withApp({ config, extras: { dlq } }, async app => {
+      for (const [path, expected] of [
+        ['/admin/dlq', /GET/],
+        ['/admin/dlq/:id', /GET.*DELETE/],
+        ['/admin/dlq/:id/replay', /POST/],
+      ]) {
+        const res = await app.request(path, { method: 'OPTIONS' });
+        assert.equal(res.status, 204, `${path} preflight must be 204`);
+        assert.match(
+          res.headers.get('access-control-allow-methods') ?? '',
+          expected,
+          `${path} advertises the wrong verbs`,
+        );
+      }
     });
   });
 });

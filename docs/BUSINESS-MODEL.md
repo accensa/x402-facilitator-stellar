@@ -6,14 +6,14 @@ The four parts answer four questions about the same caller:
 
 | Concern | File / route | Answer |
 |---|---|---|
-| **Authentication** — *who is calling?* | API keys on `/verify`, `/settle`, `/usage`, `POST /discovery/resources` | `docs/AUTHENTICATION.md`. Identity is an API key; no key means open mode. |
+| **Authentication** — *who is calling?* | API keys on `/verify`, `/settle`, `/usage`, `POST /discovery/resources`, `DELETE /discovery/resource` | `docs/AUTHENTICATION.md`. Identity is an API key; no key means open mode. |
 | **Metering** — *how much have they used?* | `GET /usage` | Counters per key: `verify_rpm`, `settle_rpm`, `settle_rph`, `settle_rpd`, `fee_spd`. |
 | **Rate limiting** — *how much may they use?* | sliding-window checks on the same routes | `docs/OPERATIONS.md`. Defaults: 60 verify/min, 10 settle/min, 100/hr, 1000/day, 5,000,000 stroops sponsored fee/day, 10 catalog writes/min. |
 | **Business model** — *why does any of this exist and who pays?* | This document | Testnet free and operator-funded; mainnet pricing operator-configurable, with the daily sponsored-fee ceiling as the loss bound. |
 
 ## Business Model
 
-**What is free.** Everything on testnet. Open mode (no `FACILITATOR_API_KEYS`) is the correct default there: no caller registration, sponsored network fees, and frictionless onboarding — the sub-hour path §3.6 grades. The Bazaar read routes (`GET /discovery/resources`, `GET /discovery/search`, `/supported`, `/healthz`) are free and unauthenticated on every network by design, because an agent must be able to discover a resource before it has any relationship with the facilitator.
+**What is free.** Everything on testnet. Open mode (no `FACILITATOR_API_KEYS`) is the correct default there: no caller registration, sponsored network fees, and frictionless onboarding — the sub-hour path §3.6 grades. The Bazaar read routes (`GET /discovery/resources`, `GET /discovery/resource`, `GET /discovery/search`, `/supported`, `/healthz`) are free and unauthenticated on every network by design, because an agent must be able to discover a resource before it has any relationship with the facilitator.
 
 **What is paid.** Nothing — today. There is no billing implementation, and that is deliberate: this is a conformance spike, and §3.1 asks for the business model to be *documented*, not for billing to be built. The design commits to a model, and the metering that would underpin billing already exists:
 
@@ -42,7 +42,7 @@ Full detail in `docs/AUTHENTICATION.md`; the design decisions relevant here:
 
 - **API keys identify the caller.** `FACILITATOR_API_KEYS` is a comma-separated `name:secret` list, hashed at boot, verified constant-time. The key's `keyId` is what metering and rate limiting key on.
 - **Unset keys = open mode**, correct for public testnet and strongly discouraged on pubnet, where an unauthenticated caller can drain the signer by submitting valid-but-abusive transactions. The server logs a loud warning when running open.
-- **Two route classes, two policies.** Public reads (`/supported`, `GET /discovery/resources`, `GET /discovery/search`, `/healthz`) are open on every network — a catalog no one can read unauthenticated is useless to agents. Everything that spends money or writes the catalog (`/verify`, `/settle`, `/usage`, `POST /discovery/resources`, `/settlements/:idempotencyKey`) requires a key (or is open-mode testnet).
+- **Two route classes, two policies.** Public reads (`/supported`, `GET /discovery/resources`, `GET /discovery/resource`, `GET /discovery/search`, `/healthz`) are open on every network — a catalog no one can read unauthenticated is useless to agents. Everything that spends money or writes the catalog (`/verify`, `/settle`, `/usage`, `POST /discovery/resources`, `DELETE /discovery/resource`, `/settlements/:idempotencyKey`) requires a key (or is open-mode testnet).
 - **`/usage` refuses open mode with a distinct reason** (`open_mode_usage_forbidden`). This is a deliberate design decision: usage accounting has no meaning for an anonymous caller, and keying "usage" by IP would both misattribute and leak per-IP activity. Metering requires identity.
 
 ## Metering Design
@@ -70,7 +70,7 @@ Defaults (per caller, configurable globally and per key via `RATE_LIMIT_GLOBAL` 
 | `fee_spd` | 5,000,000 stroops/day | The sponsored-fee ceiling — the operator's worst-case cost per caller per day (0.5 XLM at current prices). This is the loss bound that matters on pubnet; at the default per-tx fee cap it allows ~100 max-fee settlements or tens of thousands of typical ones. |
 | `catalog_rpm` | 10/min | Catalog writes are cheap but poisonable (a flooded catalog is a poisoned discovery layer), and a `payTo` is already capped at 50 listings. 10/min bounds upsert floods. |
 
-**Deliberate gap — the discovery read routes are not rate-limited.** `GET /discovery/resources` and `GET /discovery/search` are public catalog reads that any agent must be able to hit; they are intentionally outside the limiter today. They are also outside authentication, so an unauthenticated client can issue unlimited read traffic. That is a known, accepted exposure for the spike (the read path is cheap, in-memory, and p95-budgeted under 50ms), and it is tracked as [#135](https://github.com/accensa/x402-facilitator-stellar/issues/135) rather than silently accepted. The catalog *write* path (`POST /discovery/resources` and payment-path cataloguing) is limited by `catalog_rpm`.
+**Deliberate gap — the discovery read routes are not rate-limited.** `GET /discovery/resources` and `GET /discovery/search` are public catalog reads that any agent must be able to hit; they are intentionally outside the limiter today. They are also outside authentication, so an unauthenticated client can issue unlimited read traffic. That is a known, accepted exposure for the spike (the read path is cheap, in-memory, and p95-budgeted under 50ms), and it is tracked as [#135](https://github.com/accensa/x402-facilitator-stellar/issues/135) rather than silently accepted. The catalog *write* path (`POST /discovery/resources`, `DELETE /discovery/resource`, and payment-path cataloguing) is limited by `catalog_rpm`.
 
 **Why these numbers and not others.** They encode three priorities: (1) testnet onboarding must never feel rate-limited to a legitimate developer (hence generous testnet defaults and open mode); (2) the operator's sponsored-fee exposure must be *bounded*, not merely discouraged (hence `fee_spd` as a hard ceiling, not a soft signal); (3) abuse must be visible (every rejection is audited with the caller and the reason). The numbers are operator-tunable precisely because they encode cost decisions — a mainnet operator who charges per settlement may set a higher ceiling; one who wants tighter loss control sets a lower one.
 

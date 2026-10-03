@@ -290,7 +290,7 @@ describe('CQRS read replica settlement store (#121)', () => {
     const dummySecret = Keypair.random().secret();
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
-      FACILITATOR_API_KEYS: 'callerA:secretA',
+      FACILITATOR_API_KEYS: 'callerA:secretA-0123456789abcdefghijklmnopqrstuvwxyz',
       DATABASE_URL: 'postgres://primary',
       DATABASE_URL_REPLICA: 'postgres://replica',
       SETTLEMENT_REPLICA_LAG_MS: '40',
@@ -331,7 +331,7 @@ describe('CQRS read replica settlement store (#121)', () => {
       const res = await app.inject({
         method: 'GET',
         url: '/settlements/settlement-A',
-        headers: { authorization: 'Bearer secretA' },
+        headers: { authorization: 'Bearer secretA-0123456789abcdefghijklmnopqrstuvwxyz' },
       });
       assert.strictEqual(res.statusCode, 200);
       const body = JSON.parse(res.payload);

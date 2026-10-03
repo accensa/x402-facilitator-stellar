@@ -24,13 +24,13 @@ function capturingAudit() {
   return audit;
 }
 
-const AUTH = { authorization: 'Bearer s3cret' };
+const AUTH = { authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz' };
 
 describe('audit records', () => {
   test('a settlement carries actor, outcome and transaction hash', async () => {
     const audit = capturingAudit();
     const app = await serve({
-      config: testConfig({ apiKeys: ['admin:s3cret'] }),
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       extras: { audit },
     });
     try {
@@ -50,7 +50,7 @@ describe('audit records', () => {
   test('a verification carries actor and outcome', async () => {
     const audit = capturingAudit();
     const app = await serve({
-      config: testConfig({ apiKeys: ['admin:s3cret'] }),
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       extras: { audit },
     });
     try {
@@ -67,7 +67,7 @@ describe('audit records', () => {
   test('auth failures are recorded with a reason but never the key material', async () => {
     const audit = capturingAudit();
     const app = await serve({
-      config: testConfig({ apiKeys: ['admin:s3cret'] }),
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       extras: { audit },
     });
     try {

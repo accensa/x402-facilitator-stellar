@@ -25,6 +25,8 @@ upstream it is marked and stopped.
 | GET | `/settlements/:idempotencyKey/events` | API key | no | `{ ok, idempotencyKey, events }` or `404` |
 | POST | `/discovery/resources` | API key | yes (catalog write) | `{ ok, resource, softDrops }` or `400` |
 | GET | `/discovery/resources` | none (public) | yes (catalog read) | `{ x402Version, items, pagination }` |
+| GET | `/discovery/resource` | none (public) | yes (catalog read) | `{ x402Version, resource }`, `400` without `url`, `404` `resource_not_found` (#222) |
+| DELETE | `/discovery/resource` | API key (or open) | yes (catalog write) | `{ ok, removed }`, `400` without `url`, `404` `resource_not_found` (#221) |
 | GET | `/discovery/search` | none (public) | yes (catalog read) | `{ x402Version, resources, partialResults, pagination }` |
 | OPTIONS | all of the above | none (preflight) | no | `204` |
 | * | unknown | — | — | `404 { error: not_found, reason: route_not_found }` |

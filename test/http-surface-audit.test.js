@@ -28,7 +28,14 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { serve, stubRateLimiter, stubCatalog, testConfig, VALID_BODY } from './helpers/app.js';
+import {
+  serve,
+  stubRateLimiter,
+  stubCatalog,
+  testConfig,
+  TEST_SECRET,
+  VALID_BODY,
+} from './helpers/app.js';
 import { RateLimiter } from '../src/rate-limit.js';
 
 /** base64-decode the EXTENSION-RESPONSES envelope into a plain object. */
@@ -66,7 +73,7 @@ function discoveryBody(extension) {
   };
 }
 
-const AUTH = { authorization: 'Bearer secret' };
+const AUTH = { authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz' };
 const KEEP_ALIVE = { keepalive: false };
 
 /**
@@ -152,7 +159,9 @@ describe('HTTP surface audit: route inventory (every registered route)', () => {
       await noKeys.close();
     }
 
-    const app = await serve({ config: testConfig({ apiKeys: ['test:secret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
       const bad = await app.get('/usage', { authorization: 'Bearer wrong' });
       assert.equal(bad.status, 401);
@@ -162,6 +171,55 @@ describe('HTTP surface audit: route inventory (every registered route)', () => {
       assert.match(ok.headers.get('content-type') ?? '', /application\/json/);
       const usage = await ok.json();
       assert.equal(usage.keyId, 'test'.toUpperCase());
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('GET /discovery/resource is a public point read (#222)', async () => {
+    const catalog = stubCatalog({
+      getResource: async url => (url === 'http://api.ex/one' ? { url, serviceName: 'one' } : null),
+    });
+    const app = await serve({ catalog });
+    try {
+      const found = await app.get('/discovery/resource?url=http%3A%2F%2Fapi.ex%2Fone');
+      assert.equal(found.status, 200);
+      assert.equal((await found.json()).resource.serviceName, 'one');
+
+      const missing = await app.get('/discovery/resource?url=http%3A%2F%2Fapi.ex%2Fnone');
+      assert.equal(missing.status, 404);
+      assert.equal((await missing.json()).reason, 'resource_not_found');
+
+      const bad = await app.get('/discovery/resource');
+      assert.equal(bad.status, 400);
+      assert.equal((await bad.json()).reason, 'url is required');
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('DELETE /discovery/resource is an authenticated write (#221)', async () => {
+    const catalog = stubCatalog({
+      deleteResource: async url => ({ removed: true, resource: { url, toolName: null } }),
+    });
+    const app = await serve({
+      catalog,
+      config: testConfig({ apiKeys: [`test:${TEST_SECRET}`] }),
+    });
+    try {
+      const anonymous = await app.request('/discovery/resource?url=http%3A%2F%2Fapi.ex%2Fone', {
+        method: 'DELETE',
+        ...KEEP_ALIVE,
+      });
+      assert.equal(anonymous.status, 401, 'a removal must not be anonymous');
+
+      const res = await app.request('/discovery/resource?url=http%3A%2F%2Fapi.ex%2Fone', {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${TEST_SECRET}` },
+        ...KEEP_ALIVE,
+      });
+      assert.equal(res.status, 200);
+      assert.equal((await res.json()).ok, true);
     } finally {
       await app.close();
     }
@@ -186,6 +244,7 @@ describe('HTTP surface audit: route inventory (every registered route)', () => {
         '/verify',
         '/settle',
         '/discovery/resources',
+        '/discovery/resource',
         '/supported',
         '/discovery/search',
       ]) {
@@ -279,7 +338,9 @@ describe('HTTP surface audit: /verify', () => {
   });
 
   test('an unauthenticated verify in keyed mode is 401, never 500', async () => {
-    const app = await serve({ config: testConfig({ apiKeys: ['test:secret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
       const res = await app.post('/verify', VALID_BODY);
       assert.equal(res.status, 401);
@@ -314,7 +375,7 @@ describe('HTTP surface audit: RateLimit-Remaining decrements (not off by one)', 
       keys: {},
     });
     const app = await serve({
-      config: testConfig({ apiKeys: ['test:secret'] }),
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       rateLimiter,
     });
     try {
@@ -408,7 +469,7 @@ describe('HTTP surface audit: EXTENSION-RESPONSES for all four cataloging outcom
       keys: {},
     });
     const app = await serve({
-      config: testConfig({ apiKeys: ['test:secret'] }),
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       rateLimiter,
       catalog: stubCatalog(),
     });
@@ -637,7 +698,7 @@ describe('HTTP surface audit: POST /discovery/resources (manual cataloguing)', (
 
   test('an unauthenticated manual registration is 401', async () => {
     const app = await serve({
-      config: testConfig({ apiKeys: ['test:secret'] }),
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       catalog: stubCatalog(),
     });
     try {
@@ -788,7 +849,7 @@ describe('HTTP surface audit: GET /discovery/search', () => {
 describe('HTTP surface audit: settlement status reads', () => {
   test('GET /settlements/:key for an unknown key is 404 JSON', async () => {
     const app = await serve({
-      config: testConfig({ apiKeys: ['test:secret'] }),
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       settlementStore: undefined,
     });
     try {
@@ -803,7 +864,9 @@ describe('HTTP surface audit: settlement status reads', () => {
   });
 
   test('settlement reads require an API key', async () => {
-    const app = await serve({ config: testConfig({ apiKeys: ['test:secret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
       const res = await app.get('/settlements/any', {});
       assert.equal(res.status, 401);
@@ -813,7 +876,9 @@ describe('HTTP surface audit: settlement status reads', () => {
   });
 
   test('the events sub-route is routed and 404s for an unknown key', async () => {
-    const app = await serve({ config: testConfig({ apiKeys: ['test:secret'] }) });
+    const app = await serve({
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
     try {
       const res = await app.get('/settlements/does-not-exist/events', AUTH);
       assert.equal(res.status, 404);
@@ -827,7 +892,7 @@ describe('HTTP surface audit: settlement status reads', () => {
 describe('HTTP surface audit: headers carry their contracts', () => {
   test('every JSON response advertises application/json, never text/html', async () => {
     const app = await serve({
-      config: testConfig({ apiKeys: ['test:secret'] }),
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       catalog: auditCatalog(),
     });
     try {

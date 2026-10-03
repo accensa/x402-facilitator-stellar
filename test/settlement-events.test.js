@@ -173,7 +173,8 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
     const dummySecret = Keypair.random().secret();
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
-      FACILITATOR_API_KEYS: 'callerA:secretA,callerB:secretB',
+      FACILITATOR_API_KEYS:
+        'callerA:secretA-0123456789abcdefghijklmnopqrstuvwxyz,callerB:secretB-0123456789abcdefghijklmnopqrstuvwxyz',
     });
     return createApp(
       config,
@@ -200,7 +201,7 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
       const res = await app.inject({
         method: 'GET',
         url: '/settlements/settlement-A/events',
-        headers: { authorization: 'Bearer secretA' },
+        headers: { authorization: 'Bearer secretA-0123456789abcdefghijklmnopqrstuvwxyz' },
       });
       assert.equal(res.statusCode, 200);
       const body = JSON.parse(res.payload);
@@ -229,7 +230,7 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
       const res = await app.inject({
         method: 'GET',
         url: '/settlements/settlement-A/events',
-        headers: { authorization: 'Bearer secretB' },
+        headers: { authorization: 'Bearer secretB-0123456789abcdefghijklmnopqrstuvwxyz' },
       });
       assert.equal(res.statusCode, 404);
     } finally {
@@ -244,7 +245,7 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
       const res = await app.inject({
         method: 'GET',
         url: '/settlements/does-not-exist/events',
-        headers: { authorization: 'Bearer secretA' },
+        headers: { authorization: 'Bearer secretA-0123456789abcdefghijklmnopqrstuvwxyz' },
       });
       assert.equal(res.statusCode, 404);
     } finally {

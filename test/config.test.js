@@ -183,7 +183,8 @@ test('resolveConfig: pubnet sets per-network values correctly', () => {
 
 test('resolves custom rate limits from RATE_LIMIT_GLOBAL and RATE_LIMIT_<key>', () => {
   const config = resolveWith({
-    FACILITATOR_API_KEYS: 'admin:secret123, user:secret456',
+    FACILITATOR_API_KEYS:
+      'admin:secret123-0123456789abcdefghijklmnopqrstuvwxyz, user:secret456-0123456789abcdefghijklmnopqrstuvwxyz',
     RATE_LIMIT_GLOBAL:
       'verify_rpm=100,settle_rpm=10,settle_rph=50,settle_rpd=500,fee_spd=1000,catalog_rpm=5',
     RATE_LIMIT_admin: 'verify_rpm=1000,fee_spd=2000,catalog_rpm=50',
@@ -347,7 +348,8 @@ test('resolveConfig: validates API key IDs are alphanumeric and underscore only'
   assert.doesNotThrow(() =>
     resolveConfig({
       ...base,
-      FACILITATOR_API_KEYS: 'valid_key:secret123,anotherKey:secret456',
+      FACILITATOR_API_KEYS:
+        'valid_key:secret123-0123456789abcdefghijklmnopqrstuvwxyz,anotherKey:secret456-0123456789abcdefghijklmnopqrstuvwxyz',
     }),
   );
 
@@ -356,7 +358,7 @@ test('resolveConfig: validates API key IDs are alphanumeric and underscore only'
     () =>
       resolveConfig({
         ...base,
-        FACILITATOR_API_KEYS: 'invalid-key:secret123', // hyphen not allowed
+        FACILITATOR_API_KEYS: 'invalid-key:secret123-0123456789abcdefghijklmnopqrstuvwxyz', // hyphen not allowed
       }),
     /API key id \"invalid-key\" contains invalid characters/,
   );
@@ -365,7 +367,7 @@ test('resolveConfig: validates API key IDs are alphanumeric and underscore only'
     () =>
       resolveConfig({
         ...base,
-        FACILITATOR_API_KEYS: 'invalid key:secret123', // space not allowed
+        FACILITATOR_API_KEYS: 'invalid key:secret123-0123456789abcdefghijklmnopqrstuvwxyz', // space not allowed
       }),
     /API key id \"invalid key\" contains invalid characters/,
   );
@@ -374,7 +376,8 @@ test('resolveConfig: validates API key IDs are alphanumeric and underscore only'
 test('resolveConfig: parses API keys without explicit ID (uses index-based IDs)', () => {
   const env = {
     FACILITATOR_SECRET: 'S123',
-    FACILITATOR_API_KEYS: 'secret1,secret2,secret3',
+    FACILITATOR_API_KEYS:
+      'secret1-0123456789abcdefghijklmnopqrstuvwxyz,secret2-0123456789abcdefghijklmnopqrstuvwxyz,secret3-0123456789abcdefghijklmnopqrstuvwxyz',
   };
   const config = resolveConfig(env);
   // Should create keys with IDs key_0, key_1, key_2
@@ -387,7 +390,7 @@ test('resolveConfig: parses API keys without explicit ID (uses index-based IDs)'
 test('resolveConfig: throws when RATE_LIMIT_ key references non-existent API key', () => {
   const base = {
     FACILITATOR_SECRET: 'S123',
-    FACILITATOR_API_KEYS: 'existing:secret123',
+    FACILITATOR_API_KEYS: 'existing:secret123-0123456789abcdefghijklmnopqrstuvwxyz',
   };
   assert.throws(
     () =>

@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createApp } from '../../src/app.js';
+import { MIN_API_KEY_LENGTH } from '../../src/config.js';
 import { stubRateLimiter } from './rate-limiter.js';
 
 // Re-exported so existing importers keep one entry point; the definition lives
@@ -16,10 +17,22 @@ import { stubRateLimiter } from './rate-limiter.js';
 export { stubRateLimiter };
 
 /**
+ * A secret long enough to satisfy the production floor (#207).
+ *
+ * Tests write `admin:${TEST_SECRET}` rather than a short literal so the key
+ * they configure is one `resolveConfig` would actually accept — a suite that
+ * authenticates with a secret production refuses to boot on is testing a
+ * configuration that cannot exist.
+ */
+export const TEST_SECRET = 'test-secret-0123456789abcdefghijklmnop';
+
+/**
  * Builds the config shape createApp expects.
  *
  * API keys are given as `id:secret` and hashed here the way resolveConfig does,
- * so a test states the secret it will present rather than a digest.
+ * so a test states the secret it will present rather than a digest. The
+ * minimum-length rule is enforced here too (#207), for the same reason: the
+ * helper must not be able to build a key the real parser would reject.
  */
 export function testConfig({
   apiKeys = [],
@@ -35,6 +48,11 @@ export function testConfig({
     apiKeys: apiKeys.map(entry => {
       const idx = entry.indexOf(':');
       const [id, secret] = idx > 0 ? [entry.slice(0, idx), entry.slice(idx + 1)] : ['key_0', entry];
+      assert.ok(
+        secret.length >= MIN_API_KEY_LENGTH,
+        `testConfig: secret for "${id}" is ${secret.length} characters; ` +
+          `the production floor is ${MIN_API_KEY_LENGTH} (#207). Use TEST_SECRET.`,
+      );
       return { id, hash: createHash('sha256').update(secret).digest() };
     }),
     networks,

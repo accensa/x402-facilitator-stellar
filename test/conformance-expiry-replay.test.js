@@ -24,7 +24,7 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
     // codes, so the wire behaviour is observable without a live ledger.
     capture = { verifyCalls: [], seenTx: new Set(), calls: 0 };
     app = await serve({
-      config: testConfig({ apiKeys: ['admin:s3cret'] }),
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       facilitator: stubFacilitator({
         verify: async payload => {
           capture.verifyCalls.push({ payload });
@@ -75,7 +75,7 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
 
   test('verify rejects an expired payload with a machine-readable reason', async () => {
     const res = await app.post('/verify', bodyWithExpirationLedger('expired'), {
-      authorization: 'Bearer s3cret',
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
     });
     const json = await res.json();
     assert.ok(json.invalidReason, 'verify rejection must carry a non-null reason');
@@ -85,7 +85,7 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
   test('verify accepts a payload signed at the current ledger (boundary)', async () => {
     const now = Math.floor(Date.now() / 1000);
     const res = await app.post('/verify', bodyWithExpirationLedger(now), {
-      authorization: 'Bearer s3cret',
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
     });
     assert.equal(res.status, 200);
     assert.equal((await res.json()).isValid, true);
@@ -94,14 +94,14 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
   test('verify accepts a payload signed before expiry (valid)', async () => {
     const earlier = Math.floor(Date.now() / 1000) - 300;
     const res = await app.post('/verify', bodyWithExpirationLedger(earlier), {
-      authorization: 'Bearer s3cret',
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
     });
     assert.equal(res.status, 200);
   });
 
   test('settle refuses an expired payload with a distinct machine-readable code', async () => {
     const res = await app.post('/settle', bodyWithExpirationLedger('expired'), {
-      authorization: 'Bearer s3cret',
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
     });
     const json = await res.json();
     assert.ok(json.errorReason, 'settle rejection must carry a non-null reason');
@@ -112,10 +112,14 @@ describe('Ledger-based Expiration & Replay Resistance (#159)', () => {
     const body = bodyWithExpirationLedger('far_future');
 
     const beforeCalls = capture.calls;
-    const first = await app.post('/settle', body, { authorization: 'Bearer s3cret' });
+    const first = await app.post('/settle', body, {
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+    });
     assert.equal(first.status, 200);
 
-    const second = await app.post('/settle', body, { authorization: 'Bearer s3cret' });
+    const second = await app.post('/settle', body, {
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+    });
     assert.equal(second.status, 200);
 
     // The settlement store must not have invoked the scheme a second time for

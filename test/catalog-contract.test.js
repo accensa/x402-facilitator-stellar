@@ -19,6 +19,7 @@ export function runCatalogStoreContractSuite(name, createStore) {
       assert.ok(typeof store.getLastModified === 'function', 'getLastModified must be a function');
       assert.ok(typeof store.upsertResource === 'function', 'upsertResource must be a function');
       assert.ok(typeof store.getResource === 'function', 'getResource must be a function');
+      assert.ok(typeof store.deleteResource === 'function', 'deleteResource must be a function');
       assert.ok(typeof store.listResources === 'function', 'listResources must be a function');
       assert.ok(typeof store.search === 'function', 'search must be a function');
       assert.ok(typeof store.pruneExpired === 'function', 'pruneExpired must be a function');
@@ -69,6 +70,50 @@ export function runCatalogStoreContractSuite(name, createStore) {
       const listFilter = await store.listResources({ type: 'mcp' });
       assert.equal(listFilter.total, 1);
       assert.equal(listFilter.items[0].url, 'http://example.com/2');
+    });
+
+    test('deleteResource contract', async () => {
+      const store = await createStore();
+      await store.upsertResource(
+        { url: 'http://example.com/doomed', type: 'http', payTo: 'GD' },
+        'settle',
+      );
+      await store.upsertResource(
+        { url: 'http://example.com/kept', type: 'http', payTo: 'GD' },
+        'settle',
+      );
+
+      const versionBefore = store.getVersion();
+      const result = await store.deleteResource('http://example.com/doomed');
+      assert.equal(result.removed, true);
+      assert.equal(result.resource.url, 'http://example.com/doomed');
+      assert.equal(await store.getResource('http://example.com/doomed'), null);
+      assert.ok((await store.listResources({})).total === 1);
+      // A removal is a write: cached discovery responses must be invalidated.
+      assert.ok(store.getVersion() > versionBefore, 'version must increment on delete');
+
+      // Deleting what is not there is a miss, not an error — the route turns
+      // this into a 404 rather than a 500.
+      const again = await store.deleteResource('http://example.com/doomed');
+      assert.equal(again.removed, false);
+      assert.equal(again.resource, null);
+    });
+
+    test('deleteResource distinguishes tools on the same URL', async () => {
+      const store = await createStore();
+      await store.upsertResource(
+        { url: 'http://example.com/multi', type: 'mcp', toolName: 'alpha', payTo: 'GE' },
+        'settle',
+      );
+      await store.upsertResource(
+        { url: 'http://example.com/multi', type: 'mcp', toolName: 'beta', payTo: 'GE' },
+        'settle',
+      );
+
+      const result = await store.deleteResource('http://example.com/multi', 'alpha');
+      assert.equal(result.removed, true);
+      assert.equal(result.resource.toolName, 'alpha');
+      assert.equal((await store.getResource('http://example.com/multi', 'beta')) != null, true);
     });
 
     test('provisional lifecycle and pruneExpired contract', async () => {

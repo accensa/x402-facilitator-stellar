@@ -55,17 +55,19 @@ export function createCorsHook(corsConfig = {}) {
  *
  * @param {object} [corsConfig={}]
  * @param {string[]} [corsConfig.allowedOrigins=[]]
- * @returns {(policy: 'public' | 'authenticated') => (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => Promise<void>}
+ * @returns {(policy: 'public' | 'authenticated', methods?: string) =>
+ *   (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => Promise<void>}
+ *   `methods` overrides the class default (`GET, OPTIONS` / `POST, OPTIONS`)
+ *   for a route that serves a different verb set — `DELETE /discovery/resource`
+ *   (#221), or the `GET /admin/dlq` routes, which had been advertising POST.
  */
 export function createPreflightHandler(corsConfig = {}) {
   const cors = createCorsHook(corsConfig);
-  return function preflight(policy) {
+  return function preflight(policy, methods) {
+    const allowMethods = methods ?? (policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS');
     return async (req, reply) => {
       await cors(policy)(req, reply);
-      reply.header(
-        'Access-Control-Allow-Methods',
-        policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS',
-      );
+      reply.header('Access-Control-Allow-Methods', allowMethods);
       reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
       reply.header('Access-Control-Max-Age', '600');
       return reply.code(204).send();

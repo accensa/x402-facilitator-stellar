@@ -22,7 +22,7 @@
  * (cataloging runs off the hot path in app.js), so an outage cannot fail or
  * delay a settlement.
  */
-import { MemoryCatalogStore } from './memory.js';
+import { MemoryCatalogStore, CatalogError } from './memory.js';
 
 /** The entry fields persisted as columns; the rest is the resource link. */
 function resourceLink(entry) {
@@ -225,6 +225,34 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
       }
     }
     return pruned;
+  }
+
+  /**
+   * Removes the listing from the durable store as well as memory (#221).
+   *
+   * The reverse of the upsert's ordering, and deliberately so: a memory-first
+   * delete that then failed to reach the database would leave the row to be
+   * reloaded by the next restart — a "deleted" listing that comes back. Here
+   * the row goes first, and a memory delete that somehow failed afterwards
+   * leaves the entry visible only until the next restart. Reappearing is a bug;
+   * staying deleted is the promise, so the durable half is the one that must
+   * not be skipped.
+   */
+  async deleteResource(url, toolName = null) {
+    const key = toolName ? `${url}::${toolName}` : `${url}::`;
+    if (!this.degraded && this.pool) {
+      try {
+        await this.ready;
+        await this.pool.query('DELETE FROM catalog_resources WHERE key = $1', [key]);
+      } catch (err) {
+        this._degrade(`deleteResource failed: ${err.message}`);
+        throw new CatalogError(
+          'catalog_delete_failed',
+          `could not remove ${key} from the durable catalog: ${err.message}`,
+        );
+      }
+    }
+    return super.deleteResource(url, toolName);
   }
 }
 
