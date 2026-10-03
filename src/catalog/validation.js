@@ -10,7 +10,30 @@ import { validateAmount } from '../sdk/validation.js';
 
 // Pre-compiled regex patterns to avoid recompilation overhead and garbage collection pressure
 const ROUTE_PARAM_REGEX = /\{([^}]+)\}/g;
-const HTML_TAG_REGEX = /<[^>]*>?/gm;
+
+/**
+ * Markup in a description, in either of the two forms that matter (#217).
+ *
+ * The old guard was a tag-stripping regex (`/<[^>]*>?/gm`), which is a
+ * sanitizer, not a boundary: it cannot be. `<scr<script>ipt>` strips to
+ * `<script>`; `<img src=x onerror=alert(1)>` loses the tag but the payload
+ * text survives; `&lt;script&gt;` is untouched and is markup to every consumer
+ * that entity-decodes; and a truncated `<img src=x onerror=...` with no
+ * closing `>` matches the optional-tail alternative and disappears, hiding
+ * that anything was refused at all.
+ *
+ * Refusing is the only defensible policy: a description is prose, and prose
+ * that needs angle brackets to say what it means is not something the catalog
+ * can safely store. `&` is matched only when it begins a markup entity
+ * (`&lt;`, `&gt;`, `&#60;`, `&#x3c;`), so "Tom & Jerry" still passes. Both
+ * entity spellings HTML allows are covered — a leading `0*` for zero-padded
+ * numerics and `[xX]` for either hex prefix, since `&#X3C;` is as valid as
+ * `&#x3c;` and would otherwise be the one way through.
+ *
+ * Deliberately not a global regex: it is used with `.test()`, and a `g` flag
+ * would make that call stateful across invocations.
+ */
+const MARKUP_PATTERN = /<[a-zA-Z/!]|&(?:lt|gt|#0*6[02]|#[xX]0*3[cC]);/;
 
 /** Longest description the catalog will index, in UTF-16 code units. */
 const MAX_DESCRIPTION_LENGTH = 200;
@@ -69,6 +92,13 @@ function createResult() {
     hardDrop: false,
     reason: null,
     softDrops: [],
+    // Fields that were kept but shortened. Reported separately from
+    // softDrops (#219): a drop means the seller's value is gone, a
+    // truncation means part of it is. Folding the two together told a
+    // seller "description_truncated was dropped", which is not a thing
+    // that can happen — and left a caller unable to tell which of its
+    // fields had actually been discarded.
+    truncations: [],
     advisories: [],
     resource: null,
   };
@@ -169,14 +199,27 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
 
   const rawDescription = paymentPayload.resource?.description;
   if (typeof rawDescription === 'string') {
-    let description = rawDescription.includes('<')
-      ? rawDescription.replace(HTML_TAG_REGEX, '').trim()
-      : rawDescription.trim();
-    if (description.length > MAX_DESCRIPTION_LENGTH) {
-      description = truncateDescription(description);
-      result.softDrops.push('description_truncated');
+    const description = rawDescription.trim();
+    // The `includes` guard is a fast path only: every description without a
+    // `<` or `&` skips the regex entirely, so ordinary prose (the overwhelming
+    // majority) pays nothing. The regex is the decision, not this test.
+    if (
+      (description.includes('<') || description.includes('&')) &&
+      MARKUP_PATTERN.test(description)
+    ) {
+      result.softDrops.push('description');
+      // extractDiscoveryInfo has already populated `extracted.description`
+      // from the same source field, so refusing means deleting it — not
+      // merely declining to assign it. Without this the refused markup is
+      // still stored, via the copy this function never wrote.
+      delete extracted.description;
+    } else if (description.length > MAX_DESCRIPTION_LENGTH) {
+      // Kept, not dropped: shortening is not discarding (#219).
+      extracted.description = truncateDescription(description);
+      result.truncations.push('description');
+    } else {
+      extracted.description = description;
     }
-    extracted.description = description;
   }
 
   const rawTags = paymentPayload.resource?.tags;

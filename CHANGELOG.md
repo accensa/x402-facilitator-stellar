@@ -27,6 +27,14 @@ pinned.
 - `npm run test:bench`: a resource-budget benchmark recording peak RSS, CPU
   utilization and open sockets, writing a markdown report and a run history, and
   failing on peak RSS above 512 MiB or a duration regression above 20% (#427).
+- `npm run bench:signer`: a parameterised single-signer contention model that
+  reports the ceiling and knee for a given sequence window and round trip, and
+  refuses to report a knee from a sweep that never oversubscribed the signer
+  (#203). With its defaults, one signer settles 3.2/sec (192/min) and stops
+  scaling at 8 in-flight; past the knee throughput *falls*, because rejected
+  submissions cost the same round trip. `docs/OPERATIONS.md` now sizes the
+  signer pool against that number instead of alerting on any non-zero
+  `x402_signer_inflight`.
 - JSON-RPC 2.0 batch requests on the MCP server (stdio and HTTP): members run
   concurrently with isolated failures, responses are matched by id, and batches
   over 25 requests are refused. This replaces the previous blanket `-32600`
@@ -93,8 +101,8 @@ pinned.
   discovery with an unpaired surrogate attached — not valid UTF-16, rendered as
   U+FFFD by a conformant client and not round-trippable through a `jsonb`
   column. The emitted description is now always valid UTF-16 and never longer
-  than 200 code units, and the truncation is still reported as the
-  `description_truncated` soft drop.
+  than 200 code units. The truncation is reported in a new `truncated` list on
+  the envelope rather than as a soft drop (#219, below).
 - `server.js` now installs `unhandledRejection` / `uncaughtException` handlers
   and reports a listen or metrics-listener bind failure, exiting non-zero with
   a diagnostic instead of dying silently (#205).
@@ -107,6 +115,26 @@ pinned.
   every verify/settle. The bytes a bazaar client receives are unchanged
   (pinned byte-for-byte by tests); callers that never read the header no
   longer pay the JSON+base64 cost per payment (#368).
+- `EXTENSION-RESPONSES` is now bounded to 4096 encoded bytes (#202). The
+  envelope is built from caller-controlled fields and was previously unlimited;
+  a header over a proxy's cap does not arrive truncated, it kills the response
+  — after settlement. Envelopes that fit are byte-identical to before. Ones
+  that do not degrade in tiers (drop `reason`, then all detail) while always
+  preserving `status`, and each degradation is logged.
+- A `description` containing markup is now refused rather than sanitized
+  (#217). The previous tag-stripping regex was a sanitizer, not a boundary:
+  `<scr<script>ipt>` stripped *to* `<script>`, `&lt;script&gt;` was not matched
+  at all, and a truncated `onerror` tag with no closing `>` vanished silently.
+  The field is dropped and the rest of the listing still lands
+  (`partially landed`). A bare `&` — "Weather & tides" — is not markup and is
+  unaffected.
+- Truncated fields are reported in a new `truncated` list on the
+  `EXTENSION-RESPONSES` envelope and the `POST /discovery/resources` response,
+  separate from `softDrops` (#219). Previously a description shortened to 200
+  characters was reported as the soft drop `description_truncated`, which read
+  as "this field was dropped" — it was not, and no such field exists. A
+  truncated description now reports `truncated: ["description"]` and leaves
+  `reason`'s dropped-fields list alone.
 
 ## [0.0.1] - 2026-08-11
 

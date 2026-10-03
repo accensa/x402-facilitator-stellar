@@ -502,6 +502,110 @@ describe('HTTP surface audit: EXTENSION-RESPONSES for all four cataloging outcom
       await app.close();
     }
   });
+
+  test('a truncated description is reported as truncated, never as dropped (#219)', async () => {
+    // The wire contract a seller reads. "Dropped: description" would send them
+    // looking for a field that is still in the catalog.
+    const app = await serve({
+      catalog: stubCatalog({ upsertResource: async resource => resource }),
+    });
+    try {
+      const res = await app.post(
+        '/verify',
+        {
+          ...discoveryBody(),
+          paymentPayload: {
+            ...discoveryBody().paymentPayload,
+            resource: { ...discoveryBody().paymentPayload.resource, description: 'A'.repeat(300) },
+          },
+        },
+        AUTH,
+      );
+      await new Promise(r => setTimeout(r, 20));
+
+      const bazaar = decodeExtension(res.headers.get('EXTENSION-RESPONSES'));
+      assert.equal(bazaar.status, 'partially landed');
+      assert.deepEqual(bazaar.truncated, ['description']);
+      assert.doesNotMatch(
+        bazaar.reason ?? '',
+        /Dropped fields:.*description/,
+        'a truncated field must not appear in the dropped-fields reason',
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a description carrying markup is dropped, not sanitized (#217)', async () => {
+    const app = await serve({
+      catalog: stubCatalog({ upsertResource: async resource => resource }),
+    });
+    try {
+      const res = await app.post(
+        '/verify',
+        {
+          ...discoveryBody(),
+          paymentPayload: {
+            ...discoveryBody().paymentPayload,
+            resource: {
+              ...discoveryBody().paymentPayload.resource,
+              description: '<img src=x onerror=alert(1)>',
+            },
+          },
+        },
+        AUTH,
+      );
+      await new Promise(r => setTimeout(r, 20));
+
+      const bazaar = decodeExtension(res.headers.get('EXTENSION-RESPONSES'));
+      assert.equal(
+        bazaar.status,
+        'partially landed',
+        'the listing still lands; only the description is refused',
+      );
+      assert.match(bazaar.reason ?? '', /description/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('the EXTENSION-RESPONSES header stays inside its size bound (#202)', async () => {
+    // A header over a proxy's cap does not truncate — it kills the response,
+    // after settlement. This drives a caller-controlled field to an absurd
+    // length and asserts the wire value is still small and still parseable.
+    const app = await serve({ catalog: stubCatalog() });
+    try {
+      const res = await app.post(
+        '/verify',
+        {
+          ...discoveryBody(),
+          paymentPayload: {
+            ...discoveryBody().paymentPayload,
+            // 64 KiB of description; the envelope must not carry it.
+            resource: {
+              ...discoveryBody().paymentPayload.resource,
+              description: 'A'.repeat(65536),
+            },
+          },
+        },
+        AUTH,
+      );
+      await new Promise(r => setTimeout(r, 20));
+
+      const header = res.headers.get('EXTENSION-RESPONSES');
+      assert.ok(header, 'the header must still be present');
+      assert.ok(
+        header.length <= 4096,
+        `EXTENSION-RESPONSES must stay within 4096 bytes, got ${header.length}`,
+      );
+      // Bounded, but not broken: the client can still read the outcome.
+      const bazaar = decodeExtension(header);
+      assert.equal(bazaar.status, 'partially landed');
+      assert.deepEqual(bazaar.truncated, ['description']);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe('HTTP surface audit: POST /discovery/resources (manual cataloguing)', () => {
