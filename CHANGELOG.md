@@ -65,6 +65,23 @@ pinned.
   instructions into an agent's context (#391).
 - `CHANGELOG.md`, so an integrator can tell what changed between two commits
   (#212).
+- `GET /discovery/resource?url=…[&toolName=…]`: the point read behind the
+  catalog listing, so a caller who knows a URL does not have to page the whole
+  catalog to find it. Public, like the other discovery reads; a `404` carries
+  reason `resource_not_found` and, deliberately, no cache headers — a cached
+  "does not exist" would outlive the seller's registration (#222).
+- `DELETE /discovery/resource?url=…[&toolName=…]`: removes a listing outright.
+  The entry, its per-`payTo` accounting and its embedding all go, so a later
+  `/verify` re-creates a fresh provisional listing rather than resurrecting the
+  old one. Authenticated, metered against the catalog-write bucket, and audited
+  as `catalog_delete`. Deletion is not scoped to the caller — nothing maps an
+  API key to a `payTo`, so there is no ownership to enforce (#221).
+- Per-key API key expiry and revocation (#207). `FACILITATOR_API_KEYS` entries
+  may carry a third field, an expiry in epoch seconds (`admin:<secret>:1798761600`);
+  `FACILITATOR_REVOKED_API_KEYS` names key ids to refuse. Both are enforced per
+  request, not once at boot, and both are reported as distinct reasons
+  (`expired_api_key`, `revoked_api_key`) so a withdrawn key is distinguishable
+  from a wrong one in the audit trail.
 - Tests for both documented CLI entry points, `validate-discovery` and
   `x402-mcp`, driven from the `package.json` `bin` map (#208).
 - Secure client-IP resolution behind reverse proxies and CDNs, centralised in
@@ -80,6 +97,12 @@ pinned.
 
 ### Changed
 
+- **Breaking:** API key secrets must be at least 32 characters, enforced at boot
+  (#207). The stored digest is a single unsalted SHA-256 — not a work factor — so
+  the secret's own entropy is the whole of the key's strength, and a short one is
+  also cheap to brute-force offline if the digest ever leaks. A deployment with
+  shorter keys will not start until they are regenerated with
+  `openssl rand -base64 32`; the error names the offending key id.
 - Client IP addresses are pseudonymised before they reach a rate-limit bucket
   key or an audit actor, and are no longer written to logs. This makes the
   claim in `docs/PRIVACY.md` true for shared stores (Redis,
@@ -88,6 +111,20 @@ pinned.
 
 ### Fixed
 
+- A failed re-embed no longer leaves the previous vector attached to a listing
+  whose content has changed (#220). An upsert builds the new entry on top of the
+  existing one, so it inherited the old vector; when the text changed, the dense
+  search leg kept ranking the listing by content that no longer existed — and it
+  did so silently, because a failed re-embed only logs a warning. The stale
+  vector is now dropped synchronously, before the embed is attempted, so the
+  resource ranks lexically while it waits and stays dropped if the re-embed
+  fails. Each vector carries a fingerprint of the text it describes, so an
+  unchanged listing keeps its vector and skips the provider call entirely.
+- An `OPTIONS` preflight can now override the method list its route class
+  advertises. The DLQ routes (`GET /admin/dlq…`) had been advertising
+  `POST, OPTIONS` and `DELETE /discovery/resource` needed a union its class
+  default could not express, so the preflight took a `methods` argument rather
+  than guessing from the policy name.
 - Dependency advisories published 2026-10-02 cleared: `fastify` 5.12.5 (five
   high-severity issues, including an authentication bypass through malformed
   URLs), `@grpc/grpc-js` 1.14.5 (error-message leakage), and `axios` 1.20.0

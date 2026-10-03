@@ -9,6 +9,15 @@ import crypto from 'node:crypto';
 export const TESTNET = 'stellar:testnet';
 export const PUBNET = 'stellar:pubnet';
 
+/**
+ * Minimum length of an API key secret, enforced at boot (#207).
+ *
+ * Exported so the constraint is testable and documented rather than being a
+ * magic number inside the parser. See the check below for why a length floor
+ * is load-bearing here.
+ */
+export const MIN_API_KEY_LENGTH = 32;
+
 /** True when a postgres:// URL carries userinfo — forbidden in Vault mode (#127). */
 function vaultUrlHasUserinfo(url) {
   try {
@@ -118,6 +127,16 @@ export function resolveConfig(env = process.env) {
     .map(k => k.trim())
     .filter(Boolean);
 
+  // Keys revoked without being removed from the list, so the revocation itself
+  // is a reviewable, auditable act and the secret stays out of git history as a
+  // "deleted" line (#207). Compared upper-cased, matching req.keyId.
+  const revokedApiKeyIds = new Set(
+    (env.FACILITATOR_REVOKED_API_KEYS ?? '')
+      .split(',')
+      .map(k => k.trim().toUpperCase())
+      .filter(Boolean),
+  );
+
   const apiKeys = rawApiKeys.map((keyStr, index) => {
     let id = `key_${index}`;
     let secretPart = keyStr;
@@ -132,11 +151,58 @@ export function resolveConfig(env = process.env) {
         `API key id "${id}" contains invalid characters. Key ids must be alphanumeric and underscore only to work with RATE_LIMIT_ overrides.`,
       );
     }
+
+    // Optional third field: expiry, as epoch seconds (#207). Epoch rather than
+    // ISO-8601 because the separator here is `:` and `2026-01-01T00:00:00Z`
+    // contains two more of them. Validated now, enforced per request.
+    let expiresAt = null;
+    const expiryIdx = secretPart.lastIndexOf(':');
+    if (expiryIdx > 0) {
+      const rawExpiry = secretPart.substring(expiryIdx + 1);
+      if (!/^\d+$/.test(rawExpiry)) {
+        throw new Error(
+          `API key "${id}" has an unparseable expiry "${rawExpiry}". Use epoch seconds, e.g. "${id}:<secret>:${Math.floor(Date.now() / 1000) + 86400}".`,
+        );
+      }
+      expiresAt = Number(rawExpiry) * 1000;
+      secretPart = secretPart.substring(0, expiryIdx);
+    }
+
+    // A key is the only thing between an unauthenticated caller and a signed
+    // settlement, and nothing was stopping one from being "a" (#207): the
+    // secret is hashed with a single unsalted SHA-256, which is not a
+    // work factor, so the whole of its strength has to come from the secret
+    // itself. `openssl rand -base64 32` yields 44 characters carrying 256 bits
+    // of entropy; 8 characters of a human-chosen word carries a few dozen. The
+    // floor is not a proof of strength — it is the point below which the
+    // question is not worth arguing.
+    if (secretPart.length < MIN_API_KEY_LENGTH) {
+      throw new Error(
+        `API key "${id}" has a ${secretPart.length}-character secret; at least ${MIN_API_KEY_LENGTH} are required. ` +
+          `Generate one with: openssl rand -base64 32`,
+      );
+    }
+
     return {
       id,
       hash: crypto.createHash('sha256').update(secretPart).digest(),
+      expiresAt,
+      // The id is recorded here too so verification can report *why* a key that
+      // matched was refused, without consulting config again.
+      revoked: revokedApiKeyIds.has(id.toUpperCase()),
     };
   });
+
+  for (const revokedId of revokedApiKeyIds) {
+    if (!apiKeys.some(k => k.id.toUpperCase() === revokedId)) {
+      // Not an error: removing the key from FACILITATOR_API_KEYS is the end
+      // state, and the revocation entry is what makes that safe to do. Warn,
+      // because a typo'd id otherwise revokes nothing at all.
+      console.warn(
+        `FACILITATOR_REVOKED_API_KEYS lists "${revokedId}", which matches no key in FACILITATOR_API_KEYS.`,
+      );
+    }
+  }
 
   // Parse Rate Limits
   const parseLimits = str => {

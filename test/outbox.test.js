@@ -503,7 +503,7 @@ describe('app settle path with the outbox (#123)', () => {
   function makeConfig() {
     return resolveConfig({
       FACILITATOR_SECRET: Keypair.random().secret(),
-      FACILITATOR_API_KEYS: 'k:sec123',
+      FACILITATOR_API_KEYS: 'k:sec123-0123456789abcdefghijklmnopqrstuvwxyz',
     });
   }
 
@@ -536,7 +536,7 @@ describe('app settle path with the outbox (#123)', () => {
       const res = await app.inject({
         method: 'POST',
         url: '/settle',
-        headers: { authorization: 'Bearer sec123' },
+        headers: { authorization: 'Bearer sec123-0123456789abcdefghijklmnopqrstuvwxyz' },
         payload,
       });
       assert.equal(res.statusCode, 200);
@@ -560,7 +560,7 @@ describe('app settle path with the outbox (#123)', () => {
       const res = await app.inject({
         method: 'POST',
         url: '/settle',
-        headers: { authorization: 'Bearer sec123' },
+        headers: { authorization: 'Bearer sec123-0123456789abcdefghijklmnopqrstuvwxyz' },
         payload,
       });
       assert.equal(res.statusCode, 200);

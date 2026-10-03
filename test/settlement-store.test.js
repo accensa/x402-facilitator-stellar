@@ -86,7 +86,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
     // env var names, so the id carries an underscore rather than a hyphen.
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
-      FACILITATOR_API_KEYS: 'test_key:sec123',
+      FACILITATOR_API_KEYS: 'test_key:sec123-0123456789abcdefghijklmnopqrstuvwxyz',
     });
     const mockRateLimiter = {
       checkSettle: async () => ({ allowed: true }),
@@ -107,7 +107,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       const res1 = await app.inject({
         method: 'POST',
         url: '/settle',
-        headers: { authorization: 'Bearer sec123' },
+        headers: { authorization: 'Bearer sec123-0123456789abcdefghijklmnopqrstuvwxyz' },
         payload,
       });
 
@@ -117,7 +117,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       const res2 = await app.inject({
         method: 'POST',
         url: '/settle',
-        headers: { authorization: 'Bearer sec123' },
+        headers: { authorization: 'Bearer sec123-0123456789abcdefghijklmnopqrstuvwxyz' },
         payload,
       });
 
@@ -135,7 +135,8 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
     const dummySecret = Keypair.random().secret();
     const config = resolveConfig({
       FACILITATOR_SECRET: dummySecret,
-      FACILITATOR_API_KEYS: 'callerA:secretA,callerB:secretB',
+      FACILITATOR_API_KEYS:
+        'callerA:secretA-0123456789abcdefghijklmnopqrstuvwxyz,callerB:secretB-0123456789abcdefghijklmnopqrstuvwxyz',
     });
 
     const store = new MemorySettlementStore();
@@ -164,7 +165,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       const resA = await app.inject({
         method: 'GET',
         url: '/settlements/settlement-A',
-        headers: { authorization: 'Bearer secretA' },
+        headers: { authorization: 'Bearer secretA-0123456789abcdefghijklmnopqrstuvwxyz' },
       });
       assert.equal(resA.statusCode, 200);
       const bodyA = JSON.parse(resA.payload);
@@ -175,7 +176,7 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
       const resB = await app.inject({
         method: 'GET',
         url: '/settlements/settlement-A',
-        headers: { authorization: 'Bearer secretB' },
+        headers: { authorization: 'Bearer secretB-0123456789abcdefghijklmnopqrstuvwxyz' },
       });
       assert.equal(resB.statusCode, 404);
     } finally {

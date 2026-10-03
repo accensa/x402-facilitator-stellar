@@ -327,7 +327,8 @@ for — plus the one documented client-side glue deviation, are in
 - **Bazaar is built but unproven against a second implementation.** Discovery, search and
   automatic cataloging landed on 2026-08-12 and are documented in
   [`docs/BAZAAR.md`](docs/BAZAAR.md): a catalog datastore with migrations,
-  `GET /discovery/resources` with the full upstream filter set, `GET /discovery/search`
+  `GET /discovery/resources` with the full upstream filter set, `GET /discovery/resource`
+  for a single listing and `DELETE /discovery/resource` to withdraw one, `GET /discovery/search`
   with lexical and hybrid (dense-embedding + reranking) retrieval, automatic cataloging
   off the payment path, `EXTENSION-RESPONSES` reporting, and an MCP server
   ([`docs/MCP.md`](docs/MCP.md)). A search-evaluation harness and judgement set live in

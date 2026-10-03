@@ -35,7 +35,7 @@ describe('Verify/settle resource-budget & latency measurement (#161)', () => {
   before(async () => {
     calls = { verify: 0, settle: 0 };
     app = await serve({
-      config: testConfig({ apiKeys: ['admin:s3cret'] }),
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       facilitator: stubFacilitator({
         verify: async () => {
           calls.verify++;
@@ -63,7 +63,9 @@ describe('Verify/settle resource-budget & latency measurement (#161)', () => {
     const start = Date.now();
     let p;
     for (let i = 0; i < 20; i++) {
-      p = await app.post('/verify', VALID_BODY, { authorization: 'Bearer s3cret' });
+      p = await app.post('/verify', VALID_BODY, {
+        authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
     }
     const elapsed = Date.now() - start;
     assert.equal(p.status, 200);
@@ -79,7 +81,9 @@ describe('Verify/settle resource-budget & latency measurement (#161)', () => {
     const start = Date.now();
     let p;
     for (let i = 0; i < 10; i++) {
-      p = await app.post('/settle', VALID_BODY, { authorization: 'Bearer s3cret' });
+      p = await app.post('/settle', VALID_BODY, {
+        authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
     }
     const elapsed = Date.now() - start;
     assert.equal(p.status, 200);
@@ -98,7 +102,9 @@ describe('Verify/settle resource-budget & latency measurement (#161)', () => {
     const N = 30;
     const results = await Promise.all(
       Array.from({ length: N }, () =>
-        app.post('/verify', VALID_BODY, { authorization: 'Bearer s3cret' }),
+        app.post('/verify', VALID_BODY, {
+          authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+        }),
       ),
     );
     const elapsed = Date.now() - start;
@@ -125,7 +131,7 @@ describe('Worst-case payload spread vs. resource bound (#161)', () => {
   before(async () => {
     calls = { settle: 0 };
     app = await serve({
-      config: testConfig({ apiKeys: ['admin:s3cret'] }),
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
       facilitator: stubFacilitator({
         // Worst-case legitimate payload: a rich discovery extension with
         // multiple auth entries should still settle within budget.
@@ -144,7 +150,9 @@ describe('Worst-case payload spread vs. resource bound (#161)', () => {
     // A __check_auth-style payer costs more than a classic keypair; even the
     // richer payload must stay well under the interactive ceiling.
     const start = Date.now();
-    const res = await app.post('/settle', VALID_BODY, { authorization: 'Bearer s3cret' });
+    const res = await app.post('/settle', VALID_BODY, {
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+    });
     const elapsed = Date.now() - start;
     assert.equal(res.status, 200);
     assert.ok(elapsed < 2000, `worst-case settle took ${elapsed}ms, expected < 2000ms`);

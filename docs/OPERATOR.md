@@ -226,11 +226,15 @@ Full detail: [`docs/OPERATIONS.md`](./OPERATIONS.md).
 
 ### Discovery caching
 
-`GET /discovery/resources` and `GET /discovery/search` are the polled half of the
-service — agents, Bazaar crawlers and dashboards hit them in loops, and every
-`/discovery/search` miss re-embeds the query and re-scores the catalog. Both routes
-therefore send caching validators so an unchanged poll costs a header comparison
-instead of the ranking path (#200):
+`GET /discovery/resources`, `GET /discovery/resource` and `GET /discovery/search`
+are the polled half of the service — agents, Bazaar crawlers and dashboards hit
+them in loops, and every `/discovery/search` miss re-embeds the query and
+re-scores the catalog. All three therefore send caching validators so an
+unchanged poll costs a header comparison instead of the ranking path (#200):
+
+The point read is the exception to "unchanged": a `404` is answered **without**
+cache headers, because a cached "this listing does not exist" would keep every
+reader misinformed for the whole max-age after the seller registers it (#222).
 
 - `Cache-Control: public, max-age=<n>, stale-while-revalidate=<m>` — configured via
   `DISCOVERY_CACHE_MAX_AGE_SECONDS` (default 60) and

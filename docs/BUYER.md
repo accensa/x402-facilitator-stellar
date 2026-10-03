@@ -72,6 +72,12 @@ curl -s "http://localhost:3402/discovery/search?query=joke" | jq '.resources[] |
 curl -s "http://localhost:3402/discovery/resources?type=http&network=stellar:testnet&limit=10" | jq '.items[] | {url, serviceName, pricing}'
 ```
 
+**Read one** by URL, when you already know what you want — no paging the whole catalog:
+
+```bash
+curl -s "http://localhost:3402/discovery/resource?url=http%3A%2F%2Fapi.ex%2Fpaid" | jq '.resource'
+```
+
 The catalog is populated automatically off the payment path when a seller's endpoint
 declares the `bazaar` extension, so a listing here means real money has already moved
 for that resource — payment-verified listings outrank manually registered ones

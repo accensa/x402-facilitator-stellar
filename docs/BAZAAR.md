@@ -38,6 +38,48 @@ curl "https://facilitator.example.com/discovery/resources?type=mcp&limit=10"
 }
 ```
 
+## API: `GET /discovery/resource`
+
+Reads a **single** entry, keyed by its URL — the point lookup behind the listing (#222). A caller who already knows the URL does not have to page the whole catalog to find it. Pass `toolName` to disambiguate two tools sharing one MCP server URL.
+
+Unauthenticated, like the other discovery reads. A missing `url` is a `400`; an unknown `url` is a `404` with reason `resource_not_found`, deliberately sent **without** cache headers — a cached "does not exist" would outlive the seller's registration and keep every reader misinformed for the whole max-age.
+
+### Example
+```bash
+curl "https://facilitator.example.com/discovery/resource?url=http%3A%2F%2Fmcp.ex&toolName=search_docs"
+```
+```json
+{
+  "x402Version": 2,
+  "resource": {
+    "type": "mcp",
+    "url": "http://mcp.ex",
+    "toolName": "search_docs",
+    "serviceName": "Documentation Search",
+    "scheme": "exact",
+    "network": "stellar:testnet"
+  }
+}
+```
+
+## API: `DELETE /discovery/resource`
+
+Removes a listing outright (#221). Before this the catalog was append-only in practice: `pruneExpired` only ever hid verify-created provisional entries, and only until the next verify re-registered them.
+
+The removal is not a hide. The entry, its per-`payTo` accounting and its embedding all go, so a later `/verify` re-creates it as a fresh provisional listing rather than resurrecting the old one. The deletion is by exact key and does **not** consult the public-view filter, so an expired-but-not-yet-pruned entry — invisible to every read, yet still occupying its key — can still be removed by the only route that can name it.
+
+Authenticated and metered against the catalog-write bucket like `POST /discovery/resources`, and audited as `catalog_delete`. **Deletion is not scoped to the caller**: nothing in this service maps an API key to a `payTo`, so there is no ownership to enforce and pretending otherwise would be a check that always passes. Any valid key may remove any listing; the audit event records who did.
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $KEY" \
+  "https://facilitator.example.com/discovery/resource?url=http%3A%2F%2Fapi.ex%2Fpaid"
+```
+```json
+{ "ok": true, "removed": { "url": "http://api.ex/paid", "toolName": null } }
+```
+
+A `404` with reason `resource_not_found` means nothing matched — the route does not report a removal that did not happen.
+
 ## API: `GET /discovery/search`
 
 Provides search over discovered resources, designed to be called by agents discovering tools on the fly. It takes a natural-language `query` (§3.2), with `limit`/`cursor` pagination and a `partialResults` flag.
@@ -87,6 +129,12 @@ Why exponential rather than a step function: a step (e.g. "drop everything older
 When `EMBEDDINGS_URL` is set, a dense leg runs alongside the lexical one: the query and each resource are embedded, cosine similarity is computed, and the two ranked lists are fused with **Reciprocal Rank Fusion** (`k = 60`). When `ENABLE_RERANKING=true`, the fused top page is passed through a reranker. With no provider configured (the memory-backed default), the lexical leg alone decides order and `partialResults` is reported `true` — see above.
 
 **Embedding model changes:** embedding responses are validated (non-empty array of finite numbers). The dimension of the first accepted vector is recorded; a later vector with a different length is rejected with an explicit error log — it means the embedding model or provider changed and the index must be rebuilt (see the re-index procedure at the end of this file). An operator changing the model should re-index rather than letting stored vectors silently mismatch every query vector.
+
+**A vector describes the text it was computed from, and nothing else (#220).** A re-cataloguing upsert builds the new entry on top of the existing one, so it inherits the previous vector. When the new content composes to different text, that vector is no longer a description of the resource, and the dense leg would go on ranking it by content that no longer exists — silently, because a failed re-embed only logs a warning.
+
+So the stale vector is dropped **synchronously**, before the embed is attempted. While the new vector is being computed the resource ranks lexically (honest) rather than densely against the wrong document (confident and wrong), and if the re-embed then fails the drop has already happened and stays. Each vector carries a fingerprint of the text it was computed from; an upsert whose text is unchanged keeps its vector and skips the embed entirely, so a verify re-touching an already-listed resource costs no provider call.
+
+The fingerprint is a change *detector*, not a security measure — a non-cryptographic 64-bit hash (FNV-1a over two lanes), sufficient to tell whether the attached vector still describes the entry, and collision-resistant enough that two genuinely different listings do not share one.
 
 #### Integrity caveat: the `+5` verified boost
 

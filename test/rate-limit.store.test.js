@@ -241,12 +241,14 @@ test('GET /usage over HTTP reads the fee counter that survived a restart', async
   await new RateLimiter(limits, store).recordSettle({ keyId: 'ADMIN' }, 1234);
 
   const app = await serve({
-    config: testConfig({ apiKeys: ['admin:s3cret'] }),
+    config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
     facilitator: stubFacilitator(),
     rateLimiter: new RateLimiter(limits, store), // fresh limiter, shared store
   });
   try {
-    const res = await app.get('/usage', { authorization: 'Bearer s3cret' });
+    const res = await app.get('/usage', {
+      authorization: 'Bearer s3cret-0123456789abcdefghijklmnopqrstuvwxyz',
+    });
     assert.equal(res.status, 200);
     const usage = await res.json();
     assert.equal(usage.fee_spd, 1234);

@@ -22,7 +22,9 @@ describe('Exhaustive Rejection Reason Taxonomy', () => {
 
   before(async () => {
     app = await serve();
-    authApp = await serve({ config: testConfig({ apiKeys: ['admin:s3cret'] }) });
+    authApp = await serve({
+      config: testConfig({ apiKeys: ['admin:s3cret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
   });
 
   after(() => {

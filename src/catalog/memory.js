@@ -194,24 +194,80 @@ export class MemoryCatalogStore extends CatalogStore {
    * up, never blocking the upsert or the payment path. `_afterEmbedding` is a
    * hook that durable stores override to persist the freshly-computed vector
    * (#139) — the base implementation stores nothing.
+   *
+   * A vector describes the text it was computed from, and nothing else (#220).
+   * `entry` is built as `{...existing, ...resource}`, so it inherits the
+   * *previous* vector; when the new content composes to different text that
+   * vector is no longer a description of this resource, and the dense search
+   * leg would go on ranking it by content that no longer exists — silently,
+   * because a failed re-embed only logs a warning. So the stale vector is
+   * dropped **now**, synchronously, before the embed is attempted: while the
+   * new vector is being computed the resource ranks lexically (honest), rather
+   * than densely against the wrong document (confident and wrong). If the
+   * re-embed then fails, the drop has already happened and stays.
+   *
+   * When the text is *unchanged* the inherited vector is still correct, and a
+   * failed re-embed is then only a wasted call — it keeps the vector it has.
    */
   _scheduleEmbed(entry) {
     if (!this.embeddingClient.url) return;
+
+    const fingerprint = this._documentFingerprint(entry);
+    // The vector matches the content: nothing to recompute, and nothing to
+    // invalidate. Skipping here also keeps a verify that re-touches an
+    // unchanged listing from re-embedding it on every payment.
+    if (entry.embedding && entry.embedding_source === fingerprint) return;
+
+    // Synchronous, so the entry a durable store persists on this upsert is
+    // already the invalidated one — the removal cannot lose a race with the
+    // background write.
+    delete entry.embedding;
+    delete entry.embedding_source;
+
     const p = Promise.resolve().then(async () => {
       try {
         const text = this.embeddingClient.composeDocument(entry);
         const vector = await this.embeddingClient.embed(text);
         if (vector) {
           entry.embedding = vector;
+          entry.embedding_source = fingerprint;
           await this._afterEmbedding(entry);
         }
       } catch (err) {
+        // The vector is already gone and already persisted as gone; the
+        // resource falls back to lexical ranking until a later upsert
+        // recomputes it.
         console.warn(`[Catalog] Failed to re-embed ${this._key(entry)}: ${err.message}`);
       } finally {
         this._pendingEmbeddings.delete(p);
       }
     });
     this._pendingEmbeddings.add(p);
+  }
+
+  /**
+   * A stable fingerprint of the text a vector would be computed from.
+   *
+   * This is a change *detector*, not a security measure: it decides whether
+   * the vector already attached to an entry still describes that entry. A
+   * cheap non-cryptographic hash is sufficient and keeps the payment path
+   * free of a hash of the full document on every upsert — but it must be
+   * collision-resistant enough that two genuinely different listings do not
+   * share one, so it is a real 64-bit hash rather than a length or a prefix.
+   */
+  _documentFingerprint(entry) {
+    const text = this.embeddingClient.composeDocument(entry);
+    // FNV-1a, 64-bit via two 32-bit lanes. Not cryptographic; see above.
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      h1 ^= c;
+      h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 = (h2 + c) >>> 0;
+      h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+    }
+    return `${text.length}:${h1.toString(16)}:${h2.toString(16)}`;
   }
 
   /** Hook for durable stores to persist a freshly-computed embedding vector. */
@@ -231,6 +287,33 @@ export class MemoryCatalogStore extends CatalogStore {
     const key = toolName ? `${url}::${toolName}` : `${url}::`;
     const entry = this.resources.get(key) || null;
     return entry && this._isPublic(entry) ? entry : null;
+  }
+
+  /**
+   * Removes a listing outright (#221). Unlike an expiry this is not a hide: the
+   * entry, its payTo accounting and its vector all go, so a later verify
+   * re-creates it as a fresh provisional listing rather than resurrecting the
+   * old one.
+   *
+   * Deletion is by exact key, so it deliberately does *not* consult `_isPublic`:
+   * an expired-but-not-yet-pruned entry is still occupying its key, and refusing
+   * to remove it would make a listing that is invisible to every read
+   * impossible to delete by the only route that can name it.
+   */
+  async deleteResource(url, toolName = null) {
+    const key = toolName ? `${url}::${toolName}` : `${url}::`;
+    const entry = this.resources.get(key);
+    if (!entry) return { removed: false, resource: null };
+
+    this.resources.delete(key);
+    this._decrementPayToCount(entry.payTo);
+    // A removal is a catalog write: bump the version so cached discovery
+    // responses are invalidated rather than serving the deleted listing until
+    // their TTL expires (#200).
+    this._version += 1;
+    this._lastModified = new Date();
+
+    return { removed: true, resource: entry };
   }
 
   /**

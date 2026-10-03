@@ -27,6 +27,7 @@ test('every path in the spec is a route the app actually serves', async () => {
   const doc = loadYaml(readFileSync(SPEC_PATH, 'utf8'));
   const specPaths = Object.keys(doc.paths).sort();
   assert.deepEqual(specPaths, [
+    '/discovery/resource',
     '/discovery/resources',
     '/discovery/search',
     '/healthz',

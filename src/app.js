@@ -916,6 +916,115 @@ export async function createApp(
     },
   );
 
+  /**
+   * Single-resource read (#222).
+   *
+   * `getResource` has been on the `CatalogStore` interface all along, but the
+   * only callers were tests and the overwrite check inside the two write paths:
+   * a client could list and search the catalog but could not ask about one
+   * listing it already knew the URL of without paging through results looking
+   * for it. That is the read half of the removal route below.
+   *
+   * Addressed by (url, toolName) rather than an opaque id, because that pair is
+   * the catalog's actual key — the same one `POST` and `DELETE` address.
+   */
+  app.get('/discovery/resource', { onRequest: cors('public') }, async (req, reply) => {
+    annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/discovery/resource' });
+    const checkCatalogRead = await rateLimiter.checkCatalogRead(req);
+    if (!checkCatalogRead.allowed)
+      return rejectRateLimited(req, reply, '/discovery/resource', checkCatalogRead, audit);
+
+    const url = req.query.url;
+    if (!url) {
+      return reply.code(400).send({ error: 'invalid_request', reason: 'url is required' });
+    }
+    const toolName = req.query.toolName ?? null;
+
+    try {
+      const entry = await catalog.getResource?.(url, toolName);
+      const recorded = await rateLimiter.recordCatalogRead(req);
+      const limited = handleRateLimit(reply, recorded, checkCatalogRead);
+      if (limited) return limited;
+
+      if (!entry) {
+        // Deliberately before applyDiscoveryCache: caching headers on a 404
+        // would let a proxy serve "this listing does not exist" for the whole
+        // max-age after the seller registers it.
+        return reply.code(404).send({ error: 'not_found', reason: 'resource_not_found' });
+      }
+
+      const cache = applyDiscoveryCache(req, reply, catalog, config.discoveryCache, {
+        url,
+        toolName,
+      });
+      if (cache.notModified) return reply.code(304).send();
+
+      return reply.send({ x402Version: 2, resource: entry });
+    } catch (err) {
+      console.error(`[Discovery] getResource error: ${err.message}`);
+      return reply.code(500).send({ error: 'internal_error', reason: 'internal_error' });
+    }
+  });
+
+  /**
+   * Remove a listing (#221).
+   *
+   * There was no way to take a resource out of the catalog: `pruneExpired` only
+   * ever hid verify-created provisional entries, and only until the next verify
+   * re-registered them. A seller who published a wrong URL, or an operator who
+   * needed to pull a listing, had no route — the catalog was append-only in
+   * practice.
+   *
+   * Authenticated, and deletion is not scoped to the caller's own payTo:
+   * nothing in this service maps an API key to a `payTo` (there is no such
+   * binding to check), so pretending to enforce ownership here would be a
+   * check that always passes. Any valid key may delete any listing; the audit
+   * event records who did.
+   */
+  app.delete(
+    '/discovery/resource',
+    { onRequest: cors('authenticated'), preHandler: requireApiKey },
+    async (req, reply) => {
+      annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/discovery/resource' });
+      const checkCatalog = await rateLimiter.checkCatalog(req);
+      if (!checkCatalog.allowed)
+        return rejectRateLimited(req, reply, '/discovery/resource', checkCatalog, audit);
+
+      const url = req.query.url;
+      if (!url) {
+        return reply.code(400).send({ error: 'invalid_request', reason: 'url is required' });
+      }
+      const toolName = req.query.toolName ?? null;
+
+      const recorded = await rateLimiter.recordCatalog(req);
+      const limited = handleRateLimit(reply, recorded, checkCatalog);
+      if (limited) return limited;
+
+      try {
+        const { removed, resource } = await catalog.deleteResource(url, toolName);
+        if (!removed) {
+          return reply.code(404).send({ error: 'not_found', reason: 'resource_not_found' });
+        }
+        // Same broadcast as a write (#392): peers must drop the listing from
+        // their cached searches rather than serving it until their TTL expires.
+        await catalog.searchCache?.invalidate({ reason: 'cataloging:delete' });
+        audit('catalog_delete', {
+          actor: req.keyId ?? `ip:${req.ip}`,
+          url: resource.url,
+          tool_name: resource.toolName ?? null,
+        });
+        return reply.send({
+          ok: true,
+          removed: { url: resource.url, toolName: resource.toolName ?? null },
+        });
+      } catch (err) {
+        console.error(`[Catalog] delete error: ${err.message}`);
+        const code = err && err.code ? err.code : 'catalog_error';
+        return reply.code(500).send({ error: 'catalog_error', reason: code });
+      }
+    },
+  );
+
   app.get('/discovery/resources', { onRequest: cors('public') }, async (req, reply) => {
     annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/discovery/resources' });
     const checkCatalogRead = await rateLimiter.checkCatalogRead(req);
@@ -1042,6 +1151,17 @@ export async function createApp(
 
   app.options('/supported', { onRequest: cors('public') }, preflight('public'));
   app.options('/discovery/search', { onRequest: cors('public') }, preflight('public'));
+  app.options(
+    '/discovery/resource',
+    { onRequest: cors('authenticated') },
+    // The only route that answers both a public GET and an authenticated
+    // DELETE. A simple GET never preflights, so the OPTIONS route exists for
+    // the DELETE — and it takes the authenticated policy, exactly as
+    // /discovery/resources does for its authenticated POST: never default-open
+    // anything a caller can reach with a key. The class default `POST, OPTIONS`
+    // would still under-advertise, hence the explicit verb list (#221).
+    preflight('authenticated', 'GET, DELETE, OPTIONS'),
+  );
   app.options(
     '/discovery/resources',
     { onRequest: cors('authenticated') },

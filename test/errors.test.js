@@ -111,10 +111,12 @@ describe('errors that escape the route-level catches', () => {
     };
     const app = await serve({
       rateLimiter,
-      config: testConfig({ apiKeys: ['test:secret'] }),
+      config: testConfig({ apiKeys: ['test:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
     });
     try {
-      const res = await app.get('/usage', { authorization: 'Bearer secret' });
+      const res = await app.get('/usage', {
+        authorization: 'Bearer secret-0123456789abcdefghijklmnopqrstuvwxyz',
+      });
       assert.equal(res.status, 500);
       assert.match(res.headers.get('content-type'), /application\/json/);
       const body = await res.json();

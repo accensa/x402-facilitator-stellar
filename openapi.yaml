@@ -501,6 +501,154 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /discovery/resource:
+    get:
+      tags: [discovery]
+      summary: Read a single catalog entry by URL
+      description: |
+        The point read behind the listing: a caller who knows a resource's
+        URL does not have to page the whole catalog to find it (#222).
+        Unauthenticated, like the other discovery reads.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceUrl'
+        - $ref: '#/components/parameters/ResourceToolName'
+      responses:
+        '200':
+          description: The catalog entry.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [x402Version, resource]
+                properties:
+                  x402Version:
+                    type: integer
+                    const: 2
+                  resource:
+                    $ref: '#/components/schemas/CatalogResource'
+        '304':
+          description: |
+            The client's `If-None-Match` validator still matches — the entry
+            is unchanged, and the response carries no body (#200).
+        '400':
+          description: '`url` was omitted.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, reason]
+                properties:
+                  error:
+                    type: string
+                    const: invalid_request
+                  reason:
+                    type: string
+                    const: url is required
+        '404':
+          description: |
+            No public entry matches. Deliberately sent without cache
+            headers: a cached "does not exist" would outlive the seller's
+            registration.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, reason]
+                properties:
+                  error:
+                    type: string
+                    const: not_found
+                  reason:
+                    type: string
+                    const: resource_not_found
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [discovery]
+      summary: Remove a catalog entry
+      description: |
+        Deletes a listing outright (#221) — the entry, its per-`payTo`
+        accounting and its embedding all go, so a later `/verify` re-creates
+        it as a fresh provisional listing rather than resurrecting the old
+        one. Any valid API key may remove any listing: nothing maps a key to
+        a `payTo`, so there is no ownership to enforce. The removal is
+        audited as `catalog_delete`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceUrl'
+        - $ref: '#/components/parameters/ResourceToolName'
+      responses:
+        '200':
+          description: Removed.
+          headers:
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, removed]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  removed:
+                    type: object
+                    required: [url, toolName]
+                    properties:
+                      url:
+                        type: string
+                      toolName:
+                        type: [string, 'null']
+        '400':
+          description: '`url` was omitted.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 'Nothing matched, so nothing was removed.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, reason]
+                properties:
+                  error:
+                    type: string
+                    const: not_found
+                  reason:
+                    type: string
+                    const: resource_not_found
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          description: 'The durable delete failed; `reason` carries the store code.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, reason]
+                properties:
+                  error:
+                    type: string
+                    const: catalog_error
+                  reason:
+                    type: string
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -574,6 +722,23 @@ components:
         type: string
 
   parameters:
+    ResourceUrl:
+      name: url
+      in: query
+      required: true
+      description: The resource's URL, exactly as it appears in the catalog. A 400 is returned if omitted.
+      schema:
+        type: string
+    ResourceToolName:
+      name: toolName
+      in: query
+      required: false
+      description: |
+        Narrows the lookup to one tool when several share a URL (an MCP
+        server exposing more than one tool). Omitted matches the URL's own
+        entry.
+      schema:
+        type: string
     FilterType:
       name: type
       in: query

@@ -45,6 +45,18 @@ restarts — see docs/DEPLOYMENT.md ("Shared Rate-Limit State").
 
 ## Configuration
 
+### API keys
+
+Keys are configured in `FACILITATOR_API_KEYS` as `id:secret` pairs, comma-separated. Three rules apply at boot (#207):
+
+- **The secret must be at least 32 characters.** The digest is a single unsalted SHA-256, which is not a work factor, so the secret's own entropy is the whole of the key's strength. A shorter secret fails the boot with the offending id and a generator command. This is a **breaking change**: a deployment with short keys will not start until they are regenerated with `openssl rand -base64 32`.
+- **An optional third field is an expiry, in epoch seconds** — `admin:<secret>:1798761600`. Epoch, not ISO-8601, because the separator is `:` and an ISO timestamp contains colons of its own. Expiry is enforced **per request**: a long-running process stops accepting the key the moment it lapses, with no redeploy.
+- **A key listed in `FACILITATOR_REVOKED_API_KEYS`** (a comma-separated list of key *ids*) is refused on every request with `revoked_api_key`. Listing the id rather than deleting the line keeps the revocation reviewable and keeps the secret out of git history as a "deleted" line. A listed id that matches no configured key logs a warning at boot — usually a typo, which would otherwise revoke nothing at all.
+
+Both refusals are distinct from an unknown key: `revoked_api_key` and `expired_api_key` say the key existed, `invalid_api_key` says it never matched. See docs/AUTHENTICATION.md.
+
+## Rate Limits
+
 Rate limits are configured via environment variables. There is a global default, and you can apply overrides per API key. 
 
 Limits are expressed as comma-separated `key=value` pairs.

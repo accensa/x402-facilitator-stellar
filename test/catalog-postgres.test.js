@@ -50,7 +50,11 @@ function fakePool({ fail = false, data = new Map() } = {}) {
       }
 
       if (/DELETE/.test(sql)) {
-        for (const key of params[0] ?? []) data.delete(key);
+        // Pruning passes an array of keys; deleteResource passes one. Accept
+        // both so the fake mirrors what node-postgres would actually do with
+        // `= ANY($1)` and `= $1` respectively.
+        const targets = Array.isArray(params[0]) ? params[0] : [params[0]];
+        for (const key of targets) data.delete(key);
         return {};
       }
 
@@ -150,6 +154,38 @@ describe('PostgresCatalogStore (issue #139)', () => {
     const pruned = await store.pruneExpired();
     assert.equal(pruned, 1);
     assert.equal(data.size, 0, 'the durable row must be pruned too');
+  });
+
+  test('deleteResource removes the durable row, so a restart cannot resurrect it (#221)', async () => {
+    const data = new Map();
+    const pool = fakePool({ data });
+    const storeA = new PostgresCatalogStore(storeConfig, { pool });
+    await storeA.ready;
+    await storeA.upsertResource(settledResource('http://api.ex/doomed'), 'settle');
+    assert.equal(data.size, 1);
+
+    const result = await storeA.deleteResource('http://api.ex/doomed');
+    assert.equal(result.removed, true);
+    assert.equal(data.size, 0, 'the durable row must go, not just the in-memory entry');
+
+    const storeB = new PostgresCatalogStore(storeConfig, { pool });
+    await storeB.ready;
+    assert.equal(await storeB.getResource('http://api.ex/doomed'), null);
+  });
+
+  test('a failed durable delete is reported rather than silently forgotten (#221)', async () => {
+    const store = new PostgresCatalogStore(storeConfig, { pool: fakePool() });
+    await store.ready;
+    await store.upsertResource(settledResource('http://api.ex/doomed'), 'settle');
+    // The row goes first, so a failure here must surface: returning success
+    // while the row survives would resurrect the listing on the next restart.
+    store.pool = fakePool({ fail: true });
+
+    await assert.rejects(
+      () => store.deleteResource('http://api.ex/doomed'),
+      err => err?.code === 'catalog_delete_failed',
+    );
+    assert.equal(store.degraded, true);
   });
 
   test('an outage degrades without failing catalog writes or reads', async () => {

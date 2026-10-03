@@ -20,7 +20,9 @@ import { serve, testConfig, VALID_BODY } from './helpers/app.js';
 describe('with API keys configured', () => {
   let app;
   before(async () => {
-    app = await serve({ config: testConfig({ apiKeys: ['admin:supersecret'] }) });
+    app = await serve({
+      config: testConfig({ apiKeys: ['admin:supersecret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
+    });
   });
   after(() => app.close());
 
@@ -45,12 +47,20 @@ describe('with API keys configured', () => {
   test('valid key (Bearer) passes auth and reaches body validation', async () => {
     // 400, not 401: the empty body is rejected by readPaymentBody, which only
     // runs once the key has been accepted.
-    const res = await app.post('/verify', {}, { authorization: 'Bearer supersecret' });
+    const res = await app.post(
+      '/verify',
+      {},
+      { authorization: 'Bearer supersecret-0123456789abcdefghijklmnopqrstuvwxyz' },
+    );
     assert.equal(res.status, 400);
   });
 
   test('valid key (plain, no Bearer prefix)', async () => {
-    const res = await app.post('/verify', {}, { authorization: 'supersecret' });
+    const res = await app.post(
+      '/verify',
+      {},
+      { authorization: 'supersecret-0123456789abcdefghijklmnopqrstuvwxyz' },
+    );
     assert.equal(res.status, 400);
   });
 
@@ -66,7 +76,9 @@ describe('with API keys configured', () => {
     // /usage echoes req.keyId, which is how a caller is identified in metering
     // and logs without the secret travelling with it. Key ids are normalized
     // to uppercase at auth.
-    const res = await app.get('/usage', { authorization: 'Bearer supersecret' });
+    const res = await app.get('/usage', {
+      authorization: 'Bearer supersecret-0123456789abcdefghijklmnopqrstuvwxyz',
+    });
     assert.equal(res.status, 200);
     assert.equal((await res.json()).keyId, 'ADMIN');
   });
@@ -82,14 +94,21 @@ describe('with API keys configured', () => {
 describe('with several keys configured', () => {
   let app;
   before(async () => {
-    app = await serve({ config: testConfig({ apiKeys: ['first:aaa', 'second:bbb'] }) });
+    app = await serve({
+      config: testConfig({
+        apiKeys: [
+          'first:aaa-0123456789abcdefghijklmnopqrstuvwxyz',
+          'second:bbb-0123456789abcdefghijklmnopqrstuvwxyz',
+        ],
+      }),
+    });
   });
   after(() => app.close());
 
   test('every key works, not just the first', async () => {
     for (const [key, id] of [
-      ['aaa', 'FIRST'],
-      ['bbb', 'SECOND'],
+      ['aaa-0123456789abcdefghijklmnopqrstuvwxyz', 'FIRST'],
+      ['bbb-0123456789abcdefghijklmnopqrstuvwxyz', 'SECOND'],
     ]) {
       const res = await app.get('/usage', { authorization: `Bearer ${key}` });
       assert.equal(res.status, 200);

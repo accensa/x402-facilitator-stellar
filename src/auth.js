@@ -1,5 +1,5 @@
 /**
- * Caller authentication and API key validation (#206).
+ * Caller authentication and API key validation (#206, #207).
  *
  * Supports two Authorization header forms:
  *   1. `Authorization: Bearer <secret>`
@@ -7,6 +7,12 @@
  *
  * Comparisons use constant-time matching over SHA-256 digests. Key IDs are
  * normalized to uppercase and attached to req.keyId.
+ *
+ * A key that *matches* can still be refused, for two reasons that are checked
+ * per request rather than at boot (#207): it has been revoked, or it has
+ * expired. Both are checked here, not in config, because a process that boots
+ * with a valid key runs for days — a check made once at startup would let an
+ * expired key keep working until the next deploy.
  */
 import crypto from 'node:crypto';
 
@@ -14,10 +20,11 @@ import crypto from 'node:crypto';
  * Extracts and verifies an API key from an Authorization header against configured keys.
  *
  * @param {string | undefined} authHeader
- * @param {Array<{ id: string, hash: Buffer }>} [apiKeys=[]]
+ * @param {Array<{ id: string, hash: Buffer, expiresAt?: number|null, revoked?: boolean }>} [apiKeys=[]]
+ * @param {number} [now=Date.now()] injectable clock, so expiry is testable
  * @returns {{ valid: boolean, keyId?: string, reason?: string }}
  */
-export function verifyApiKey(authHeader, apiKeys = []) {
+export function verifyApiKey(authHeader, apiKeys = [], now = Date.now()) {
   if (!authHeader) return { valid: false, reason: 'missing_auth_header' };
   if (authHeader === 'Bearer' || authHeader === 'Bearer ') {
     return { valid: false, reason: 'malformed_auth_header' };
@@ -43,6 +50,14 @@ export function verifyApiKey(authHeader, apiKeys = []) {
       presentedHash.length === apiKey.hash.length &&
       crypto.timingSafeEqual(presentedHash, apiKey.hash)
     ) {
+      // The secret is correct; whether the key is still *usable* is a separate
+      // question, and the caller is told which one it failed — they already
+      // hold the secret, so naming the reason tells an attacker nothing they
+      // could not learn by trying again.
+      if (apiKey.revoked) return { valid: false, reason: 'revoked_api_key' };
+      if (apiKey.expiresAt != null && now >= apiKey.expiresAt) {
+        return { valid: false, reason: 'expired_api_key' };
+      }
       return { valid: true, keyId: apiKey.id };
     }
   }

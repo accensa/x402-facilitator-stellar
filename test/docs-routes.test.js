@@ -23,7 +23,7 @@ import { stubCatalog, stubFacilitator, stubRateLimiter, testConfig } from './hel
 /** Enumerates `METHOD /path` for every route the app registers. */
 async function registeredRoutes() {
   const app = await createApp(
-    testConfig({ apiKeys: ['key_0:secret'] }),
+    testConfig({ apiKeys: ['key_0:secret-0123456789abcdefghijklmnopqrstuvwxyz'] }),
     stubFacilitator(),
     stubRateLimiter(),
     stubCatalog(),
