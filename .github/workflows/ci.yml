@@ -83,6 +83,47 @@ jobs:
           npm run smoke:examples
 
       - name: Dependency audit
-        # Known to be red: GHSA-jqcg-44mw-7w3h (proxy-addr, via express@5.2.1)
-        # landed after the last `main` run. Clearing it is issue #488.
-        run: npm audit --audit-level=high
+        # The decision command is unchanged: `npm audit --audit-level=high`
+        # against the tree `npm ci` just installed.
+        #
+        # What is added is the diagnostics, because the report npm prints names
+        # the *advisory range* ("proxy-addr 1.1.0 - 2.0.7"), not the version the
+        # lockfile resolved. A red run therefore cannot be read as "in range" vs
+        # "already patched past the range" without re-running npm by hand, and it
+        # does not say whether the offending package is a dev or a production
+        # dependency - which is the difference between "bump it" and "do not bump
+        # a production dependency to clear a dev-only advisory".
+        #
+        # `npm audit --package-lock-only` audits the lockfile without installing
+        # and can disagree with the installed-tree audit when the tree dedupes or
+        # prunes differently. Its output is printed for comparison only: the
+        # installed tree is what this service ships, so that is what CI trusts.
+        run: |
+          rc=0
+          npm audit --audit-level=high || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo
+            echo "### Resolved versions this audit rejected"
+            npm audit --json > /tmp/npm-audit.json || true
+            node -e '
+              const fs = require("node:fs");
+              const audit = JSON.parse(fs.readFileSync("/tmp/npm-audit.json", "utf8"));
+              const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+              const entries = Object.entries(audit.vulnerabilities || {});
+              if (entries.length === 0) console.log("  (nothing reported - the non-zero exit came from the audit endpoint)");
+              for (const [, v] of entries) {
+                for (const nodePath of v.nodes || []) {
+                  const pkg = lock.packages[nodePath] || {};
+                  console.log(
+                    `  - ${nodePath}: resolved ${pkg.version ?? "NOT IN LOCKFILE"} [${pkg.dev ? "dev dependency" : "production dependency"}]` +
+                      ` | advisory range ${v.range} | severity ${v.severity}` +
+                      ` | ${v.fixAvailable ? "fix available via npm audit fix" : "no automatic fix"}`,
+                  );
+                }
+              }
+            '
+            echo
+            echo "### Lockfile-only audit, for comparison (CI's decision is the installed-tree audit above)"
+            npm audit --package-lock-only --audit-level=high || true
+          fi
+          exit "$rc"
