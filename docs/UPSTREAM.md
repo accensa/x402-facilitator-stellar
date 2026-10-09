@@ -130,24 +130,26 @@ production.
   `upstream-spec-drift` with per-file diffs and the suggested new baseline SHA.
   It deliberately does **not** advance the baseline — that is the human review
   step, recorded above.
-- `conformance-on-bump.yml` runs when Renovate opens a PR that changes
-  `@x402/*` in `package.json`/`package-lock.json`. It diffs the PR against its
-  base, and if a `@x402/*` version moved, it calls the conformance workflow
-  (`.github/workflows/conformance.yml`) against the PR head. That run needs
-  testnet + the `TESTNET_USDC_TREASURY_SECRET` secret, which is why we use
-  **Renovate** (in-repo branches) rather than Dependabot — Renovate PRs are
-  ordinary in-repo PRs and CI can read repo secrets, so a breaking bump fails the
-  PR instead of being deferred.
-- Branch protection on `main` makes **`upstream e2e (stellar, testnet)`** a
-  required status check, so a `@x402/*` bump that breaks conformance cannot be
-  merged. (Configure in repo Settings → Branches; this file is the policy, the
-  setting is the enforcement.)
+- There is **no** bump-time conformance gate. `conformance-on-bump.yml` used to
+  claim this job: it triggered on `pull_request` with
+  `branches: ["renovate/**"]`, but that filter matches the PR's *base* branch,
+  and no PR is ever opened against a `renovate/**` branch. The workflow has
+  therefore produced zero runs since it was added and was deleted rather than
+  left as a promise. Until someone re-implements it (trigger on head, or
+  `repository_dispatch` from the Renovate webhook), a breaking `@x402/*` bump is
+  caught by the weekly `conformance.yml` schedule at the earliest, not by the
+  PR that introduced it.
+- There is **no branch protection on `main`** — nothing is a required status
+  check today, and no merge is blocked by any workflow in this file. The policy
+  below is enforced by review discipline only. (Settings → Branches is where
+  enforcement would have to be configured; this file records the intent.)
 
 ## Review cadence (summary)
 
 | Cadence | Mechanism | Action on signal |
 |---|---|---|
 | Weekly | `upstream-spec-watch.yml` | Open/comment `upstream-spec-drift` issue; human reviews and advances baseline |
-| On every `@x402/*` bump PR | `conformance-on-bump.yml` → conformance run | Block PR on conformance failure; review upstream changelog |
+| Weekly | `conformance.yml` schedule (06:00 UTC) | Upstream e2e run against `main`; failure is reviewed by a maintainer |
+| On a `@x402/*` bump PR | nothing today (see above) | Reviewer must request a `workflow_dispatch` conformance run |
 | On merge of a spec-changing bump | maintainer | Advance `upstream-baseline-sha` in this file, same PR |
 | Ad-hoc | `workflow_dispatch` on either workflow | Manual re-check / re-run |

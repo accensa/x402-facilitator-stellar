@@ -158,7 +158,10 @@ npm run format:check  # prettier, check only
 npm run licenses      # fails on any AGPL in the dependency path
 ```
 
-All four run in CI on every push and pull request, across Node 20 and 22.
+All four run in CI on every push and pull request, as steps of one `ci` job on
+Node 22. `package.json` declares `engines: >= 20`; nothing in CI exercises
+Node 20 any more, so treat that range as unverified (see
+[CONTRIBUTING.md](CONTRIBUTING.md#node-versions)).
 
 The end-to-end conformance run is separate, because it needs testnet and two
 funded accounts:

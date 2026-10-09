@@ -394,7 +394,7 @@ Judgements are written by humans against the *fixed* fixture catalog, before (an
 
 ### What counts as a regression
 
-The runner gates merges on two aggregate thresholds, enforced in CI on every relevant change (`eval` job in `.github/workflows/ci.yml`):
+The runner gates merges on two aggregate thresholds, checked in CI on every relevant change (the `Search evaluation` step of the `ci` job in `.github/workflows/ci.yml`; `main` has no branch protection, so a red eval is reviewed rather than machine-blocked):
 
 - **nDCG ≥ 0.85**
 - **MRR ≥ 0.8**
