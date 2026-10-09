@@ -10,10 +10,12 @@ on:
     # a drift is found within a week of landing, not a quarter later.
     - cron: '17 6 * * 1'
   workflow_dispatch:
-  # Re-check when the policy / tracked-file list itself changes.
-  pull_request:
-    paths:
-      - 'docs/UPSTREAM.md'
+  # No pull_request trigger, even though the tracked-file list lives in
+  # docs/UPSTREAM.md. This job is not a check on a pull request: its result is
+  # about x402-foundation/x402, which the PR author cannot fix, and its last
+  # step opens or comments an `upstream-spec-drift` issue on the base repo with
+  # `issues: write`. Editing the policy file would therefore mutate the issue
+  # tracker from a PR run. The weekly schedule still catches real drift.
 
 permissions:
   contents: read

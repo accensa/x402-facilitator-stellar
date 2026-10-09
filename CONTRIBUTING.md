@@ -11,14 +11,16 @@ and [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md), and open the matching issue
 before you start so you get assigned. If you are contributing through the Drips
 Stellar Wave, include `Closes #<issue>` in the PR description.
 
-## Node versions, and why they differ between jobs
+## Node versions
 
 - **Develop against Node 22.** The repo pins it in [`.nvmrc`](.nvmrc), and it is
-  the version CI lints and formats with. ESLint 9 requires Node >= 22, which is
-  why the `lint` and `format` jobs run on 22 only.
-- **`package.json` declares `engines: >= 20`.** That claim is real and tested:
-  the CI `test` job runs the suite on both Node 20 and Node 22. So your code
-  must run on 20 too — but write and test against 22, then let CI prove 20.
+  the version CI runs every step with. ESLint 9 requires Node >= 22, which is
+  why the lint step is not lower.
+- **`package.json` declares `engines: >= 20`, and CI no longer tests that.**
+  The `test` job used to run a `['20', '22']` matrix; it is now one `ci` job on
+  22. So your code should still run on 20, but CI will not prove it — if the
+  range matters to you, verify locally (`nvm use 20 && npm test`) before
+  opening the PR, or narrow `engines` to `>= 22` in its own PR.
 
 If you use `nvm`/`fnm`, `nvm use` honours `.nvmrc` and puts you on 22.
 

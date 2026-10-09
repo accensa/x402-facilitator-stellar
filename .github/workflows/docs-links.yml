@@ -10,7 +10,14 @@ name: docs-links
 on:
   push:
     branches: ['main']
+  # Path-filtered instead of unconditional: this checks links under docs/, so a
+  # code-only PR gained nothing from it. Doc PRs still get the check before
+  # merge; a stale link introduced elsewhere is caught on the merge to `main`.
   pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/markdown-link-check.json'
+      - '.github/workflows/docs-links.yml'
 
 permissions:
   contents: read

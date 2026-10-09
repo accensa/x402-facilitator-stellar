@@ -575,7 +575,7 @@ Two distinct things drift, and they are watched by two mechanisms:
 | --- | --- | --- | --- |
 | Nightly (daily) | Conformance run against `x402-foundation/x402@main` | CI, no human in the loop | Failure opens/updates a tracking issue with the run URL (workflow change tracked in [#192](https://github.com/accensa/x402-facilitator-stellar/issues/192)) |
 | Weekly | Spec-drift job diffs tracked spec files against `docs/UPSTREAM.md` baseline; opens an issue on change | CI opens; a maintainer reviews within the week | Issue triaged within 5 working days |
-| `@x402/*` bump PR | Conformance job runs against the PR; the PR is blocked on its failure | CI gate; maintainer merges or reverts | Before merge — a red conformance build never merges |
+| `@x402/*` bump PR | Nothing runs automatically. `conformance-on-bump.yml` was deleted after it was measured to have produced zero runs ever (its `branches: ["renovate/**"]` filter matched the PR *base*, which is never a renovate branch) | Maintainer requests a `workflow_dispatch` conformance run on the bump PR | Before merge, by review — there is no machine gate, and `main` has no branch protection |
 | Upstream release notice | Release notes / npm advisory | Maintainer review | Reviewed before the next scheduled run |
 
 Ownership: the drift issue is assigned to a named maintainer at all times; an
