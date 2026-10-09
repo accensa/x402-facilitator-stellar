@@ -137,8 +137,8 @@ production.
   therefore produced zero runs since it was added and was deleted rather than
   left as a promise. Until someone re-implements it (trigger on head, or
   `repository_dispatch` from the Renovate webhook), a breaking `@x402/*` bump is
-  caught by the weekly `conformance.yml` schedule at the earliest, not by the
-  PR that introduced it.
+  caught by the daily `conformance.yml` schedule at the earliest, not by the
+  PR that introduced it: a bump PR starts no conformance run of its own.
 - There is **no branch protection on `main`** — nothing is a required status
   check today, and no merge is blocked by any workflow in this file. The policy
   below is enforced by review discipline only. (Settings → Branches is where
@@ -149,7 +149,7 @@ production.
 | Cadence | Mechanism | Action on signal |
 |---|---|---|
 | Weekly | `upstream-spec-watch.yml` | Open/comment `upstream-spec-drift` issue; human reviews and advances baseline |
-| Weekly | `conformance.yml` schedule (06:00 UTC) | Upstream e2e run against `main`; failure is reviewed by a maintainer |
+| Daily | `conformance.yml` schedule (06:00 UTC) | Upstream e2e run against `main`; failure is reviewed by a maintainer |
 | On a `@x402/*` bump PR | nothing today (see above) | Reviewer must request a `workflow_dispatch` conformance run |
 | On merge of a spec-changing bump | maintainer | Advance `upstream-baseline-sha` in this file, same PR |
 | Ad-hoc | `workflow_dispatch` on either workflow | Manual re-check / re-run |
