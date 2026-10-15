@@ -6,7 +6,7 @@ import {
   extractDiscoveryInfo,
   validateDiscoveryExtension,
 } from '@x402/extensions';
-import { validateAmount } from '../sdk/validation.js';
+import { validateAmount, STELLAR_DECIMALS } from '../sdk/validation.js';
 
 // Pre-compiled regex patterns to avoid recompilation overhead and garbage collection pressure
 const ROUTE_PARAM_REGEX = /\{([^}]+)\}/g;
@@ -130,7 +130,7 @@ function addAdvisories(result, declaration) {
   }
 }
 
-function validatePolicy(paymentPayload, paymentRequirements, result) {
+function validatePolicy(paymentPayload, paymentRequirements, result, assetDecimalsMap = null) {
   let extracted;
   try {
     extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
@@ -158,7 +158,9 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
     }
     // Validate pricing.amount format (#225) to prevent toStroops from throwing later
     if (rawBazaar.pricing?.amount !== undefined) {
-      const amountErrors = validateAmount(rawBazaar.pricing.amount);
+      const asset = rawBazaar.pricing.asset ?? paymentRequirements.asset ?? 'native';
+      const decimals = assetDecimalsMap?.[asset] ?? STELLAR_DECIMALS;
+      const amountErrors = validateAmount(rawBazaar.pricing.amount, decimals);
       if (amountErrors.length > 0) {
         result.hardDrop = true;
         result.reason = 'invalid_pricing_amount';
@@ -279,7 +281,7 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
  * directly; SDK declarations are adapted into the same Bazaar extension shape.
  * Seller-only guidance is returned as advisories and never changes admission.
  */
-export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
+export function validateDiscoveryPolicy(input, paymentRequirements = {}, assetDecimalsMap = null) {
   const result = createResult();
   if (!input || typeof input !== 'object') {
     result.hardDrop = true;
@@ -301,7 +303,7 @@ export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
       result.reason = 'invalid_declaration';
       return result;
     }
-    return validatePolicy(input.paymentPayload, input.paymentRequirements, result);
+    return validatePolicy(input.paymentPayload, input.paymentRequirements, result, assetDecimalsMap);
   }
 
   addAdvisories(result, input);
@@ -345,10 +347,11 @@ export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
       payTo: input.payTo || paymentRequirements.payTo || '',
     },
     result,
+    assetDecimalsMap,
   );
   return policy;
 }
 
-export function validateForCatalog(paymentPayload, paymentRequirements) {
-  return validateDiscoveryPolicy({ paymentPayload, paymentRequirements });
+export function validateForCatalog(paymentPayload, paymentRequirements, assetDecimalsMap = null) {
+  return validateDiscoveryPolicy({ paymentPayload, paymentRequirements }, paymentRequirements, assetDecimalsMap);
 }

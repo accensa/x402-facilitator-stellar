@@ -81,6 +81,7 @@ export async function createApp(
     dlq = null,
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+    assetCaches = extras.assetCaches ?? {},
   } = extras;
 
   // Observability collaborators.
@@ -240,7 +241,21 @@ export async function createApp(
    */
   async function processCataloging(req, body, reply, source = 'verify') {
     try {
-      const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
+      const network = body.paymentRequirements?.network ?? config.networks[0];
+      const assetCache = assetCaches[network];
+      let assetDecimalsMap = null;
+      if (assetCache) {
+        // Build a synchronous map of known asset decimals for validation
+        assetDecimalsMap = {};
+        for (const [asset, cached] of assetCache.cache) {
+          if (cached.expiresAt > Date.now()) {
+            assetDecimalsMap[asset] = cached.decimals;
+          }
+        }
+        // Ensure native XLM is always present
+        assetDecimalsMap.native = 7;
+      }
+      const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements, assetDecimalsMap);
       const outcome = {};
 
       if (validation.hardDrop) {

@@ -10,22 +10,22 @@ export { parsePayUri, buildPayUri, payUriFromRequirements, Sep7Error } from './s
  * JavaScript number has usually already lost precision before this function
  * sees it.
  *
- * A fractional part longer than 7 decimals is truncated, not rounded: rounding
- * would invent stroops the seller never typed. Stellar's asset precision is 7
- * decimals, so the 8th digit and beyond are simply dropped.
+ * A fractional part longer than the asset's decimals is rejected (not truncated)
+ * to prevent silent precision loss. For native XLM (7 decimals), the default
+ * maintains backward-compatible truncation behavior.
  *
  * Throws (never coerces) on non-numeric input, negatives, and number inputs.
  * Zero is a valid amount — see validateAmount.
  */
-export function toStroops(amount) {
-  const errors = validateAmount(amount);
+export function toStroops(amount, assetDecimals = STELLAR_DECIMALS) {
+  const errors = validateAmount(amount, assetDecimals);
   if (errors.length > 0) {
     throw new Error(errors[0]);
   }
   if (typeof amount === 'bigint') return amount.toString();
   const [intPart, fracPart = ''] = amount.split('.');
-  const truncatedFrac = fracPart.slice(0, STELLAR_DECIMALS);
-  const paddedFrac = truncatedFrac.padEnd(STELLAR_DECIMALS, '0');
+  const truncatedFrac = fracPart.slice(0, assetDecimals);
+  const paddedFrac = truncatedFrac.padEnd(assetDecimals, '0');
   return BigInt(intPart.replace(/^\+/, '') + paddedFrac).toString();
 }
 

@@ -22,10 +22,10 @@ const DECIMAL_AMOUNT_RE = /^[+-]?\d+(?:\.\d+)?$/;
  * discovery catalog to list. A number is not a valid input shape — the caller
  * has almost certainly already lost precision before this function sees it
  * (Number('123456789012345678.9') rounds), so only decimal strings and BigInt
- * (an exact stroop count) are accepted. A fraction longer than a stroop is
- * truncated on conversion (in toStroops), never rounded.
+ * (an exact stroop count) are accepted. A fraction longer than the asset's
+ * decimals is rejected (not truncated) to prevent silent precision loss.
  */
-export function validateAmount(amount) {
+export function validateAmount(amount, assetDecimals = STELLAR_DECIMALS) {
   if (amount === undefined || amount === null || amount === '') {
     return ['pricing.amount is required'];
   }
@@ -40,6 +40,13 @@ export function validateAmount(amount) {
   }
   if (amount.startsWith('-')) {
     return [`pricing.amount must not be negative (got "${amount}")`];
+  }
+  // Reject sub-stroop fractions: amount precision must not exceed asset decimals
+  const [, fracPart = ''] = amount.split('.');
+  if (fracPart.length > assetDecimals) {
+    return [
+      `pricing.amount "${amount}" has ${fracPart.length} decimal places but asset only supports ${assetDecimals}`,
+    ];
   }
   return [];
 }
