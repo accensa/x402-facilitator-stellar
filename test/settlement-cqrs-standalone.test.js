@@ -13,6 +13,7 @@ import {
 } from '../src/settlement-cqrs.js';
 import { SETTLEMENT_EVENT_TYPES } from '../src/eventstore/events.js';
 import { validateEventOrdering } from '../src/eventstore/projection-worker.js';
+import { createMetrics } from '../src/metrics.js';
 
 /**
  * Minimal fake pool for testing
@@ -244,5 +245,94 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     assert.strictEqual(pool.projections.size, 2);
     assert.ok(pool.projections.has('multi-1'));
     assert.ok(pool.projections.has('multi-2'));
+  });
+
+  test('ProjectionWorker publishes a non-zero projection throughput gauge', async () => {
+    const pool = createFakePool();
+    pool.events.push(
+      {
+        seq: 1,
+        idempotency_key: 'throughput-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'throughput-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 2,
+        idempotency_key: 'throughput-2',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'throughput-2',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+    );
+
+    // Make the batch measurably slow so `Date.now()` yields a non-zero
+    // duration for the batch being measured.
+    const originalQuery = pool.query;
+    pool.query = async (text, params) => {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return originalQuery(text, params);
+    };
+
+    const metrics = createMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+    await worker.processBatch();
+
+    const exposition = metrics.render();
+    const gaugeLine = exposition
+      .split('\n')
+      .find(line => line.startsWith('x402_projection_throughput_events_per_second '));
+    assert.ok(gaugeLine, 'throughput gauge must appear in the exposition');
+
+    const value = Number(gaugeLine.split(' ')[1]);
+    assert.ok(Number.isFinite(value), `throughput reading ${gaugeLine} must be finite`);
+    assert.ok(value > 0, `throughput reading ${value} must be non-zero after a real batch`);
+
+    // 2 settlements split over at least one ~20ms sleep per query: the
+    // reading has to sit between the batch's own fast and slow rate bounds.
+    assert.ok(value <= 2 / 0.018, `throughput reading ${value} below the batch rate bound`);
+    assert.ok(value >= 2 / 1.0, `throughput reading ${value} above the batch rate bound`);
+  });
+
+  test('ProjectionWorker leaves the throughput gauge numeric for batches without measurable duration', async () => {
+    const pool = createFakePool();
+
+    const metrics = createMetrics();
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+
+    // No events queued: the worker returns before the metric block and the
+    // exposition must keep the seeded 0 rather than a NaN/Infinity/negative.
+    await worker.processBatch();
+
+    const exposition = metrics.render();
+    assert.ok(!exposition.includes('NaN'), 'exposition must not contain NaN');
+    assert.ok(!exposition.includes('Infinity'), 'exposition must not contain Infinity');
+    assert.ok(!exposition.includes(' -'), 'exposition must not contain negative readings');
+
+    const gaugeLine = exposition
+      .split('\n')
+      .find(line => line.startsWith('x402_projection_throughput_events_per_second '));
+    assert.ok(gaugeLine);
+    assert.strictEqual(Number(gaugeLine.split(' ')[1]), 0);
   });
 });

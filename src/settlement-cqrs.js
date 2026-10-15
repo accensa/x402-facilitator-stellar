@@ -397,10 +397,17 @@ export class ProjectionWorker {
       await this.checkpoint.updateCheckpoint(lastSeq);
     }
 
-    // Record metrics
+    // Record metrics. Each throughput reading is the batch's own average
+    // rate (events processed ÷ batch wall-clock seconds), so an operator can
+    // average per-batch readings across polls; a batch whose duration rounds
+    // to zero (or an empty batch, which returns above) leaves the previous
+    // reading in the exposition rather than publishing NaN or Infinity.
     const duration = (Date.now() - startTime) / 1000;
     this.metrics.observeProjectionBatchDuration(duration);
     this.metrics.incProjectionEventsProcessed(processedCount);
+    if (duration > 0) {
+      this.metrics.setProjectionThroughput(processedCount / duration);
+    }
 
     this.log.debug(
       `Processed ${processedCount} events in ${duration.toFixed(3)}s, checkpoint: ${lastSeq}`,

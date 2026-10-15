@@ -230,7 +230,7 @@ export function createMetrics() {
 
   const projectionThroughput = new Gauge(
     'x402_projection_throughput_events_per_second',
-    'Event processing throughput (events/second).',
+    'Average event-processing rate of the most recent projection batch (events processed ÷ batch wall-clock seconds); batches with no measurable duration leave the previous reading.',
     [],
   );
   projectionThroughput.set({}, 0);
