@@ -48,6 +48,16 @@ function licenseOf(pkg) {
   return 'UNKNOWN';
 }
 
+function classify(license) {
+  if (FORBIDDEN.some(re => re.test(license))) return 'forbidden';
+  // A dual licence offering a permissive option is fine — we take that option.
+  if (WEAK_COPYLEFT.some(re => re.test(license)) && !/\bOR\b/i.test(license)) return 'review';
+  if (license === 'UNKNOWN') return 'review';
+  return 'ok';
+}
+
+export { licenseOf, classify };
+
 /** Walks node_modules, including scoped and nested trees. */
 function* packages(dir) {
   let entries;
@@ -89,50 +99,48 @@ function* packages(dir) {
   }
 }
 
-function classify(license) {
-  if (FORBIDDEN.some(re => re.test(license))) return 'forbidden';
-  // A dual licence offering a permissive option is fine — we take that option.
-  if (WEAK_COPYLEFT.some(re => re.test(license)) && !/\bOR\b/i.test(license)) return 'review';
-  if (license === 'UNKNOWN') return 'review';
-  return 'ok';
-}
-
-const found = [...packages(join(ROOT, 'node_modules'))];
-if (found.length === 0) {
-  console.error('No packages found. Run npm ci first.');
-  process.exit(2);
-}
-
-const forbidden = [];
-const review = [];
-for (const pkg of found) {
-  const verdict = classify(pkg.license);
-  if (verdict === 'forbidden') forbidden.push(pkg);
-  else if (verdict === 'review') review.push(pkg);
-}
-
-if (process.argv.includes('--list')) {
-  const counts = new Map();
-  for (const pkg of found) counts.set(pkg.license, (counts.get(pkg.license) ?? 0) + 1);
-  for (const [license, n] of [...counts].sort((a, b) => b[1] - a[1])) {
-    console.log(`${String(n).padStart(4)}  ${license}`);
+// The walk/report/exit block only runs when the script is executed directly
+// (node scripts/check-licenses.mjs [–list]); importing the module is
+// side-effect free so tests can reach licenseOf and classify (see
+// test/licenses-policy.test.js).
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const found = [...packages(join(ROOT, 'node_modules'))];
+  if (found.length === 0) {
+    console.error('No packages found. Run npm ci first.');
+    process.exit(2);
   }
-  console.log(`\n${found.length} packages`);
-}
 
-if (review.length > 0) {
-  console.log(`\n${review.length} package(s) need a human look (not a failure):`);
-  for (const pkg of review) console.log(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
-}
+  const forbidden = [];
+  const review = [];
+  for (const pkg of found) {
+    const verdict = classify(pkg.license);
+    if (verdict === 'forbidden') forbidden.push(pkg);
+    else if (verdict === 'review') review.push(pkg);
+  }
 
-if (forbidden.length > 0) {
-  console.error(`\nFORBIDDEN LICENCE in the dependency path:`);
-  for (const pkg of forbidden) console.error(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
-  console.error(
-    '\nThis project commits to a permissive OSI licence with no AGPL in the ' +
-      'dependency path. Remove the dependency or find a permissive alternative.',
-  );
-  process.exit(1);
-}
+  if (process.argv.includes('--list')) {
+    const counts = new Map();
+    for (const pkg of found) counts.set(pkg.license, (counts.get(pkg.license) ?? 0) + 1);
+    for (const [license, n] of [...counts].sort((a, b) => b[1] - a[1])) {
+      console.log(`${String(n).padStart(4)}  ${license}`);
+    }
+    console.log(`\n${found.length} packages`);
+  }
 
-console.log(`\nLicence check passed — ${found.length} packages, none forbidden.`);
+  if (review.length > 0) {
+    console.log(`\n${review.length} package(s) need a human look (not a failure):`);
+    for (const pkg of review) console.log(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
+  }
+
+  if (forbidden.length > 0) {
+    console.error(`\nFORBIDDEN LICENCE in the dependency path:`);
+    for (const pkg of forbidden) console.error(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
+    console.error(
+      '\nThis project commits to a permissive OSI licence with no AGPL in the ' +
+        'dependency path. Remove the dependency or find a permissive alternative.',
+    );
+    process.exit(1);
+  }
+
+  console.log(`\nLicence check passed — ${found.length} packages, none forbidden.`);
+}
