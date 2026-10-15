@@ -52,6 +52,77 @@ function describeThrown(err) {
 }
 
 /**
+ * Creates a database health check function.
+ * Returns a function that checks database connectivity with a short timeout.
+ */
+function createDbHealthCheck(databaseUrl) {
+  return async () => {
+    const { Pool } = await import('pg');
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      connectionTimeoutMillis: 2000,
+      max: 1,
+    });
+    try {
+      await pool.query('SELECT 1');
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  };
+}
+
+/**
+ * Creates a Redis health check function.
+ * Returns a function that checks Redis connectivity with a short timeout.
+ */
+function createRedisHealthCheck(redisUrl) {
+  return async () => {
+    const { default: Redis } = await import('ioredis');
+    const client = new Redis(redisUrl, {
+      connectTimeout: 2000,
+      maxRetriesPerRequest: 1,
+      retryStrategy: () => null,
+    });
+    try {
+      await client.ping();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    } finally {
+      await client.quit().catch(() => {});
+    }
+  };
+}
+
+/**
+ * Creates a rate limiter backend health check function.
+ * Checks the Postgres rate_limit_buckets table connectivity.
+ */
+function createRateLimiterHealthCheck(databaseUrl) {
+  return async () => {
+    const { Pool } = await import('pg');
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      connectionTimeoutMillis: 2000,
+      max: 1,
+    });
+    try {
+      await pool.query('SELECT 1 FROM rate_limit_buckets LIMIT 1');
+      return { ok: true };
+    } catch (err) {
+      // Table might not exist yet - that's ok for health check
+      if (err.code === '42P01') return { ok: true };
+      return { ok: false, error: err.message };
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  };
+}
+
+/**
  * Builds the Fastify app.
  *
  * Takes its collaborators rather than reaching for module state, which is what
@@ -180,6 +251,9 @@ export async function createApp(
       ? createReadinessChecker(config, {
           breakerStates: extras.breakerStates ?? (() => null),
           catalog,
+          db: extras.dbHealthCheck ?? (config.databaseUrl ? createDbHealthCheck(config.databaseUrl) : null),
+          redis: extras.redisHealthCheck ?? (config.redisUrl ? createRedisHealthCheck(config.redisUrl) : null),
+          rateLimiterBackend: extras.rateLimiterHealthCheck ?? (config.databaseUrl && config.rateLimitStore === 'postgres' ? createRateLimiterHealthCheck(config.databaseUrl) : null),
         })
       : null);
 

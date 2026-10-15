@@ -43,6 +43,12 @@ const DEFAULT_TESTNET_RPC = 'https://soroban-testnet.stellar.org';
  * @param {number} [overrides.timeoutMs]
  * @param {number} [overrides.cacheTtlMs]
  * @param {number} [overrides.minBalanceStroops]
+ * @param {Function} [overrides.db] - async () => { ok: boolean, error?: string };
+ *   database connectivity check
+ * @param {Function} [overrides.redis] - async () => { ok: boolean, error?: string };
+ *   Redis connectivity check
+ * @param {Function} [overrides.rateLimiterBackend] - async () => { ok: boolean, error?: string };
+ *   rate limiter backend connectivity check
  */
 export function createReadinessChecker(
   config,
@@ -53,6 +59,9 @@ export function createReadinessChecker(
     minBalanceStroops = Number(process.env.READINESS_FUNDING_FLOOR_STROOPS ?? 0),
     breakerStates = () => null,
     catalog = null,
+    db = null,
+    redis = null,
+    rateLimiterBackend = null,
   } = {},
 ) {
   const call = rpcCall ?? ((url, body) => defaultRpcCall(url, body, timeoutMs));
@@ -179,7 +188,7 @@ export function createReadinessChecker(
     for (const target of targets) {
       networks[target.network] = await checkNetwork(target);
     }
-    const ready = Object.values(networks).every(n => n.ready);
+    const networkReady = Object.values(networks).every(n => n.ready);
 
     // Reported, never fatal: see CATALOG RULE above.
     let catalogState = null;
@@ -196,6 +205,42 @@ export function createReadinessChecker(
       }
     }
 
+    // Database connectivity check
+    let dbState = { ok: true, component: 'database' };
+    if (db) {
+      try {
+        const result = await db();
+        dbState = { ok: result?.ok ?? true, component: 'database', ...result };
+      } catch (err) {
+        dbState = { ok: false, component: 'database', error: err.message };
+      }
+    }
+
+    // Redis connectivity check
+    let redisState = { ok: true, component: 'redis' };
+    if (redis) {
+      try {
+        const result = await redis();
+        redisState = { ok: result?.ok ?? true, component: 'redis', ...result };
+      } catch (err) {
+        redisState = { ok: false, component: 'redis', error: err.message };
+      }
+    }
+
+    // Rate limiter backend check
+    let rateLimiterState = { ok: true, component: 'rate_limiter_backend' };
+    if (rateLimiterBackend) {
+      try {
+        const result = await rateLimiterBackend();
+        rateLimiterState = { ok: result?.ok ?? true, component: 'rate_limiter_backend', ...result };
+      } catch (err) {
+        rateLimiterState = { ok: false, component: 'rate_limiter_backend', error: err.message };
+      }
+    }
+
+    const infrastructureReady = dbState.ok && redisState.ok && rateLimiterState.ok;
+    const ready = networkReady && infrastructureReady;
+
     const snapshot = {
       ok: ready,
       status: ready ? 'ready' : 'not_ready',
@@ -203,6 +248,9 @@ export function createReadinessChecker(
       networks,
       breakers: breakerStates(),
       ...(catalogState ? { catalog: catalogState } : {}),
+      database: dbState,
+      redis: redisState,
+      rate_limiter_backend: rateLimiterState,
     };
     cache = { checked_at_ms: Date.now(), snapshot };
     return snapshot;
