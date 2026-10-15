@@ -2,7 +2,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { Keypair, xdr } from '@stellar/stellar-sdk';
 import { resolveConfig } from '../src/config.js';
-import { buildFacilitator } from '../src/facilitator.js';
+import { buildFacilitator, submitMultiSignerEnvelope } from '../src/facilitator.js';
+import { createMultiSignerEngine } from '../src/multi-signer.js';
 import { createApp } from '../src/app.js';
 import { createReadinessChecker } from '../src/readiness.js';
 import { signerMetrics } from '../src/metrics.js';
@@ -23,6 +24,119 @@ describe('Multi-Signer Pool & Fee-Bump Signer (#9)', () => {
     assert.equal(config.perNetwork['stellar:testnet'].secrets[0], k1.secret());
     assert.equal(config.perNetwork['stellar:testnet'].secrets[1], k2.secret());
     assert.equal(config.perNetwork['stellar:testnet'].feeBumpSecret, fb.secret());
+  });
+
+  test('threshold round-trip: 2-of-3 collects, assembles, and submits (#412)', async () => {
+    const engine = createMultiSignerEngine({
+      threshold: 2,
+      requiredSigners: undefined,
+    });
+    engine.createEnvelope({
+      id: 'env-1',
+      transactionXdr: 'AAAA threshold tx',
+      threshold: 2,
+      requiredSigners: ['cosigner-a', 'cosigner-b', 'cosigner-c'],
+    });
+    assert.equal(engine.isComplete('env-1'), false);
+    engine.addSignature('env-1', { signer: 'cosigner-a', signature: 'sig-a' });
+    assert.equal(engine.isComplete('env-1'), false);
+    // Duplicate signer does not double-count.
+    engine.addSignature('env-1', { signer: 'cosigner-a', signature: 'sig-a2' });
+    assert.equal(engine.getEnvelope('env-1').collected, 1);
+    engine.addSignature('env-1', { signer: 'cosigner-b', signature: 'sig-b' });
+    assert.equal(engine.isComplete('env-1'), true);
+
+    const assembled = engine.assembleEnvelope('env-1');
+    assert.equal(assembled.transactionXdr, 'AAAA threshold tx');
+    assert.deepEqual(
+      assembled.signatures.map(s => s.signer),
+      ['cosigner-a', 'cosigner-b'],
+    );
+
+    const submitted = [];
+    const result = await submitMultiSignerEnvelope(engine, 'env-1', async env => {
+      submitted.push(env);
+      return { hash: 'deadbeef' };
+    });
+    assert.equal(result.hash, 'deadbeef');
+    assert.equal(submitted.length, 1);
+  });
+
+  test('partial signatures expire on deadline and never assemble (#412)', async () => {
+    let t = 1_000;
+    const engine = createMultiSignerEngine({ threshold: 2, now: () => t });
+    engine.createEnvelope({
+      id: 'env-expiry',
+      transactionXdr: 'AAAA expiring',
+      threshold: 2,
+      requiredSigners: ['a', 'b'],
+      expiresInMs: 50,
+    });
+    engine.addSignature('env-expiry', { signer: 'a', signature: 'sig-a' });
+    t += 100;
+    assert.equal(engine.purgeExpired(), 1);
+    assert.throws(() => engine.assembleEnvelope('env-expiry'), /expired/);
+    assert.throws(
+      () => engine.addSignature('env-expiry', { signer: 'b', signature: 'sig-b' }),
+      /expired/,
+    );
+    await assert.rejects(
+      submitMultiSignerEnvelope(engine, 'env-expiry', async () => ({})),
+      /expired/,
+    );
+  });
+
+  test('co-signer endpoints are polled concurrently; one failure still reaches threshold (#412)', async () => {
+    const fetchImpl = async url => {
+      if (url.includes('bad')) {
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      const signer = url.includes('one') ? 'cosigner-one' : 'cosigner-two';
+      return { ok: true, json: async () => ({ signer, signature: `sig-${signer}` }) };
+    };
+    const engine = createMultiSignerEngine({
+      threshold: 2,
+      fetchImpl,
+      requestTimeoutMs: 1000,
+    });
+    engine.createEnvelope({
+      id: 'env-poll',
+      transactionXdr: 'AAAA poll',
+      threshold: 2,
+      requiredSigners: ['cosigner-one', 'cosigner-two'],
+    });
+    const results = await engine.requestSignatures('env-poll', {
+      endpoints: ['https://cosigner.one/sign', 'https://cosigner.two/sign', 'https://bad/sign'],
+    });
+    assert.equal(results.filter(r => r.ok).length, 2);
+    assert.equal(results.filter(r => !r.ok).length, 1);
+    assert.equal(engine.isComplete('env-poll'), true);
+    const assembled = engine.assembleEnvelope('env-poll');
+    assert.equal(assembled.signatures.length, 2);
+  });
+
+  test('unauthorized co-signer is refused and threshold above allow-list is rejected (#412)', () => {
+    const engine = createMultiSignerEngine({ threshold: 1 });
+    assert.throws(
+      () =>
+        engine.createEnvelope({
+          id: 'bad-threshold',
+          transactionXdr: 'AAAA',
+          threshold: 3,
+          requiredSigners: ['a', 'b'],
+        }),
+      /exceeds/,
+    );
+    engine.createEnvelope({
+      id: 'env-auth',
+      transactionXdr: 'AAAA',
+      threshold: 1,
+      requiredSigners: ['allowed'],
+    });
+    assert.throws(
+      () => engine.addSignature('env-auth', { signer: 'intruder', signature: 'sig' }),
+      /not an authorized co-signer/,
+    );
   });
 
   test('resolveConfig falls back to FACILITATOR_SECRET for single signer', () => {

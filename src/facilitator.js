@@ -10,6 +10,7 @@ import { TESTNET, PUBNET } from './config.js';
 import { signerMetrics } from './metrics.js';
 import { KeyManager } from './key-manager.js';
 import { createFeeEstimator } from './horizon-client.js';
+import { createMultiSignerEngine } from './multi-signer.js';
 
 async function loadRemoteKeys(url) {
   const response = await fetch(url);
@@ -90,6 +91,31 @@ export function buildFacilitator(config) {
   }
 
   return { facilitator, signers, feeBumpSigners, keyManagers, feeEstimators, schemes };
+}
+
+/**
+ * Threshold submission call site (#412).
+ *
+ * The engine collects co-signatures; this is the single place that turns a
+ * completed envelope into a network submission. It assembles first (throwing
+ * while the threshold is unmet or the deadline passed) and only then calls
+ * `submit`, so a partially-signed envelope can never reach the network.
+ *
+ * @param {object} engine - from createMultiSignerEngine()
+ * @param {string} envelopeId
+ * @param {Function} submit - async (assembledEnvelope) => result
+ */
+export async function submitMultiSignerEnvelope(engine, envelopeId, submit) {
+  const assembled = engine.assembleEnvelope(envelopeId);
+  return submit(assembled);
+}
+
+/**
+ * Builds a threshold engine for one network's co-signer set.
+ * Thin wrapper so the call site above never constructs engine options inline.
+ */
+export function buildMultiSignerEngine({ threshold, coSignerEndpoints, ...rest } = {}) {
+  return createMultiSignerEngine({ threshold, coSignerEndpoints, ...rest });
 }
 
 export { TESTNET, PUBNET };
