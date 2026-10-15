@@ -337,6 +337,15 @@ class SignerMetrics {
 
   /**
    * Generate Prometheus formatted metrics text.
+   *
+   * Single owner note (#558): this renderer only owns
+   * `x402_signer_selected_total`. The in-flight series,
+   * `x402_signer_inflight`, is owned by the registry gauge that
+   * `setSignerInflight` feeds from the request path — it is included in
+   * `render()`'s series list. Rendering a second `x402_signer_inflight` block
+   * here duplicated the series in every `/metrics` exposition (and the two
+   * halves could disagree, because `incrementInflight`/`decrementInflight`
+   * have no callers in src/). A Prometheus text page may name a series once.
    * @returns {string}
    */
   toPrometheusText() {
@@ -346,14 +355,8 @@ class SignerMetrics {
     ];
 
     for (const { network, signer, count } of this.selectedTotal.values()) {
-      lines.push(`x402_signer_selected_total{network="${network}",signer="${signer}"} ${count}`);
-    }
-
-    lines.push('# HELP x402_signer_inflight Current in-flight settlements per signer.');
-    lines.push('# TYPE x402_signer_inflight gauge');
-
-    for (const { network, signer, count } of this.inflight.values()) {
-      lines.push(`x402_signer_inflight{network="${network}",signer="${signer}"} ${count}`);
+      const labels = `network="${escapeLabelValue(network)}",signer="${escapeLabelValue(signer)}"`;
+      lines.push(`x402_signer_selected_total{${labels}} ${count}`);
     }
 
     return lines.join('\n') + '\n';
