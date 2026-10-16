@@ -392,10 +392,13 @@ npm run db:seed-legacy
 psql "$DATABASE_URL" -f migrations/001_bazaar_catalog.sql
 psql "$DATABASE_URL" -f migrations/002_idempotency_keys.sql
 psql "$DATABASE_URL" -f migrations/002_rate_limit_buckets.sql
+psql "$DATABASE_URL" -f migrations/003_settlement_store.sql
+psql "$DATABASE_URL" -f migrations/004_outbox_events.sql
+psql "$DATABASE_URL" -f migrations/004_settlement_events.sql
 ```
 
 After using the legacy approach on an existing database, run `db:seed-legacy`
-to register the tables in the node-pg-migrate tracking table.
+to register all six migration table entries in the node-pg-migrate tracking table.
 
 **Rolling back a migration:**
 

@@ -343,9 +343,10 @@ for — plus the one documented client-side glue deviation, are in
   and published at **<https://accensa.github.io/x402-facilitator-stellar/>** — currently
   showing `no_sla` until a public endpoint exists (blocked by
   [#16](https://github.com/accensa/x402-facilitator-stellar/issues/16)).
-- **No persistence by default.** The catalog has a PostgreSQL schema in `migrations/` and
-  uses it when `DATABASE_URL` is set; the settlement path holds nothing durable, tracked
-  in [#10](https://github.com/accensa/x402-facilitator-stellar/issues/10). When
+- **In-memory when `DATABASE_URL` unset, Postgres when set.** The catalog uses a PostgreSQL
+  schema in `migrations/` and the settlement path folds into an event log plus projection
+  (`docs/EVENT-SOURCING.md`, `docs/CQRS-SETTLEMENT-STREAMING.md`) when `DATABASE_URL` is set,
+  with `SETTLE_REQUIRE_DURABLE_STORE` gating falls back to the in-memory store. When
   `DATABASE_URL` is set you can also add `DATABASE_URL_REPLICA` to offload settlement
   status reads and the reconciliation sweep onto a read replica (CQRS fallback to primary
   on replication lag) — see `docs/DEPLOYMENT.md` (#121).

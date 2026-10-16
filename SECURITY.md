@@ -7,7 +7,8 @@ Currently, only the `main` branch is supported with security updates.
 
 We take the security of our systems seriously. If you discover a vulnerability, please report it privately.
 
-**Contact:** security@accensa.local
+**Contact:** GitHub private vulnerability reporting:
+https://github.com/accensa/x402-facilitator-stellar/security/advisories/new
 
 ### Response Commitment
 - We will acknowledge receipt of your vulnerability report within 48 hours.
