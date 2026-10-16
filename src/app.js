@@ -69,6 +69,64 @@ export function renderFullMetrics(metricsRegistry) {
 }
 
 /**
+ * Creates a database health check function.
+ * @param {string} databaseUrl - postgres connection string
+ * @returns {Function} async () => { ok: boolean, error?: string }
+ */
+export function createDbHealthCheck(databaseUrl) {
+  return async () => {
+    try {
+      const { default: pg } = await import('pg');
+      const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+      await pool.query('SELECT 1');
+      await pool.end();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+}
+
+/**
+ * Creates a Redis health check function.
+ * @param {string} redisUrl - Redis connection URL
+ * @returns {Function} async () => { ok: boolean, error?: string }
+ */
+export function createRedisHealthCheck(redisUrl) {
+  return async () => {
+    try {
+      const { default: createClient } = await import('redis');
+      const client = createClient({ url: redisUrl });
+      await client.connect();
+      await client.ping();
+      await client.disconnect();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+}
+
+/**
+ * Creates a rate limiter backend health check function.
+ * @param {string} databaseUrl - postgres connection string for the rate limiter store
+ * @returns {Function} async () => { ok: boolean, error?: string }
+ */
+export function createRateLimiterHealthCheck(databaseUrl) {
+  return async () => {
+    try {
+      const { default: pg } = await import('pg');
+      const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+      await pool.query('SELECT 1');
+      await pool.end();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+}
+
+/**
  * Builds the Fastify app.
  *
  * Takes its collaborators rather than reaching for module state, which is what
@@ -79,7 +137,7 @@ export function renderFullMetrics(metricsRegistry) {
  * @param {object} config - resolved config from resolveConfig()
  * @param {{verify: Function, settle: Function, getSupported: Function}} facilitator
  * @param {object} rateLimiter - RateLimiter, or a stub with the same surface
- * @param {{upsertResource: Function, listResources: Function, search?: Function, getResource?: Function, getVersion?: Function, getLastModified?: Function}} catalog
+ * @param {{keyFor: Function, listResources: Function, search?: Function, getResource?: Function, getVersion?: Function, getLastModified?: Function}} catalog
  * @param {{keyFor: Function, begin: Function, complete: Function}} [idempotency]
  * @param {object} [extras] - optional collaborators
  * @returns {Promise<import('fastify').FastifyInstance>}
@@ -98,6 +156,7 @@ export async function createApp(
     dlq = null,
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+    assetCaches = extras.assetCaches ?? {},
   } = extras;
 
   // Observability collaborators.
@@ -197,6 +256,17 @@ export async function createApp(
       ? createReadinessChecker(config, {
           breakerStates: extras.breakerStates ?? (() => null),
           catalog,
+          db:
+            extras.dbHealthCheck ??
+            (config.databaseUrl ? createDbHealthCheck(config.databaseUrl) : null),
+          redis:
+            extras.redisHealthCheck ??
+            (config.redisUrl ? createRedisHealthCheck(config.redisUrl) : null),
+          rateLimiterBackend:
+            extras.rateLimiterHealthCheck ??
+            (config.databaseUrl && config.rateLimitStore === 'postgres'
+              ? createRateLimiterHealthCheck(config.databaseUrl)
+              : null),
         })
       : null);
 
@@ -257,7 +327,25 @@ export async function createApp(
    */
   async function processCataloging(req, body, reply, source = 'verify') {
     try {
-      const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
+      const network = body.paymentRequirements?.network ?? config.networks[0];
+      const assetCache = assetCaches[network];
+      let assetDecimalsMap = null;
+      if (assetCache) {
+        // Build a synchronous map of known asset decimals for validation
+        assetDecimalsMap = {};
+        for (const [asset, cached] of assetCache.cache) {
+          if (cached.expiresAt > Date.now()) {
+            assetDecimalsMap[asset] = cached.decimals;
+          }
+        }
+        // Ensure native XLM is always present
+        assetDecimalsMap.native = 7;
+      }
+      const validation = validateForCatalog(
+        body.paymentPayload,
+        body.paymentRequirements,
+        assetDecimalsMap,
+      );
       const outcome = {};
 
       if (validation.hardDrop) {
