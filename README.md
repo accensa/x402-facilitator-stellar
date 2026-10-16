@@ -228,9 +228,9 @@ Summary (full detail and evidence in the report):
   [`ff798145…0590`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590).
 - ✅ `/supported` emits `extra.areFeesSponsored`; every rejection carries a non-null reason;
   `payload: {transaction}` accepted verbatim.
-- 🟡 Upstream e2e suite, testnet: **1 of 5 server components passes** (`next`; `express`,
-  `fastify`, `hono`, `mcp` fail, structural — tracked in
-  [#64](https://github.com/accensa/x402-facilitator-stellar/issues/64)).
+- 🟢 Upstream e2e suite, testnet: **5 of 5 server components pass** (10/10 scenarios across `express`,
+  `fastify`, `hono`, `next`, `mcp`, 2026-08-25/26 — see
+  [docs/CONFORMANCE.md](docs/CONFORMANCE.md#2026-08-25-26) for per-component evidence).
 - ⬜ `stellar:pubnet` and the pubnet half of the upstream suite — blocked on
   [#17](https://github.com/accensa/x402-facilitator-stellar/issues/17).
 - ❌ Bazaar listing rejected by a third-party client (`invalid_routeTemplate`,
