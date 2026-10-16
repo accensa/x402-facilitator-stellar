@@ -16,7 +16,7 @@
  * In a multi-region deployment, each instance checks its own region's health
  * and reports to a shared coordination layer (the global database). The
  * failover-health checker provides the LOCAL view; the readiness probe
- * (GET /health/ready) exposes it; the orchestrator or global load balancer
+ * (GET /readyz) exposes it; the orchestrator or global load balancer
  * makes routing decisions based on the aggregate.
  *
  * Split-brain prevention:

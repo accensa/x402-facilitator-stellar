@@ -19,6 +19,8 @@ RUN npm ci --omit=dev
 RUN addgroup -S facilitator && adduser -S facilitator -G facilitator
 USER facilitator
 
+ENV NODE_ENV=production
+
 COPY --from=builder /app/src ./src
 
 # #211: scripts/ and migrations/ ship in the image. The documented container
@@ -28,7 +30,7 @@ COPY --from=builder /app/src ./src
 # serves, but can never provision or migrate its own schema — every migration
 # command in the deployment runbook fails on a missing path.
 COPY --chown=facilitator:facilitator scripts/ ./scripts/
-COPY --chown=facilitator:facilitator migrations/ ./migrations/
+COPY --chown=facilitator:facilitator migrations/ ./migrations
 
 # HEALTHCHECK is a LIVENESS probe, so it targets /healthz, not /health/ready.
 # /health/ready can fail on a downstream Soroban RPC outage; failing the
@@ -39,4 +41,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3402}/healthz || exit 1
 
 EXPOSE 3402
-CMD ["npm", "start"]
+CMD ["node", "src/server.js"]

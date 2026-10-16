@@ -9,7 +9,7 @@
  *   - half-open after cooldown; a single probe decides
  *   - an in-flight sendTransaction is never aborted by a trip underneath it,
  *     and is never fast-failed by an already-open breaker either
- *   - transitions are logged and state is readable for /health/ready
+ *   - transitions are logged and state is readable for /readyz
  */
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';

@@ -84,7 +84,7 @@ healthy  ──(N failures)──>  degraded  ──(recovery pings)──>  rec
 - **recovering**: local recovering, not yet ready for traffic
 
 The checker exposes `getState()` with `preferredRegion`, `failoverActive`, and
-per-remote `healthy` status, all surfaced in `GET /health/ready`.
+per-remote `healthy` status, all surfaced in `GET /readyz`.
 
 ### Failover Timing
 
@@ -124,5 +124,5 @@ node --test test/crdt-rate-limit-store.test.js test/failover-health.test.js test
 
 # Multi-region Docker Compose
 docker compose -f docker-compose.multi-region.yml up --build
-curl http://localhost:3402/health/ready | jq .failover
+curl http://localhost:3402/readyz | jq .failover
 ```

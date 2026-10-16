@@ -1,8 +1,8 @@
 /**
- * GET /health/ready and the readiness checker (issue #100).
+ * GET /readyz and the readiness checker (issue #100).
  *
  * The distinction under test: /healthz is liveness — cheap, dependency-free,
- * always 200 while the process runs. /health/ready is readiness — it CAN fail,
+ * always 200 while the process runs. /readyz is readiness — it CAN fail,
  * names which check failed for which network, is cached, bounds its own RPC
  * timeouts instead of inheriting the ~12s retry budget, and reports catalogue
  * trouble without ever failing on it.

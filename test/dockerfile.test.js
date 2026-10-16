@@ -81,3 +81,17 @@ test('every scripts/ path the deployment runbook invokes exists in the repo', ()
     );
   }
 });
+
+test('the image sets NODE_ENV=production in the runtime stage', () => {
+  assert.ok(
+    dockerfile.includes('ENV NODE_ENV=production'),
+    'Dockerfile must set NODE_ENV=production in the runtime stage',
+  );
+});
+
+test('the image uses direct node invocation in CMD', () => {
+  assert.ok(
+    dockerfile.includes('CMD ["node", "src/server.js"]'),
+    'Dockerfile must use direct node invocation so signals reach the process',
+  );
+});

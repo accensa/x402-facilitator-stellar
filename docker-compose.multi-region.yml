@@ -9,12 +9,12 @@ version: '3.8'
 #
 # Usage:
 #   docker compose -f docker-compose.multi-region.yml up --build
-#   curl http://localhost:3402/health/ready | jq .failover
-#   curl http://localhost:3403/health/ready | jq .failover
+#   curl http://localhost:3402/readyz | jq .failover
+#   curl http://localhost:3403/readyz | jq .failover
 #
 # To simulate a regional outage:
 #   docker compose -f docker-compose.multi-region.yml stop facilitator-us-east-1
-#   # eu-west-1 reports failoverActive: true in /health/ready
+#   # eu-west-1 reports failoverActive: true in /readyz
 
 services:
   # ─── Region: us-east-1 ──────────────────────────────────────────────────────
