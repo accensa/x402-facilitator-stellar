@@ -43,7 +43,35 @@ const DEFAULT_GROUP_ID = 'x402-webhook-dispatchers';
 const DEFAULT_CLIENT_ID = 'x402-facilitator-stellar';
 
 /**
- * Delivers one webhook payload with exponential backoff.
+ * Backoff schedule (in units of `baseBackoffMs`, default 1 minute):
+ * 1m, 5m, 15m, 1h, 6h, 24h across the six delivery attempts. Steps beyond the
+ * schedule keep doubling so a custom maxAttempts never runs out of intervals.
+ */
+const BACKOFF_MULTIPLIERS = [1, 5, 15, 60, 360, 1440];
+
+/**
+ * Returns the jittered backoff (ms) to wait after `attempt` before the next
+ * attempt. Jitter is ±25% so a recovering receiver isn't hammered by a
+ * thundering herd of redeliveries all landing at the same instant.
+ *
+ * @param {number} attempt - the attempt that just failed (1-based)
+ * @param {number} baseBackoffMs - base unit (one minute by default)
+ * @returns {number} milliseconds to sleep
+ */
+export function backoffMsForAttempt(attempt, baseBackoffMs) {
+  const idx = attempt - 1;
+  const lastIdx = BACKOFF_MULTIPLIERS.length - 1;
+  const multiplier =
+    idx <= lastIdx ? BACKOFF_MULTIPLIERS[idx] : BACKOFF_MULTIPLIERS[lastIdx] * 2 ** (idx - lastIdx);
+  const base = baseBackoffMs * multiplier;
+  return base * (0.75 + 0.5 * Math.random());
+}
+
+/**
+ * Delivers one webhook payload with exponential backoff and jitter.
+ *
+ * Default schedule: six attempts at 1m, 5m, 15m, 1h, 6h, 24h. A delivery that
+ * exhausts the budget is terminal and is dead-lettered by the caller.
  *
  * Exported for the consumer and for tests; not used on the request path.
  *
@@ -64,7 +92,7 @@ const DEFAULT_CLIENT_ID = 'x402-facilitator-stellar';
  * @param {Record<string, string>} [options.headers] - authentication headers
  *   (the HMAC signature and its timestamp) added to the request
  * @param {number} [options.maxAttempts] - total attempts including the first
- * @param {number} [options.baseBackoffMs] - first backoff step; doubles per attempt
+ * @param {number} [options.baseBackoffMs] - base backoff unit (one minute)
  * @param {(msg: string) => void} [options.warn]
  */
 export async function deliverWebhook({
@@ -74,12 +102,11 @@ export async function deliverWebhook({
   fetchImpl = undiciFetch,
   dispatcher = undefined,
   headers = {},
-  maxAttempts = 5,
-  baseBackoffMs = 500,
+  maxAttempts = 6,
+  baseBackoffMs = 60_000,
   warn = msg => console.warn(msg),
 }) {
   const payload = preSerialized ?? JSON.stringify(body);
-  const lastAttempt = attempt => attempt >= maxAttempts;
   let lastError;
   let lastStatus = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -111,8 +138,8 @@ export async function deliverWebhook({
         return { delivered: false, status: null, certificateRejected: true };
       }
     }
-    if (attempt < maxAttempts && !lastAttempt(attempt)) {
-      const backoff = baseBackoffMs * 2 ** (attempt - 1);
+    if (attempt < maxAttempts) {
+      const backoff = backoffMsForAttempt(attempt, baseBackoffMs);
       await new Promise(r => setTimeout(r, backoff));
     }
   }
@@ -234,6 +261,8 @@ export async function createWebhookDispatcher({
   authenticate = null,
   log = () => {},
   warn = msg => console.warn(msg),
+  /** Base backoff unit for every delivery path (one minute by default). */
+  baseBackoffMs = 60_000,
 } = {}) {
   /**
    * Decides the transport (plain vs client-certificate Agent) and the
@@ -268,6 +297,7 @@ export async function createWebhookDispatcher({
       warn,
       fetchImpl,
       maxAttempts,
+      baseBackoffMs,
       ...auth,
     });
   };
@@ -298,7 +328,7 @@ export async function createWebhookDispatcher({
       enqueue(event) {
         const record = buildRecord(event);
         if (!record.url) return;
-        const maxAttempts = 5; // deliverWebhook's own default, named here for the DLQ record
+        const maxAttempts = 6; // deliverWebhook's own default, named here for the DLQ record
         Promise.resolve().then(async () => {
           const res = await deliver(record, { maxAttempts });
           if (!res.delivered) {
@@ -372,7 +402,7 @@ export async function createWebhookDispatcher({
           // Last-resort fallback so a broker blip does not drop the event.
           warn(`webhooks: publish failed (${err.message}); delivering directly`);
           if (!record.url) return;
-          const maxAttempts = 5;
+          const maxAttempts = 6;
           const res = await deliver(record, { maxAttempts }).catch(() => ({ delivered: false }));
           if (!res.delivered) {
             await recordDeadLetter({
@@ -417,7 +447,7 @@ export async function createWebhookDispatcher({
             return;
           }
           if (!record.url) return;
-          const maxAttempts = 5;
+          const maxAttempts = 6;
           const res = await deliver(record, { maxAttempts });
           if (res.delivered) return;
 
