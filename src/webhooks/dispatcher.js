@@ -81,6 +81,7 @@ export async function deliverWebhook({
   const payload = preSerialized ?? JSON.stringify(body);
   const lastAttempt = attempt => attempt >= maxAttempts;
   let lastError;
+  let lastStatus = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const res = await fetchImpl(url, {
@@ -92,6 +93,7 @@ export async function deliverWebhook({
         // delivery, which must keep using the default global pool.
         ...(dispatcher ? { dispatcher } : {}),
       });
+      lastStatus = res.status;
       // A receiver that answers is done — even an error status means the
       // endpoint exists and got the message; retrying a 410 forever serves
       // nobody. Only transport-level failures and 5xx are retried.
@@ -115,7 +117,7 @@ export async function deliverWebhook({
     }
   }
   warn(`webhook delivery to ${url} failed after ${maxAttempts} attempts: ${lastError?.message}`);
-  return { delivered: false };
+  return { delivered: false, status: lastStatus };
 }
 
 /**
