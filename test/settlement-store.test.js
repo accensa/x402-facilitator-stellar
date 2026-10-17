@@ -141,12 +141,12 @@ describe('Durable Settlement Store & Idempotency Keys (#10)', () => {
 
     const store = new MemorySettlementStore();
     await store.save({
-      idempotency_key: 'settlement-A',
+      idempotency_key: 'CALLERA:settlement-A',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
       state: 'settled',
       tx_hash: 'hashA',
-      key_id: 'callerA',
+      key_id: 'CALLERA',
     });
 
     const app = await createApp(

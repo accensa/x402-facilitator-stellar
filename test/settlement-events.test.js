@@ -189,12 +189,12 @@ describe('GET /settlements/:idempotencyKey/events (#130)', () => {
   test('returns the full ordered event history for the owning caller', async () => {
     const store = new MemorySettlementStore();
     await store.save({
-      idempotency_key: 'settlement-A',
+      idempotency_key: 'CALLERA:settlement-A',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
-      key_id: 'callerA',
+      key_id: 'CALLERA',
     });
-    await store.updateState('settlement-A', 'settled', { tx_hash: 'hashA' });
+    await store.updateState('CALLERA:settlement-A', 'settled', { tx_hash: 'hashA' });
 
     const app = await buildApp(store);
     try {
