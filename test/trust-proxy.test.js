@@ -6,10 +6,10 @@
  * stub. The rate limiter is the observer: buckets keyed on req.ip are what a
  * wrong identity breaks first.
  */
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { RateLimiter } from '../src/rate-limit.js';
-import { isCloudflareIp, resolveClientIp } from '../src/trust-proxy.js';
+import { createTrustProxyHook, isCloudflareIp, resolveClientIp } from '../src/trust-proxy.js';
 import {
   serve,
   withApp,
@@ -272,4 +272,41 @@ test('isCloudflareIp matches the published ranges and nothing else', () => {
   assert.equal(isCloudflareIp('127.0.0.1'), false);
   assert.equal(isCloudflareIp('not-an-ip'), false);
   assert.equal(isCloudflareIp(undefined), false);
+});
+
+describe('TRUST_PROXY list validation', () => {
+  const req = { socket: { remoteAddress: '127.0.0.1' }, headers: {} };
+
+  test('invalid entries throw and name the offending value', () => {
+    for (const entry of ['', '   ', 7, 'not-an-ip', '10.0.0.0/33', '::/129', '10.0.0.0/']) {
+      assert.throws(
+        () => resolveClientIp(req, [entry]),
+        error => error.message.includes(`got "${entry}"`),
+      );
+    }
+  });
+
+  test('an invalid list prevents creation of the boot-time hook', () => {
+    assert.throws(() => createTrustProxyHook(['loopback', 'not-an-ip']), /not-an-ip/);
+  });
+
+  test('presets, bare addresses, valid CIDRs, and empty lists compile', () => {
+    for (const preset of ['loopback', 'linklocal', 'uniquelocal']) {
+      assert.doesNotThrow(() => resolveClientIp(req, [preset]));
+    }
+    for (const address of ['127.0.0.1', '::1', '127.0.0.1/32', '::1/128', '10.0.0.0/8']) {
+      assert.doesNotThrow(() => resolveClientIp(req, [address]));
+    }
+    assert.doesNotThrow(() => resolveClientIp(req, []));
+  });
+
+  test('entries with surrounding whitespace are trimmed', () => {
+    assert.equal(
+      resolveClientIp(
+        { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': '203.0.113.7' } },
+        ['  127.0.0.1  '],
+      ),
+      '203.0.113.7',
+    );
+  });
 });

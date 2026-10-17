@@ -112,7 +112,10 @@ export class PostgresStore {
         bucket_id TEXT PRIMARY KEY,
         count     BIGINT NOT NULL DEFAULT 0,
         reset_at  BIGINT NOT NULL
-      )
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_reset_at
+      ON rate_limit_buckets(reset_at)
     `);
   }
 
