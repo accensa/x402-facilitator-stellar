@@ -2,7 +2,7 @@
 
 Probes the facilitator from **outside our own infrastructure** so a silent outage
 cannot also silence its own monitor. Driven by [`probes.mjs`](probes.mjs) and the
-[`external-monitor`](../../.github/workflows/external-monitor.yml) GitHub Actions
+[`external-monitor`](../.github/workflows/external-monitor.yml) GitHub Actions
 cron workflow (runs from GitHub's runners every 15 min).
 
 ## Configure
@@ -30,4 +30,4 @@ Writes `monitoring/out/status.json` and exits non-zero if any probe that is
 ## Alerting
 
 On failure the workflow posts to `ALERT_WEBHOOK_URL` and fails the job, paging the
-**Facilitator On-Call** (escalation path in [`docs/OPERATIONS.md`](../../docs/OPERATIONS.md)).
+**Facilitator On-Call** (escalation path in [`docs/OPERATIONS.md`](../docs/OPERATIONS.md)).
