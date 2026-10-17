@@ -113,11 +113,23 @@ curl localhost:3402/readyz
 `FACILITATOR_SECRET` is a signing key. `.env` is gitignored — never commit it.
 
 The two standalone CLIs — the agent-facing `x402-mcp` MCP server and the
-seller-facing `validate-discovery` tool — ship on npm as
-[`@accensa/x402-facilitator-stellar`](https://www.npmjs.com/package/@accensa/x402-facilitator-stellar)
-(`npm install -g @accensa/x402-facilitator-stellar` then `x402-mcp`; see
-[`docs/MCP.md`](docs/MCP.md)). The facilitator service itself runs from this
-checkout, as above.
+seller-facing `validate-discovery` tool — run from this checkout. No npm
+release is published yet (`npm view @accensa/x402-facilitator-stellar`
+returns E404), so install from source rather than the registry:
+
+```bash
+git clone https://github.com/accensa/x402-facilitator-stellar.git
+cd x402-facilitator-stellar
+npm ci
+npm link   # optional: puts `x402-mcp` and `validate-discovery` on your PATH
+x402-mcp   # or: node src/mcp/cli.js; seller tool: node src/sdk/cli.js <path-to-json>
+```
+
+See [`docs/MCP.md`](docs/MCP.md) for the MCP usage. The facilitator service
+itself runs from this checkout, as above.
+
+Requires Node `>= 20`; develop and test on Node 22 (pinned in `.nvmrc`, run
+in CI — see [CONTRIBUTING.md](CONTRIBUTING.md#node-versions)).
 ### Testnet Setup
 
 Payments on Stellar need funded accounts, and USDC-priced payments additionally need

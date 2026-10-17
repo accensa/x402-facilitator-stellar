@@ -29,9 +29,23 @@
     "validate-discovery": "./src/sdk/cli.js",
     "x402-mcp": "./src/mcp/cli.js"
   },
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./sdk": {
+      "import": "./src/sdk/index.js",
+      "default": "./src/sdk/index.js"
+    },
+    "./mcp": {
+      "import": "./src/mcp/index.js",
+      "default": "./src/mcp/index.js"
+    }
+  },
   "files": [
-    "src/sdk",
-    "src/mcp",
+    "src",
     "README.md",
     "LICENSE"
   ],
@@ -39,8 +53,8 @@
     "prepublishOnly": "npm test",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test",
-    "test:watch": "node --test --watch",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:watch": "node --test --watch \"test/**/*.test.js\"",
     "test:chaos": "node --test test/chaos.test.js",
     "test:chaos:toxiproxy": "node --test test/integration/chaos/*.test.js",
     "test:chaos:all": "node --test test/chaos.test.js test/integration/chaos/*.test.js",
