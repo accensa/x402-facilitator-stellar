@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /**
  * Keeps .env.example honest: every environment variable read in src/ must be
- * documented there.
+ * documented there, and every name documented there must be read (or explicitly
+ * excused) in src/.
  *
  * WHY THIS EXISTS. .env.example is the operator's setup reference — the file
  * they copy and fill in before first boot. If it drifts from what the code
  * actually reads, the undocumented half is invisible: defaults silently apply,
  * and for the spend-limit variables that is a money question rather than a
- * convenience one. This check turns the drift into a CI failure.
+ * convenience one. This check turns both directions of drift into CI failures:
+ *   * read in src/ but missing from .env.example  → fatal (unchanged)
+ *   * documented in .env.example but never read   → fatal, unless on DECLARED_DEAD
  *
  * What counts as "read": any `env.`-style access to an UPPER_CASE name in
  * src/ (`process.env.X`, and config.js's `env.X` parameter), the same
@@ -15,14 +18,16 @@
  *
  *   grep -rhoP 'env\.\K[A-Z][A-Z0-9_]{2,}' src/ | sort -u
  *
+ * Several real reads use bracket/computed access (`env[pluralKey]`,
+ * `env[key]`, `env[k]`, `process.env[name]`) that the lexical regex cannot
+ * resolve. Those dynamic prefixes are declared in DECLARED_DEAD below, each
+ * with an individual src/ citation, so the allowlist cannot quietly grow back
+ * into a blind spot. Names that are documented only for docker-compose (never
+ * read in src/ or scripts/) are excused as 'compose-only'.
+ *
  * What counts as "documented": any key written before an `=` in .env.example,
  * whether the line is commented out or live — the file's convention is to show
  * unset defaults as `# KEY=value`.
- *
- * Deliberately one-directional: a variable documented but not detected by the
- * src/ grep is reported as informational, not an error, because several real
- * reads use bracket access (`env['FACILITATOR_SECRETS']` in config.js) and
- * would be false positives.
  *
  * Usage:
  *   node scripts/check-env-doc.mjs            # check this repo
@@ -39,6 +44,75 @@ const root =
 
 const ENV_READ_RE = /env\.([A-Z][A-Z0-9_]{2,})/g;
 const EXAMPLE_KEY_RE = /^\s*#?\s*([A-Z][A-Z0-9_]{2,})(?==)/;
+
+/**
+ * Dynamic prefixes the lexical grep cannot resolve, each individually justified
+ * with a src/ citation (config.js line numbers) or 'compose-only'. This is the
+ * only escape hatch for documented-but-dead names; it is not a blind spot
+ * because every entry names its source.
+ */
+const DECLARED_DEAD = new Map([
+  [
+    'FACILITATOR_SECRET*',
+    'computed bracket read: src/config.js:52 `env[pluralKey] ?? env[singularKey]` ' +
+      '(parseSecrets), called at :109 (testnet) and :263-267 (pubnet)',
+  ],
+  [
+    'FEE_BUMP_SECRET*',
+    'computed bracket read: src/config.js:82 `env[key]?.trim()` ' +
+      '(parseOptionalSecret), called at :110 (testnet) and :268 (pubnet)',
+  ],
+  [
+    'RATE_LIMIT_*',
+    'computed per-key read: src/config.js:249-252 `Object.keys(env)` loop reads ' +
+      '`env[k]` at :258',
+  ],
+  [
+    'MAX_FEE_PER_CALL_STROOPS',
+    'computed bracket read: src/mcp/cli.js:66 `process.env[name]` (spendCapFromEnv)',
+  ],
+  [
+    'MAX_SESSION_SPEND_STROOPS',
+    'computed bracket read: src/mcp/cli.js:66 `process.env[name]` (spendCapFromEnv)',
+  ],
+  [
+    'POSTGRES_DB',
+    'compose-only: docker-compose/orchestrator credential; never read in src/ or scripts/',
+  ],
+  [
+    'POSTGRES_PASSWORD',
+    'compose-only: docker-compose/orchestrator credential; never read in src/ or scripts/',
+  ],
+  [
+    'POSTGRES_USER',
+    'compose-only: docker-compose/orchestrator credential; never read in src/ or scripts/',
+  ],
+  [
+    'AUDIT_LOG_FILE',
+    'not yet read: documented but drift (#554); name appears only in JSDoc at ' +
+      'src/audit.js:40 and :56; audit file sink not wired',
+  ],
+]);
+
+/** True when `key` matches an exact allowlist entry or a `PREFIX*` family. */
+function isDeclaredDead(key) {
+  if (DECLARED_DEAD.has(key)) return true;
+  for (const pattern of DECLARED_DEAD.keys()) {
+    if (pattern.endsWith('*') && key.startsWith(pattern.slice(0, -1))) return true;
+  }
+  return false;
+}
+
+/** Justification text for a declared-dead key, or undefined. */
+function declaredDeadJustification(key) {
+  if (DECLARED_DEAD.has(key)) return DECLARED_DEAD.get(key);
+  for (const pattern of DECLARED_DEAD.keys()) {
+    if (pattern.endsWith('*') && key.startsWith(pattern.slice(0, -1))) {
+      return DECLARED_DEAD.get(pattern);
+    }
+  }
+  return undefined;
+}
 
 /** Recursively lists the .js/.mjs/.cjs files under dir. */
 function walk(dir, out = []) {
@@ -82,6 +156,9 @@ const documented = documentedInExample();
 const missing = read.filter(key => !documented.has(key));
 const extra = [...documented].filter(key => !read.includes(key)).sort();
 
+const declaredDead = extra.filter(key => isDeclaredDead(key));
+const undeclaredDead = extra.filter(key => !isDeclaredDead(key));
+
 console.log(
   `src/ reads ${read.length} env variable(s); .env.example documents ${documented.size}.`,
 );
@@ -95,12 +172,31 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-if (extra.length > 0) {
-  console.log('\nDocumented in .env.example but not detected by the src/ grep (informational):');
-  for (const key of extra) console.log(`  - ${key}`);
-  console.log(
-    '  (Bracket-style reads such as env["FACILITATOR_SECRETS"] are not matched by the grep.)',
+if (undeclaredDead.length > 0) {
+  console.error(
+    '\nFAIL: these variables are documented in .env.example but never read in src/ ' +
+      '(and are not on the declared-dead allowlist):',
   );
+  for (const key of undeclaredDead) {
+    console.error(`  - ${key}`);
+    const why = declaredDeadJustification(key);
+    if (why) console.error(`      allowlist justification: ${why}`);
+  }
+  console.error(
+    '\nRemove the entry from .env.example, or add an individually justified, cited ' +
+      'allowlist entry in scripts/check-env-doc.mjs.',
+  );
+  process.exit(1);
 }
 
-console.log('OK: every variable read in src/ is documented in .env.example.');
+if (declaredDead.length > 0) {
+  console.log('\nDocumented but never read (declared dead, excused):');
+  for (const key of declaredDead) {
+    console.log(`  - ${key} — ${declaredDeadJustification(key)}`);
+  }
+}
+
+console.log(
+  'OK: every variable read in src/ is documented in .env.example, and every ' +
+    'documented variable is either read or explicitly excused.',
+);
