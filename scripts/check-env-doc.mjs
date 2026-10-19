@@ -92,6 +92,22 @@ const DECLARED_DEAD = new Map([
     'not yet read: documented but drift (#554); name appears only in JSDoc at ' +
       'src/audit.js:40 and :56; audit file sink not wired',
   ],
+  [
+    'MERCHANT_ADDRESS',
+    'documented in .env.example for scripts/e2e.mjs:50; not read in src/ or scripts/ other than the e2e test harness default',
+  ],
+  [
+    'RESOURCE_PORT',
+    'documented in .env.example for scripts/e2e.mjs:52; not read in src/ or scripts/ other than the e2e test harness default',
+  ],
+  [
+    'VERBOSE',
+    'documented in .env.example for scripts/e2e.mjs:221; not read in src/ or scripts/ other than the e2e test harness default',
+  ],
+  [
+    'SMART_ACCOUNT_WASM',
+    'documented in .env.example for scripts/e2e:smart-account; not read in src/ or other scripts',
+  ],
 ]);
 
 /** True when `key` matches an exact allowlist entry or a `PREFIX*` family. */
