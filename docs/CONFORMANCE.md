@@ -145,6 +145,16 @@ them for the ninety seconds they are needed. There is deliberately no pubnet
 path in that script — friendbot does not exist there, and pubnet conformance is
 a separate, deliberate operational step.
 
+The three testnet-tooling variables the funder emits are:
+
+- `CLIENT_STELLAR_PRIVATE_KEY` — payer key
+- `SERVER_STELLAR_ADDRESS` — payee address
+- `SERVER_STELLAR_PRIVATE_KEY` — payee key, generated and printed by the funder;
+  required by `scripts/prepare-testnet-usdc.mjs` (line 162) for
+  `npm run testnet:usdc`, which aborts at line 166 with
+  `"SERVER_STELLAR_PRIVATE_KEY is missing or does not match SERVER_STELLAR_ADDRESS"`
+  when the key is missing or its derived address disagrees with `SERVER_STELLAR_ADDRESS`.
+
 ## 3. Running it
 
 ```bash
