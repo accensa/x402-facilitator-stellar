@@ -303,3 +303,86 @@ function fakePool() {
     },
   };
 }
+
+describe('trusted CIDR allowlisting (#410)', () => {
+  test('a source inside the allowlist bypasses the check and is audited', async () => {
+    const audited = [];
+    const limiter = new RateLimiter(
+      {
+        global: { verifyRpm: 0, settleRpm: 0, settleRph: 0, settleRpd: 0, feeSpd: 0 },
+        keys: {},
+        allowlist: ['10.0.0.0/8'],
+      },
+      new MemoryStore(),
+      { audit: (event, fields) => audited.push({ event, ...fields }) },
+    );
+    limiter.close();
+
+    const allowed = await limiter.checkVerify({ ip: '10.1.2.3' });
+    assert.equal(allowed.allowed, true);
+    assert.equal(allowed.bypassed, true);
+    assert.equal(audited.length, 1);
+    assert.equal(audited[0].event, 'rate_limit_bypass');
+    assert.equal(audited[0].cidr, '10.0.0.0/8');
+    assert.equal(audited[0].route, 'verify');
+
+    // The same limits still refuse an address outside the allowlist.
+    const outside = await limiter.checkVerify({ ip: '203.0.113.9' });
+    assert.equal(outside.allowed, false);
+    assert.equal(audited.length, 1, 'only the bypassed request is audited');
+  });
+
+  test('a forged X-Forwarded-For header cannot spoof an allowlisted IP', async () => {
+    const limiter = new RateLimiter(
+      {
+        global: { verifyRpm: 1, settleRpm: 1, settleRph: 1, settleRpd: 1, feeSpd: 1 },
+        keys: {},
+        allowlist: ['10.0.0.0/8'],
+      },
+      new MemoryStore(),
+    );
+    limiter.close();
+
+    const spoofed = {
+      ip: '203.0.113.9', // the TCP peer, already resolved by the trust-proxy hook
+      headers: { 'x-forwarded-for': '10.1.2.3' },
+    };
+    await limiter.recordVerify(spoofed);
+    const refused = await limiter.checkVerify(spoofed);
+    assert.equal(refused.allowed, false);
+    assert.equal(refused.bypassed, undefined);
+  });
+
+  test('partner API keys keep their configured burst and sustained tiers', async () => {
+    const limiter = new RateLimiter(
+      {
+        global: { verifyRpm: 1, settleRpm: 1, settleRph: 1, settleRpd: 1, feeSpd: 1000 },
+        keys: {
+          PARTNER: { verifyRpm: 5, settleRpm: 10, settleRph: 100, settleRpd: 1000, feeSpd: 10000 },
+        },
+      },
+      new MemoryStore(),
+    );
+    limiter.close();
+
+    const partner = { keyId: 'partner' };
+    await limiter.recordVerify(partner);
+    await limiter.recordVerify(partner);
+    const res = await limiter.checkVerify(partner);
+    assert.equal(res.allowed, true);
+    assert.equal(res.limit, 5);
+    // checkVerify projects the current request as consumed: 5 - 2 - 1.
+    assert.equal(res.remaining, 2);
+
+    const anonymous = { ip: '198.51.100.7' };
+    await limiter.recordVerify(anonymous);
+    assert.equal((await limiter.checkVerify(anonymous)).allowed, false);
+  });
+
+  test('an invalid allowlist entry fails at construction', () => {
+    assert.throws(
+      () => new RateLimiter({ ...LIMITS, allowlist: ['not-a-cidr'] }, new MemoryStore()),
+      /RATE_LIMIT_ALLOWLIST/,
+    );
+  });
+});

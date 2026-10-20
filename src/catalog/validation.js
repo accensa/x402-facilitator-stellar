@@ -6,7 +6,7 @@ import {
   extractDiscoveryInfo,
   validateDiscoveryExtension,
 } from '@x402/extensions';
-import { validateAmount } from '../sdk/validation.js';
+import { validateAmount, STELLAR_DECIMALS } from '../sdk/validation.js';
 
 // Pre-compiled regex patterns to avoid recompilation overhead and garbage collection pressure
 const ROUTE_PARAM_REGEX = /\{([^}]+)\}/g;
@@ -130,7 +130,7 @@ function addAdvisories(result, declaration) {
   }
 }
 
-function validatePolicy(paymentPayload, paymentRequirements, result) {
+function validatePolicy(paymentPayload, paymentRequirements, result, assetDecimalsMap = null) {
   let extracted;
   try {
     extracted = extractDiscoveryInfo(paymentPayload, paymentRequirements, false);
@@ -163,6 +163,21 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
         result.hardDrop = true;
         result.reason = 'invalid_pricing_amount';
         return result;
+      }
+      // Reject sub-stroop fractions instead of truncating them (#415): an
+      // amount carrying more precision than its asset supports would settle
+      // short of what the seller stated, silently. The asset's decimals come
+      // from the fetched per-asset cache when available, else the 7-decimal
+      // Stellar default.
+      const asset = rawBazaar.pricing.asset ?? paymentRequirements.asset ?? 'native';
+      const decimals = assetDecimalsMap?.[asset] ?? STELLAR_DECIMALS;
+      if (typeof rawBazaar.pricing.amount === 'string') {
+        const [, fracPart = ''] = rawBazaar.pricing.amount.split('.');
+        if (fracPart.length > decimals) {
+          result.hardDrop = true;
+          result.reason = 'invalid_pricing_amount';
+          return result;
+        }
       }
     }
   }
@@ -279,7 +294,7 @@ function validatePolicy(paymentPayload, paymentRequirements, result) {
  * directly; SDK declarations are adapted into the same Bazaar extension shape.
  * Seller-only guidance is returned as advisories and never changes admission.
  */
-export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
+export function validateDiscoveryPolicy(input, paymentRequirements = {}, assetDecimalsMap = null) {
   const result = createResult();
   if (!input || typeof input !== 'object') {
     result.hardDrop = true;
@@ -301,7 +316,12 @@ export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
       result.reason = 'invalid_declaration';
       return result;
     }
-    return validatePolicy(input.paymentPayload, input.paymentRequirements, result);
+    return validatePolicy(
+      input.paymentPayload,
+      input.paymentRequirements,
+      result,
+      assetDecimalsMap,
+    );
   }
 
   addAdvisories(result, input);
@@ -345,10 +365,15 @@ export function validateDiscoveryPolicy(input, paymentRequirements = {}) {
       payTo: input.payTo || paymentRequirements.payTo || '',
     },
     result,
+    assetDecimalsMap,
   );
   return policy;
 }
 
-export function validateForCatalog(paymentPayload, paymentRequirements) {
-  return validateDiscoveryPolicy({ paymentPayload, paymentRequirements });
+export function validateForCatalog(paymentPayload, paymentRequirements, assetDecimalsMap = null) {
+  return validateDiscoveryPolicy(
+    { paymentPayload, paymentRequirements },
+    paymentRequirements,
+    assetDecimalsMap,
+  );
 }

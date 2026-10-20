@@ -34,7 +34,7 @@ have themselves since been completed:
 | #81 payload validation schema | #99 → #68 (completed) |
 | #82 configure HTTP timeout | #8 (open) |
 | #83 gzip compression middleware | #69 (open) |
-| #89 request payload size limit | implemented: `express.json({ limit: '256kb' })` in `src/app.js` |
+| #89 request payload size limit | implemented: Fastify body cap via `BODY_LIMIT_BYTES` in `src/payment-body.js` and enforced in `src/app.js` |
 | #93 Redis-based rate limiting | #122 (completed) |
 | #96 structured JSON logger (Pino) | #7 (open) |
 | #97 Prometheus metrics endpoint | #7 (open) |
@@ -42,7 +42,7 @@ have themselves since been completed:
 | #99 payload validation with Zod | #68 (completed) |
 | #101 request correlation IDs | #7 (open) |
 | #106 CORS configuration management | #76 (completed) |
-| #108 request payload size limits | implemented: `express.json({ limit: '256kb' })` in `src/app.js` |
+| #108 request payload size limits | implemented: Fastify body cap via `BODY_LIMIT_BYTES` in `src/payment-body.js` and enforced in `src/app.js` |
 | #112 automated OpenAPI docs | #71 (completed) |
 
 A further nine short issues (#84–#103 range) were closed as *already implemented* with

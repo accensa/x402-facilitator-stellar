@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { clearInterval, setInterval, setTimeout } from 'node:timers';
+import { StrKey } from '@stellar/stellar-sdk';
 import { createEd25519Signer } from '@x402/stellar';
 
 function keyId(secret) {
@@ -13,7 +14,12 @@ function normaliseKeys(keys) {
   const seen = new Set();
   return keys.map(entry => {
     const secret = typeof entry === 'string' ? entry : entry?.secret;
-    if (!secret || typeof secret !== 'string' || !secret.startsWith('S')) {
+    // Checksum-aware StrKey decode (#498). A first-character test let a
+    // truncated or bad-checksum key through, so a corrupt key store failed
+    // late inside createEd25519Signer instead of here, before any generation
+    // is installed. The message never echoes the key — only the hashed kid is
+    // ever named.
+    if (!secret || typeof secret !== 'string' || !StrKey.isValidEd25519SecretSeed(secret)) {
       throw new Error('Key source returned an invalid Stellar secret key.');
     }
     const kid = typeof entry === 'string' ? keyId(secret) : entry.kid || keyId(secret);

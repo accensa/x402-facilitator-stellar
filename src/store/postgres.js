@@ -285,8 +285,16 @@ export class PostgresSettlementStore extends MemorySettlementStore {
 
     const started = Date.now();
     for (;;) {
-      const row = await this._queryGet(this.replicaPool, idempotencyKey);
-      if (row) return row;
+      try {
+        const row = await this._queryGet(this.replicaPool, idempotencyKey);
+        if (row) return row;
+      } catch {
+        // A replica outage is not a durable-store failure: the primary is
+        // healthy and is exactly where the confirmation read below goes.
+        // Treat the error as "not visible yet" and stop waiting on a replica
+        // that is refusing queries.
+        break;
+      }
       if (Date.now() - started >= this.replicaLagMs) break;
       await new Promise(r => setTimeout(r, 25));
     }

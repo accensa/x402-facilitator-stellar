@@ -7,7 +7,7 @@
  *   - Rate limit convergence across regions
  *   - Failover detection timing (acceptance criterion: < 30s)
  *   - No split-brain during simulated partitions
- *   - /health/ready exposes region state
+ *   - /readyz exposes region state
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';

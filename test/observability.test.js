@@ -52,6 +52,8 @@ test('every request emits exactly one structured JSON line with the required fie
     'requestId',
     'route',
     'scheme',
+    'span_id',
+    'trace_id',
     'ts',
     'txHash',
   ]);

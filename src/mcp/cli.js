@@ -53,19 +53,28 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = mcpFetchTi
   }
 }
 
+/**
+ * Resolves a spend cap from the environment, failing closed on a malformed
+ * value (#497). The cap is the agent's money-safety control, so a value like
+ * `1,000` must stop the process rather than silently fall back to the default.
+ * It also exits with the variable named and no stack trace, instead of letting
+ * the bare SyntaxError escape while the module is still loading — which is what
+ * made x402-mcp die with an unattributed trace before argument parsing ran.
+ */
+function spendCapFromEnv(name, defaultValue) {
+  try {
+    return parseStroopsLimit(process.env[name], name, defaultValue);
+  } catch (err) {
+    console.error(`x402-mcp: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 // Conservative defaults (in stroops: 1 XLM = 10_000_000 stroops).
 // Default max per-call: 1000 stroops = 0.0001 XLM
 // Default max per-session: 10000 stroops = 0.001 XLM
-const MAX_FEE_PER_CALL_STROOPS = parseStroopsLimit(
-  process.env.MAX_FEE_PER_CALL_STROOPS,
-  'MAX_FEE_PER_CALL_STROOPS',
-  '1000',
-);
-const MAX_SESSION_SPEND_STROOPS = parseStroopsLimit(
-  process.env.MAX_SESSION_SPEND_STROOPS,
-  'MAX_SESSION_SPEND_STROOPS',
-  '10000',
-);
+export const MAX_FEE_PER_CALL_STROOPS = spendCapFromEnv('MAX_FEE_PER_CALL_STROOPS', '1000');
+export const MAX_SESSION_SPEND_STROOPS = spendCapFromEnv('MAX_SESSION_SPEND_STROOPS', '10000');
 
 let sessionSpendStroops = 0n;
 

@@ -49,7 +49,7 @@ stellar keys show agent --secret   # the S... secret, used everywhere below
 The buyer guide's examples use the environment variable `AGENT_PAYER_SECRET_KEY` for
 that secret. If the resource you are buying is priced in USDC, your account also needs
 a USDC trustline and a few USDC — see the trustline snippet in
-[`docs/SELLER.md`](./SELLER.md#2-trustlines-what-your-account-must-hold) (it applies to
+[`docs/SELLER.md`](./SELLER.md#trustlines) (it applies to
 the payer too). Friendbot does not fund USDC, so for USDC-priced testnet resources you
 need testnet USDC from Circle's faucet or a friend who has it.
 

@@ -383,7 +383,7 @@ export function installRpcRetry({
   };
 
   /**
-   * Breaker snapshot for observability — consumed by GET /health/ready so an
+   * Breaker snapshot for observability — consumed by GET /readyz so an
    * orchestrator can see "the dependency is down" without parsing logs.
    */
   function getBreakerStates() {

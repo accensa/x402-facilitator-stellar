@@ -10,6 +10,8 @@ import { TESTNET, PUBNET } from './config.js';
 import { signerMetrics } from './metrics.js';
 import { KeyManager } from './key-manager.js';
 import { createFeeEstimator } from './horizon-client.js';
+import { createMultiSignerEngine } from './multi-signer.js';
+import { createAssetDecimalsCache } from './asset-cache.js';
 
 async function loadRemoteKeys(url, timeoutMs = keySourceTimeoutMs()) {
   let response;
@@ -52,6 +54,7 @@ export function buildFacilitator(config) {
   const keyManagers = {};
   const feeEstimators = {};
   const schemes = {};
+  const assetCaches = {};
 
   for (const network of config.networks) {
     const netConfig = config.perNetwork[network];
@@ -79,6 +82,14 @@ export function buildFacilitator(config) {
     } else {
       feeBumpSigners[network] = null;
     }
+
+    // Asset decimals cache for SEP-0041 compliance (#415)
+    const rpcUrl =
+      netConfig.rpcUrl ?? (network === TESTNET ? 'https://soroban-testnet.stellar.org' : undefined);
+    assetCaches[network] = createAssetDecimalsCache({
+      rpcUrl,
+      rpcCall: netConfig.rpcUrl ? globalThis.fetch?.bind(globalThis) : undefined,
+    });
 
     const createScheme = snapshot => {
       let rrIndex = 0;
@@ -116,7 +127,32 @@ export function buildFacilitator(config) {
     facilitator.register(network, schemes[network].scheme);
   }
 
-  return { facilitator, signers, feeBumpSigners, keyManagers, feeEstimators, schemes };
+  return { facilitator, signers, feeBumpSigners, keyManagers, feeEstimators, schemes, assetCaches };
+}
+
+/**
+ * Threshold submission call site (#412).
+ *
+ * The engine collects co-signatures; this is the single place that turns a
+ * completed envelope into a network submission. It assembles first (throwing
+ * while the threshold is unmet or the deadline passed) and only then calls
+ * `submit`, so a partially-signed envelope can never reach the network.
+ *
+ * @param {object} engine - from createMultiSignerEngine()
+ * @param {string} envelopeId
+ * @param {Function} submit - async (assembledEnvelope) => result
+ */
+export async function submitMultiSignerEnvelope(engine, envelopeId, submit) {
+  const assembled = engine.assembleEnvelope(envelopeId);
+  return submit(assembled);
+}
+
+/**
+ * Builds a threshold engine for one network's co-signer set.
+ * Thin wrapper so the call site above never constructs engine options inline.
+ */
+export function buildMultiSignerEngine({ threshold, coSignerEndpoints, ...rest } = {}) {
+  return createMultiSignerEngine({ threshold, coSignerEndpoints, ...rest });
 }
 
 export { TESTNET, PUBNET, loadRemoteKeys };

@@ -17,6 +17,17 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8').replace(/\r/g, '');
 const deployment = readFileSync(join(ROOT, 'docs', 'DEPLOYMENT.md'), 'utf8');
+const compose = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8').replace(/\r/g, '');
+
+/**
+ * Returns the Dockerfile from the final `FROM` instruction onward — the stage
+ * the image actually runs. Runtime flags must live here, not in the builder.
+ */
+function runtimeStage() {
+  const froms = [...dockerfile.matchAll(/^FROM\s+.*$/gm)];
+  if (froms.length === 0) return '';
+  return dockerfile.slice(froms[froms.length - 1].index);
+}
 
 /**
  * True when some `COPY` instruction copies the repository directory `dir` into
@@ -80,4 +91,43 @@ test('every scripts/ path the deployment runbook invokes exists in the repo', ()
       `docs/DEPLOYMENT.md invokes scripts/${name}, which does not exist in scripts/`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Runtime semantics (#495)
+// ---------------------------------------------------------------------------
+
+test('the runtime stage sets NODE_ENV=production', () => {
+  assert.match(
+    runtimeStage(),
+    /^\s*ENV\s+NODE_ENV=production\s*$/m,
+    'Dockerfile must set ENV NODE_ENV=production in the runtime stage — without it ' +
+      'src/config.js resolves nodeEnv to development, HSTS is never sent and ' +
+      'src/server.js loads a stray .env out of the image',
+  );
+});
+
+test('docker-compose runs the facilitator with NODE_ENV=production', () => {
+  const facilitator = compose.slice(compose.indexOf('facilitator:'), compose.indexOf('redis:'));
+  assert.match(
+    facilitator,
+    /^\s*-\s*NODE_ENV=production\s*$/m,
+    'the facilitator service must pin NODE_ENV=production so the container cannot ' +
+      'silently fall back to development semantics (#495)',
+  );
+});
+
+test('the image execs node directly so signals reach the server', () => {
+  assert.match(
+    runtimeStage(),
+    /^\s*CMD\s+\["node",\s*"src\/server\.js"\]\s*$/m,
+    'Dockerfile must CMD ["node", "src/server.js"] — with npm as PID 1 the ' +
+      'SIGTERM/SIGINT handlers in src/server.js never run and settlements are ' +
+      'not drained (#495)',
+  );
+  assert.doesNotMatch(
+    runtimeStage(),
+    /^\s*CMD\s+\["npm"/m,
+    'CMD must not go through npm — it swallows the shutdown signals (#495)',
+  );
 });

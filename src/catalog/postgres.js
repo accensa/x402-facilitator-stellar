@@ -101,7 +101,7 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
         CREATE TABLE IF NOT EXISTS catalog_resources (
             key TEXT PRIMARY KEY,
             resource JSONB NOT NULL,
-            source TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',
             provisional BOOLEAN NOT NULL DEFAULT false,
             expires_at BIGINT,
             first_seen_at TIMESTAMPTZ NOT NULL,

@@ -113,11 +113,23 @@ curl localhost:3402/readyz
 `FACILITATOR_SECRET` is a signing key. `.env` is gitignored — never commit it.
 
 The two standalone CLIs — the agent-facing `x402-mcp` MCP server and the
-seller-facing `validate-discovery` tool — ship on npm as
-[`@accensa/x402-facilitator-stellar`](https://www.npmjs.com/package/@accensa/x402-facilitator-stellar)
-(`npm install -g @accensa/x402-facilitator-stellar` then `x402-mcp`; see
-[`docs/MCP.md`](docs/MCP.md)). The facilitator service itself runs from this
-checkout, as above.
+seller-facing `validate-discovery` tool — run from this checkout. No npm
+release is published yet (`npm view @accensa/x402-facilitator-stellar`
+returns E404), so install from source rather than the registry:
+
+```bash
+git clone https://github.com/accensa/x402-facilitator-stellar.git
+cd x402-facilitator-stellar
+npm ci
+npm link   # optional: puts `x402-mcp` and `validate-discovery` on your PATH
+x402-mcp   # or: node src/mcp/cli.js; seller tool: node src/sdk/cli.js <path-to-json>
+```
+
+See [`docs/MCP.md`](docs/MCP.md) for the MCP usage. The facilitator service
+itself runs from this checkout, as above.
+
+Requires Node `>= 20`; develop and test on Node 22 (pinned in `.nvmrc`, run
+in CI — see [CONTRIBUTING.md](CONTRIBUTING.md#node-versions)).
 ### Testnet Setup
 
 Payments on Stellar need funded accounts, and USDC-priced payments additionally need
@@ -156,9 +168,9 @@ npm run format:check  # prettier, check only
 npm run licenses      # fails on any AGPL in the dependency path
 ```
 
-All four run in CI on every push and pull request, as steps of one `ci` job on
-Node 22. `package.json` declares `engines: >= 20`; nothing in CI exercises
-Node 20 any more, so treat that range as unverified (see
+npm test runs on Node 20 and 22; lint, format, audit, and licenses run on Node
+22. `package.json` declares `engines: >= 20`; the test matrix covers both Node 20
+and 22, while the other jobs are pinned to Node 22 (see
 [CONTRIBUTING.md](CONTRIBUTING.md#node-versions)).
 
 The end-to-end conformance run is separate, because it needs testnet and two
@@ -167,6 +179,18 @@ funded accounts:
 ```bash
 FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
 ALICE_SECRET=$(stellar keys show alice) npm run e2e
+
+## Environment variables for e2e
+
+The e2e script uses three operator-facing variables:
+- **MERCHANT_ADDRESS** – default is a shared throwaway testnet payee (
+  GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6) that must
+  be overridden by operators verifying a real settlement destination.
+- **RESOURCE_PORT** – default is 3401; must not collide with the facilitator port
+  (3402) that the same recipe starts.
+- **VERBOSE** – when set, prints the full failure stack on payment errors
+  (referenced in scripts/e2e.mjs:221).
+
 ```
 
 #### Testnet setup scripts
@@ -186,15 +210,19 @@ Everything in `scripts/`, and where it is documented:
 | Script | npm script | Purpose |
 |---|---|---|
 | `check-licenses.mjs` | `npm run licenses` | Fails on any non-permissive (AGPL) dependency in the tree. |
-| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`. |
+| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`, and when `.env.example` documents a variable no code reads. |
 | `smoke-examples.mjs` | `npm run smoke:examples` | Starts both examples and asserts real behaviour (402 challenge; MCP `initialize`/`tools/list`); the CI examples gate. |
 | `e2e.mjs` | `npm run e2e` | End-to-end x402 payment against a running facilitator on testnet. |
 | `fund-testnet-accounts.mjs` | `npm run testnet:fund` | Generates and friendbot-funds the three testnet accounts the suite needs. |
 | `prepare-testnet-usdc.mjs` | `npm run testnet:usdc` | Gives the payer and payee USDC trustlines and a funded balance. |
-| `select-conformance-components.mjs` | (CI, `conformance.yml`) | Decides which upstream e2e components a run exercises; documented in docs/CONFORMANCE.md. |
+| `e2e-smart-account.mjs` | `npm run e2e:smart-account` | End-to-end x402 payment from a `__check_auth` smart-account payer on testnet; documented in docs/CONFORMANCE.md. |
+| `db-migrate.js` | `npm run db:migrate` | Applies pending database migrations against `DATABASE_URL`; documented in docs/MIGRATIONS.md. |
+| `check-migration-compat.js` | `npm run check:migration` | Fails on migration patterns that break zero-downtime deploys (drops, renames, NOT NULL without DEFAULT); a CI gate. |
+| `select-conformance-components.mjs` | (CI, `conformance-run.yml`) | Decides which upstream e2e components a run exercises; documented in docs/CONFORMANCE.md. |
 | `bench-http.mjs` | `npm run bench` | Local throughput benchmark of the HTTP surface with stubbed collaborators. |
 | `bench-http.mjs --budget` | `npm run test:bench` | Resource-budget run: peak RSS, CPU and open sockets, markdown report in `bench-results/`; fails above 512 MiB or on a >20% duration regression (#427). |
 | `bench-cataloging.mjs` | `npm run bench:cataloging` | Cataloging hot-path benchmark: sequential `POST /settle` ops/sec, latency percentiles and GC count with catalogable bodies (#368). |
+| `bench-signer-contention.mjs` | `npm run bench:signer` | Parameterised model of where one Stellar signer stops keeping up as offered concurrency rises (#203); discussed in docs/OPERATIONS.md. |
 | `check-conformance-staleness.mjs` | (CI gate) | Fails if docs/CONFORMANCE.md is stale relative to main facilitator commit SHA. |
 | `data_retention_job.js` | — | **Not implemented.** Exits non-zero on purpose: it is scheduled to enforce the docs/PRIVACY.md retention periods once a datastore exists, and nothing is purged until then. Tracked in [Issue #50](https://github.com/accensa/x402-facilitator-stellar/issues/50). |
 
@@ -228,9 +256,9 @@ Summary (full detail and evidence in the report):
   [`ff798145…0590`](https://stellar.expert/explorer/testnet/tx/ff798145681ad66e20f39f60d91895e993bc8033bbc78847aa5ddf0ee1e70590).
 - ✅ `/supported` emits `extra.areFeesSponsored`; every rejection carries a non-null reason;
   `payload: {transaction}` accepted verbatim.
-- 🟡 Upstream e2e suite, testnet: **1 of 5 server components passes** (`next`; `express`,
-  `fastify`, `hono`, `mcp` fail, structural — tracked in
-  [#64](https://github.com/accensa/x402-facilitator-stellar/issues/64)).
+- 🟢 Upstream e2e suite, testnet: **5 of 5 server components pass** (10/10 scenarios across `express`,
+  `fastify`, `hono`, `next`, `mcp`, 2026-08-25/26 — see
+  [docs/CONFORMANCE.md](docs/CONFORMANCE.md#2026-08-25-26) for per-component evidence).
 - ⬜ `stellar:pubnet` and the pubnet half of the upstream suite — blocked on
   [#17](https://github.com/accensa/x402-facilitator-stellar/issues/17).
 - ❌ Bazaar listing rejected by a third-party client (`invalid_routeTemplate`,

@@ -24,6 +24,7 @@ export const up = pgm => {
     first_seen_at: { type: 'TIMESTAMPTZ', notNull: true },
     last_seen_at: { type: 'TIMESTAMPTZ', notNull: true },
     embedding: { type: 'JSONB' },
+    schema_version: { type: 'INTEGER', notNull: true, default: 1 },
   });
 
   pgm.createIndex('catalog_resources', 'source');
@@ -31,5 +32,6 @@ export const up = pgm => {
 };
 
 export const down = pgm => {
+  pgm.dropColumn('catalog_resources', 'schema_version');
   pgm.dropTable('catalog_resources');
 };

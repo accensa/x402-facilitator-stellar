@@ -18,8 +18,13 @@ test('memory store: first claim owns, duplicate replays, failed claim retries', 
   assert.equal(dup.statusCode, 200);
   assert.deepEqual(dup.response, RESPONSE);
 
-  // An uncompleted claim (settlement threw) must not poison the key forever.
+  // A claim still in flight is a conflict, not a second settlement (#408).
   await store.begin('retry-2');
+  const conflict = await store.begin('retry-2');
+  assert.equal(conflict.conflict, true);
+
+  // A pre-submission failure releases the claim so the retry can proceed.
+  await store.fail('retry-2');
   const retry = await store.begin('retry-2');
   assert.equal(retry.replayed, false);
 });
@@ -103,6 +108,12 @@ function fakePool() {
       };
     },
     query: async (sql, params) => {
+      if (/DELETE/.test(sql)) {
+        const row = rows.get(params[0]);
+        if (!row || row.response !== null) return { rowCount: 0 };
+        rows.delete(params[0]);
+        return { rowCount: 1 };
+      }
       if (/UPDATE/.test(sql)) {
         rows.get(params[0]).status_code = params[1];
         rows.get(params[0]).response = params[2];
@@ -170,21 +181,24 @@ test('postgres store: concurrent claim resolves by polling for the winner respon
   assert.deepEqual(result.response, RESPONSE2);
 });
 
-test('postgres store: a pending (failed) claim is re-claimable after the lock times out', async () => {
-  const warnings = [];
+test('postgres store: an in-flight claim returns a conflict, and fail() releases it', async () => {
   const pool = fakePool();
   const store = new PostgresIdempotencyStore('postgres://unused', {
     pool,
     lockTimeoutMs: 50,
-    warn: m => warnings.push(m),
   });
 
-  // Claim without completing: settlement threw on the other instance.
+  // Claim without completing: the first instance is still settling.
   const first = await store.begin('k-pending');
   assert.equal(first.replayed, false);
 
+  const duplicate = await store.begin('k-pending');
+  assert.equal(duplicate.conflict, true);
+
+  // A pre-submission failure releases the row so a retry may try again.
+  await store.fail('k-pending');
   const retry = await store.begin('k-pending');
-  assert.equal(retry.replayed, false); // may try again
+  assert.equal(retry.replayed, false);
 });
 
 test('postgres store: degrades to memory when the database is unreachable', async () => {

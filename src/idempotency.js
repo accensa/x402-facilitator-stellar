@@ -36,19 +36,30 @@ export class MemoryIdempotencyStore {
 
   /**
    * Claims `key`. Returns { key, replayed: false } if this call owns the
-   * settlement, or { replayed: true, statusCode, response } for a duplicate.
-   * A claim left uncompleted (the settlement threw) is re-claimable: retries
-   * must be able to try again after a failure.
+   * settlement, { replayed: true, statusCode, response } for a completed
+   * duplicate, or { key, conflict: true } when another request is still in
+   * flight — the caller answers that with 409 rather than a second settlement
+   * or an unhelpful outcome-unknown 200 (#408).
+   *
+   * A claim left behind by a pre-submission failure is released with fail(),
+   * so a retry can try again instead of queueing behind a dead claim forever.
    */
   async begin(key) {
     const existing = this.records.get(key);
     if (existing?.response) return { key, replayed: true, ...existing };
+    if (existing?.pending) return { key, conflict: true };
     this.records.set(key, { pending: true });
     return { key, replayed: false };
   }
 
   async complete(key, statusCode, response) {
     this.records.set(key, { statusCode, response });
+  }
+
+  /** Releases an in-flight claim after a failure that did not submit. */
+  async fail(key) {
+    const existing = this.records.get(key);
+    if (existing?.pending) this.records.delete(key);
   }
 }
 
@@ -124,7 +135,9 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
       await client.query('COMMIT');
       if (inserted.rowCount === 1) return { key, replayed: false };
 
-      // Another instance claimed it concurrently. Wait for its response.
+      // Another instance claimed it concurrently. Wait briefly for its
+      // response; if it is still in flight, report the conflict rather than
+      // settling a second time (#408).
       const deadline = Date.now() + this.lockTimeoutMs;
       while (Date.now() < deadline) {
         const row = await this.pool.query(
@@ -144,8 +157,7 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
         }
         await new Promise(r => setTimeout(r, 100));
       }
-      this._degrade(`concurrent claim for ${key} never completed`);
-      return super.begin(key);
+      return { key, conflict: true };
     } catch (err) {
       this._degrade(`query failed: ${err.message}`);
       try {
@@ -169,6 +181,18 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
     } catch (err) {
       this._degrade(`complete failed: ${err.message}`);
       await super.complete(key, statusCode, response);
+    }
+  }
+
+  async fail(key) {
+    if (this.degraded || !this.pool) return super.fail(key);
+    try {
+      await this.pool.query('DELETE FROM idempotency_keys WHERE key = $1 AND response IS NULL', [
+        key,
+      ]);
+    } catch (err) {
+      this._degrade(`fail failed: ${err.message}`);
+      await super.fail(key);
     }
   }
 }
