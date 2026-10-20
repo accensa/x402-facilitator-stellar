@@ -1005,8 +1005,12 @@ describe('exponential backoff schedule', () => {
   test('beyond six attempts keeps doubling', () => {
     const six = backoffMsForAttempt(6, MIN);
     const seven = backoffMsForAttempt(7, MIN);
-    // jitter makes exact comparison flaky, so assert the nominal ratio ~2x
-    assert.ok(seven > six * 1.5 && seven < six * 2.5);
+    // Each call applies its own ±25% jitter, so their ratio ranges 0.6–1.67 and
+    // comparing two independent draws to each other failed about one run in
+    // four. Bound each draw against its own nominal instead: attempt 6 is the
+    // last schedule entry (24h) and attempt 7 doubles it (48h).
+    assert.ok(six >= 1440 * MIN * 0.75 && six <= 1440 * MIN * 1.25, `attempt 6: ${six}`);
+    assert.ok(seven >= 2880 * MIN * 0.75 && seven <= 2880 * MIN * 1.25, `attempt 7: ${seven}`);
   });
 
   test('deliverWebhook uses the six-attempt schedule (stubs clock via baseBackoffMs=1ms)', async () => {
