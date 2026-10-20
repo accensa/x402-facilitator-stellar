@@ -179,6 +179,18 @@ funded accounts:
 ```bash
 FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
 ALICE_SECRET=$(stellar keys show alice) npm run e2e
+
+## Environment variables for e2e
+
+The e2e script uses three operator-facing variables:
+- **MERCHANT_ADDRESS** – default is a shared throwaway testnet payee (
+  GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6) that must
+  be overridden by operators verifying a real settlement destination.
+- **RESOURCE_PORT** – default is 3401; must not collide with the facilitator port
+  (3402) that the same recipe starts.
+- **VERBOSE** – when set, prints the full failure stack on payment errors
+  (referenced in scripts/e2e.mjs:221).
+
 ```
 
 #### Testnet setup scripts

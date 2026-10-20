@@ -84,6 +84,9 @@ const ENV_BRACKET_READ_RE = /env\[\s*['"]([A-Z][A-Z0-9_]{2,})['"]\s*\]/g;
  *                       code that reads it.
  *   kind 'compose-only' the name is consumed by the deployment stack and by
  *                       no code in src/ or scripts/.
+ *   kind 'script-only'  the name is read only by an operator script under
+ *                       scripts/ (never by the service in src/), so `file` +
+ *                       `snippet` cite the script's read.
  *
  * `why` is printed whenever an entry is used, so a CI log says why the name
  * is exempt and where to look. `pattern` marks a family whose names are
@@ -164,13 +167,6 @@ const ALLOWLIST = [
     why: 'per-key rate-limit overrides are unbounded: the loader walks the environment and reads every name starting with RATE_LIMIT_ as env[k]',
   },
   {
-    names: ['AUDIT_LOG_FILE'],
-    kind: 'compose-only',
-    file: 'docker-compose.yml',
-    snippet: 'AUDIT_LOG_FILE',
-    why: 'compose-only: docker-compose.yml passes it into the container, but no src/ code reads it — the audit file sink is not wired yet, so the documented setting has no effect (.env.example is owned by #503/#504)',
-  },
-  {
     names: ['POSTGRES_PASSWORD'],
     kind: 'compose-only',
     file: 'docker-compose.yml',
@@ -190,6 +186,34 @@ const ALLOWLIST = [
     file: 'docker-compose.yml',
     snippet: 'POSTGRES_DB',
     why: 'compose-only: docker-compose.yml consumes it for the db service and for DATABASE_URL; no src/ or scripts/ code reads it',
+  },
+  {
+    names: ['MERCHANT_ADDRESS'],
+    kind: 'script-only',
+    file: 'scripts/e2e.mjs',
+    snippet: 'process.env.MERCHANT_ADDRESS',
+    why: 'script-only: the e2e harness reads it for the payee address; the service in src/ never does',
+  },
+  {
+    names: ['RESOURCE_PORT'],
+    kind: 'script-only',
+    file: 'scripts/e2e.mjs',
+    snippet: 'process.env.RESOURCE_PORT',
+    why: 'script-only: the e2e harness reads it for the resource server port; the service in src/ never does',
+  },
+  {
+    names: ['VERBOSE'],
+    kind: 'script-only',
+    file: 'scripts/e2e.mjs',
+    snippet: 'process.env.VERBOSE',
+    why: 'script-only: the e2e harness reads it to print full errors; the service in src/ never does',
+  },
+  {
+    names: ['SMART_ACCOUNT_WASM'],
+    kind: 'script-only',
+    file: 'scripts/e2e-smart-account.mjs',
+    snippet: 'process.env.SMART_ACCOUNT_WASM',
+    why: 'script-only: npm run e2e:smart-account reads it for the contract wasm path; the service in src/ never does',
   },
 ];
 
@@ -346,9 +370,6 @@ for (const entry of ALLOWLIST) {
     }
   }
 }
-
-const declaredDead = extra.filter(key => isDeclaredDead(key));
-const undeclaredDead = extra.filter(key => !isDeclaredDead(key));
 
 console.log(
   `src/ reads ${read.length} env variable(s); .env.example documents ${documented.size}.`,

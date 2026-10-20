@@ -344,6 +344,14 @@ Inputs pinned (same locked dependencies as every run here):
 | `@x402/stellar` (verify/settle) | `^2.23.0` (locked) |
 | Payer | deployed contract account (C-address) owning the transfer; three instances: no cap, cap `1,000,000` stroops, cap `500` stroops |
 | Asset / amount | XLM (SAC) / 1,000 stroops, facilitator-sponsored fee |
+| Runs in CI | **No** — operator-triggered only. No workflow under `.github/` invokes this command (`git grep -n 'e2e:smart-account\|e2e-smart-account' .github/` returns no matches), and it needs live testnet (funding by friendbot), so it cannot join the `ci` job |
+
+The run is operator-triggered only. Before running it, the operator needs:
+
+* Reachable testnet RPC — `STELLAR_RPC_URL` (defaults to `https://soroban-testnet.stellar.org`).
+* Reachable friendbot — `FRIENDBOT_URL` (defaults to `https://friendbot.stellar.org`). The script generates fresh keypairs per run (deployer, owner, merchant, facilitator) and friendbot funds the classic accounts itself, so no `*_SECRET`-style payer secret, no pre-existing funded account, and no saved fixture state has to be supplied.
+* The built contract fixture — `test/fixtures/smart_account.wasm` is committed; `SMART_ACCOUNT_WASM` can point at a local build of `test/fixtures/smart-account/` instead.
+* `FACILITATOR_URL` is optional: when unset, the script spawns its own facilitator on a random port and tears it down at the end.
 
 The run is wired into CI: `.github/workflows/conformance-run.yml` executes
 `npm run e2e:smart-account` after the upstream suite and reports its pass/fail
