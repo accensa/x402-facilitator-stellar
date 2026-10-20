@@ -160,7 +160,7 @@ Prometheus text format, unauthenticated. By default it is served on `PORT`; set 
 | `active_verifications` | gauge | none | process-wide number of verification calls waiting on Stellar Horizon | HPA target is 5 average active verifications per pod |
 | `x402_catalog_cache_lookups_total` | counter | `tier` (`l1`/`l2`), `outcome` (`hit`/`miss`/`error`) | catalog search cache effectiveness (#392) — the Postgres CPU signal | `l1` hit ratio persistently low with `CATALOG_SEARCH_CACHE=1` means the LRU is too small or queries are too varied; any `outcome="error"` means Redis is timing out (the cache is bypassed, not wrong) |
 
-Operational endpoints (`/metrics`, `/healthz`, `/health/ready`) are logged but excluded from `x402_requests_total` so the payment counters stay semantically about payments.
+Operational endpoints (`/metrics`, `/healthz`, `/readyz`) are logged but excluded from `x402_requests_total` so the payment counters stay semantically about payments.
 
 ## Multi-Signer Pool Management (#9)
 

@@ -230,3 +230,128 @@ describe('CORS: GET /usage and the settlement reads', () => {
     }
   });
 });
+
+describe('CORS: merchant domain patterns (#414)', () => {
+  // CORS_ALLOWED_ORIGINS entries are compiled to anchored regexes, so one
+  // entry can cover a merchant's whole subdomain tree instead of listing
+  // every host by hand.
+  const SUBDOMAINS = 'https://.*\\.merchant\\.example\\.com';
+
+  test('an origin matching a configured pattern is reflected verbatim', async () => {
+    const app = await serve({ corsAllowedOrigins: [SUBDOMAINS] });
+    try {
+      for (const origin of [
+        'https://shop.merchant.example.com',
+        'https://pay.merchant.example.com',
+      ]) {
+        const res = await app.post('/verify', {}, { origin });
+        assert.equal(res.headers.get('access-control-allow-origin'), origin, origin);
+        // A concrete reflection may carry credentials; a wildcard never could.
+        assert.equal(res.headers.get('access-control-allow-credentials'), 'true', origin);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('an origin outside every pattern gets no grant', async () => {
+    const app = await serve({ corsAllowedOrigins: [SUBDOMAINS] });
+    try {
+      for (const origin of [
+        'https://evil.example.com',
+        // The suffix a merely-*containing* pattern would have admitted: the
+        // anchoring is what refuses it.
+        'https://merchant.example.com.evil.net',
+      ]) {
+        const res = await app.post('/verify', {}, { origin });
+        assert.equal(res.headers.get('access-control-allow-origin'), null, origin);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a bare domain pattern matches the origin host on label boundaries only', async () => {
+    // A merchant configures its domain without the scheme it never wrote.
+    const app = await serve({ corsAllowedOrigins: ['seller\\.example\\.com'] });
+    try {
+      const granted = await app.post('/verify', {}, { origin: 'https://seller.example.com' });
+      assert.equal(
+        granted.headers.get('access-control-allow-origin'),
+        'https://seller.example.com',
+      );
+
+      // A lookalike that merely ends the same way is not the merchant: the
+      // pattern is matched against dot-aligned suffixes of the host, never
+      // against an unlabelled tail like `badexample.com`.
+      for (const origin of ['https://badexample.com', 'https://evil.example.net']) {
+        const denied = await app.post('/verify', {}, { origin });
+        assert.equal(denied.headers.get('access-control-allow-origin'), null, origin);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a request with no Origin header gets no grant on either class', async () => {
+    const app = await serve({ corsAllowedOrigins: [SUBDOMAINS] });
+    try {
+      const authed = await app.post('/verify', {});
+      assert.equal(authed.headers.get('access-control-allow-origin'), null);
+
+      // Public reads fall back to `*` only when no allowlist exists; a
+      // configured policy grants nothing to a request that stated no origin.
+      const pub = await app.get('/supported');
+      assert.equal(pub.headers.get('access-control-allow-origin'), null);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('preflight caches for 24h and permits exactly the required x402 headers', async () => {
+    const app = await serve({ corsAllowedOrigins: [SUBDOMAINS] });
+    try {
+      const res = await app.request('/verify', {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://shop.merchant.example.com',
+          'access-control-request-method': 'POST',
+        },
+      });
+      assert.equal(res.status, 204);
+      assert.equal(
+        res.headers.get('access-control-allow-origin'),
+        'https://shop.merchant.example.com',
+      );
+      assert.equal(res.headers.get('access-control-max-age'), '86400');
+
+      const allowHeaders = (res.headers.get('access-control-allow-headers') ?? '')
+        .split(', ')
+        .map(name => name.toLowerCase());
+      // Exactly the required set — nothing a browser may send is advertised
+      // beyond it.
+      assert.deepEqual(allowHeaders.sort(), ['authorization', 'content-type', 'x-402-payment']);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a wildcard grant still pairs with no credentials header', async () => {
+    const app = await serve();
+    try {
+      const res = await app.get('/supported', { origin: 'https://explorer.example.com' });
+      assert.equal(res.headers.get('access-control-allow-origin'), '*');
+      assert.equal(res.headers.get('access-control-allow-credentials'), null);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a pattern that is not a valid regex refuses to boot, naming the entry', async () => {
+    await assert.rejects(
+      () => serve({ corsAllowedOrigins: ['https://[broken'] }),
+      /CORS_ALLOWED_ORIGINS entry "https:\/\/\[broken" is not a valid regular expression/,
+      'a malformed allowlist entry must fail at construction, not at first use',
+    );
+  });
+});

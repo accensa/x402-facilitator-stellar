@@ -94,6 +94,20 @@ pinned.
   proxy list) resolves the client address from the rightmost
   `X-Forwarded-For` entry, which is the only entry a trusted proxy vouches
   for.
+- Pattern-based CORS origin verification (#414): every `CORS_ALLOWED_ORIGINS`
+  entry is compiled once to an anchored regular expression and matched against
+  each request's `Origin`, so one entry can allowlist a merchant's whole
+  subdomain tree (`https://.*\.merchant\.example`) while an exact origin
+  remains valid configuration — as a pattern, so `.` still matches any
+  character and a literal host must be written `seller\.example\.com`.
+  Anchoring is what stops a pattern being satisfied by a hostname that merely
+  contains the merchant's, and a bare domain (`seller.example.com`) is matched
+  against dot-aligned suffixes of the origin's host. A matched origin is
+  reflected verbatim with `Access-Control-Allow-Credentials: true`; a
+  malformed pattern fails at boot naming the entry rather than misbehaving at
+  the first cross-origin request. Preflights now advertise exactly
+  `Authorization, Content-Type, X-402-Payment` and cache for 24h
+  (`Access-Control-Max-Age: 86400`, previously `600`).
 
 ### Changed
 
@@ -160,6 +174,16 @@ pinned.
   resource ranks lexically while it waits and stays dropped if the re-embed
   fails. Each vector carries a fingerprint of the text it describes, so an
   unchanged listing keeps its vector and skips the provider call entirely.
+- The operational probes are no longer counted as payment traffic (#494): the
+  exclusion set in `src/app.js` named `/health/ready`, a path no route in this
+  server registers, so every readiness poll — the Docker HEALTHCHECK, the
+  1-minute external probe `docs/OPERATIONS.md` commits to, every Kubernetes
+  readiness probe — incremented `x402_requests_total{route="/readyz"}`, the
+  counter the payment dashboards and alerts read. The set now names the
+  registered `/readyz`, is exported so `test/observability.test.js` pins every
+  entry to a registered GET route (and the probes, `/healthz` and `/metrics`,
+  stay excluded while `/verify` and `/settle` keep counting), and
+  `docs/OPERATIONS.md` names the routes the app actually serves.
 - An `OPTIONS` preflight can now override the method list its route class
   advertises. The DLQ routes (`GET /admin/dlq…`) had been advertising
   `POST, OPTIONS` and `DELETE /discovery/resource` needed a union its class

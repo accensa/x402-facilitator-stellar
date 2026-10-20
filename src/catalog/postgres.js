@@ -94,6 +94,20 @@ export class PostgresCatalogStore extends MemoryCatalogStore {
     }
   }
 
+  /**
+   * Reports the flag `_degrade` already tracks (#584): once the pool has gone
+   * away or a write has failed, listings live in process-local memory only.
+   *
+   * A pure flag read — no DB round trip, no await — and it never throws,
+   * because it runs on the readiness probe path (src/readiness.js). Readiness
+   * still reports this without failing: catalogue trouble is not a settlement
+   * failure.
+   */
+  healthCheck() {
+    if (!this.degraded) return { ok: true };
+    return { ok: false, reason: 'postgres unavailable — catalog is process-local memory only' };
+  }
+
   async _ensureSchema() {
     if (!this.pool || this.degraded) return;
     try {

@@ -127,6 +127,26 @@ export function createRateLimiterHealthCheck(databaseUrl) {
 }
 
 /**
+ * Routes kept out of the payment metrics (#494).
+ *
+ * `/metrics`, `/healthz` and `/readyz` are operational probes: the Docker
+ * HEALTHCHECK, the 1-minute external probe docs/OPERATIONS.md commits to, and
+ * every Kubernetes readiness poll hit them constantly, and counting that
+ * traffic into `x402_requests_total` would move the counter the payment
+ * dashboards and alerts read.
+ *
+ * The set once named `/health/ready` — a path no route in this server
+ * registers — so every readiness poll instead landed in
+ * `x402_requests_total{route="/readyz"}`. It is exported so
+ * test/observability.test.js can pin every entry to a route the app actually
+ * registers: a stale name fails CI rather than silently rejoining the counter,
+ * and a dropped name fails the probe assertions in the same file.
+ *
+ * @type {ReadonlySet<string>}
+ */
+export const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/readyz']);
+
+/**
  * Builds the Fastify app.
  *
  * Takes its collaborators rather than reaching for module state, which is what
@@ -206,7 +226,6 @@ export async function createApp(
     });
   });
 
-  const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/health/ready']);
   app.addHook('onResponse', (req, reply, done) => {
     activeRequestCount = Math.max(0, activeRequestCount - 1);
     const span = req.span;

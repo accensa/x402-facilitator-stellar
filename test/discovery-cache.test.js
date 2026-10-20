@@ -81,6 +81,57 @@ test('#200: any catalog write invalidates the validator', async t => {
   assert.equal(stale.status, 200, 'a pre-write etag must not 304 after a write');
 });
 
+/**
+ * #583: the prune sweep deletes entries through the same key path as
+ * deleteResource, so it is the same catalog write — and the version is the whole
+ * freshness story. Without a bump the sweeper's removals stay answerable from
+ * the search cache and keep matching their pre-prune ETag until a TTL expires.
+ */
+test('#583: a pruning sweep invalidates the validator and hides the pruned listing', async t => {
+  const store = new MemoryCatalogStore({ catalogVerifyTtlMs: 40 });
+  const h = await serve({ catalog: store });
+  t.after(() => h.close());
+
+  await store.upsertResource({ ...LISTING }, 'verify');
+  const before = await h.get('/discovery/resources');
+  assert.equal(before.status, 200);
+  assert.match(
+    await before.text(),
+    /weather/,
+    'the provisional listing is public before it expires',
+  );
+  const etag = before.headers.get('etag');
+  const version = store.getVersion();
+
+  // Let the provisional window lapse, then run the sweep the server timer runs.
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(await store.pruneExpired(), 1, 'the sweep removed the listing');
+  assert.ok(store.getVersion() > version, 'a prune that removes an entry is a catalog write');
+
+  const stale = await h.get('/discovery/resources', { 'if-none-match': etag });
+  assert.equal(stale.status, 200, 'a pre-prune etag must not 304 after the sweep');
+  assert.notEqual(stale.headers.get('etag'), etag);
+  assert.doesNotMatch(await stale.text(), /weather/, 'the pruned listing is gone from the body');
+});
+
+test('#583: a sweep that removes nothing leaves the version and validator alone', async t => {
+  const store = new MemoryCatalogStore();
+  const h = await serve({ catalog: store });
+  t.after(() => h.close());
+
+  await store.upsertResource({ ...LISTING }, 'settle');
+  const etag = (await h.get('/discovery/resources')).headers.get('etag');
+  const version = store.getVersion();
+  const modified = store.getLastModified();
+
+  assert.equal(await store.pruneExpired(), 0);
+  assert.equal(store.getVersion(), version, 'an empty sweep is not a write');
+  assert.equal(store.getLastModified(), modified);
+
+  const again = await h.get('/discovery/resources', { 'if-none-match': etag });
+  assert.equal(again.status, 304, 'an unchanged catalog still revalidates');
+});
+
 test('#200: the validator keys on the full parameter set', async t => {
   const h = await cachedServe();
   t.after(() => h.close());

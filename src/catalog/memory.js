@@ -366,6 +366,13 @@ export class MemoryCatalogStore extends CatalogStore {
    * Physically removes expired provisional (verify-only) listings so they do
    * not accumulate forever (#140). Called lazily by a background sweep rather
    * than on the payment hot path. Returns the number of entries pruned.
+   *
+   * A removal here is the same catalog write `deleteResource` performs (#583):
+   * the sweep runs on its own timer and announces nothing, so without a version
+   * bump a pruned listing would keep answering from the search cache (the
+   * version is part of the key) and keep matching its pre-prune ETag until the
+   * TTL expired. The version moves when and only when an entry actually went —
+   * an empty sweep leaves the catalog untouched, and its validators valid.
    */
   async pruneExpired() {
     let pruned = 0;
@@ -375,6 +382,10 @@ export class MemoryCatalogStore extends CatalogStore {
         this._decrementPayToCount(entry.payTo);
         pruned += 1;
       }
+    }
+    if (pruned > 0) {
+      this._version += 1;
+      this._lastModified = new Date();
     }
     return pruned;
   }
