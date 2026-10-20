@@ -229,9 +229,10 @@ function compileTrustList(trust) {
       throw new Error(`TRUST_PROXY list entries must be IPs, CIDRs, or presets — got "${entry}".`);
     }
     if (slash !== -1) {
-      const prefix = Number(cidr.slice(slash + 1));
+      const prefixText = cidr.slice(slash + 1);
+      const prefix = Number(prefixText);
       const max = networkKind === 6 ? 128 : 32;
-      if (!Number.isInteger(prefix) || prefix < 0 || prefix > max) {
+      if (!/^\d+$/.test(prefixText) || !Number.isInteger(prefix) || prefix > max) {
         throw new Error(
           `TRUST_PROXY list entries must be IPs, CIDRs, or presets — got "${entry}".`,
         );

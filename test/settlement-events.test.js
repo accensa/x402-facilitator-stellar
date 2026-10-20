@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { Keypair } from '@stellar/stellar-sdk';
 import { MemorySettlementStore } from '../src/store/memory.js';
 import { PostgresSettlementStore } from '../src/store/postgres.js';
+import { createSettlementEvent, eventTypeForState } from '../src/eventstore/events.js';
 import { projectSettlement } from '../src/eventstore/projection.js';
 import { createApp } from '../src/app.js';
 import { resolveConfig } from '../src/config.js';
@@ -554,3 +555,81 @@ function fakePostgresPool() {
     },
   };
 }
+
+describe('Settlement event envelope validation', () => {
+  const eventPayloads = [
+    [
+      'SettlementInitiated',
+      { idempotency_key: 'key-1', network: 'stellar:testnet', scheme: 'exact-stellar' },
+    ],
+    ['SettlementSettled', { idempotency_key: 'key-1' }],
+    ['SettlementFailed', { idempotency_key: 'key-1' }],
+    ['SettlementOutcomeUnknown', { idempotency_key: 'key-1' }],
+  ];
+
+  test('all registered event types round-trip as version 1 envelopes', () => {
+    for (const [type, payload] of eventPayloads) {
+      assert.deepEqual(createSettlementEvent(type, payload), {
+        event_type: type,
+        event_version: 1,
+        payload,
+      });
+    }
+  });
+
+  test('unknown types are rejected and named in the error', () => {
+    assert.throws(() => createSettlementEvent('SettlementRetried', {}), /SettlementRetried/);
+  });
+
+  test('null and undefined required fields are rejected', () => {
+    const requiredFields = {
+      SettlementInitiated: ['idempotency_key', 'network', 'scheme'],
+      SettlementSettled: ['idempotency_key'],
+      SettlementFailed: ['idempotency_key'],
+      SettlementOutcomeUnknown: ['idempotency_key'],
+    };
+
+    for (const [type, payload] of eventPayloads) {
+      for (const field of requiredFields[type]) {
+        for (const missingValue of [null, undefined]) {
+          assert.throws(
+            () => createSettlementEvent(type, { ...payload, [field]: missingValue }),
+            error => error.message === `${type} event requires field "${field}"`,
+          );
+        }
+      }
+    }
+  });
+
+  test('present falsy values are retained in the envelope', () => {
+    const payload = {
+      idempotency_key: '',
+      network: 0,
+      scheme: false,
+      payer: '',
+      amount: 0,
+    };
+
+    assert.deepEqual(createSettlementEvent('SettlementInitiated', payload), {
+      event_type: 'SettlementInitiated',
+      event_version: 1,
+      payload,
+    });
+  });
+
+  test('omitted payloads report each type’s first required field', () => {
+    for (const [type] of eventPayloads) {
+      assert.throws(
+        () => createSettlementEvent(type),
+        error => error.message === `${type} event requires field "idempotency_key"`,
+      );
+    }
+  });
+
+  test('state mappings cover terminal states and reject submitted', () => {
+    assert.equal(eventTypeForState('settled'), 'SettlementSettled');
+    assert.equal(eventTypeForState('failed'), 'SettlementFailed');
+    assert.equal(eventTypeForState('unknown'), 'SettlementOutcomeUnknown');
+    assert.throws(() => eventTypeForState('submitted'), /submitted/);
+  });
+});
