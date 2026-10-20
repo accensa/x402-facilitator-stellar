@@ -22,6 +22,13 @@
  *
  *   grep -rhoP 'env\.\K[A-Z][A-Z0-9_]{2,}' src/ | sort -u
  *
+ * Several real reads use bracket/computed access (`env[pluralKey]`,
+ * `env[key]`, `env[k]`, `process.env[name]`) that the lexical regex cannot
+ * resolve. Those dynamic prefixes are declared in DECLARED_DEAD below, each
+ * with an individual src/ citation, so the allowlist cannot quietly grow back
+ * into a blind spot. Names that are documented only for docker-compose (never
+ * read in src/ or scripts/) are excused as 'compose-only'.
+ *
  * What counts as "documented": any key written before an `=` in .env.example,
  * whether the line is commented out or live — the file's convention is to show
  * unset defaults as `# KEY=value`.
@@ -339,6 +346,9 @@ for (const entry of ALLOWLIST) {
     }
   }
 }
+
+const declaredDead = extra.filter(key => isDeclaredDead(key));
+const undeclaredDead = extra.filter(key => !isDeclaredDead(key));
 
 console.log(
   `src/ reads ${read.length} env variable(s); .env.example documents ${documented.size}.`,

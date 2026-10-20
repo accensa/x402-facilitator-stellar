@@ -171,7 +171,7 @@ function isIpv4Mapped(value) {
  * @param {string} cidr
  * @returns {boolean}
  */
-function ipMatchesCidr(ip, cidr) {
+export function ipMatchesCidr(ip, cidr) {
   const slash = cidr.lastIndexOf('/');
   const network = slash === -1 ? cidr : cidr.slice(0, slash);
   const prefix = slash === -1 ? null : Number(cidr.slice(slash + 1));

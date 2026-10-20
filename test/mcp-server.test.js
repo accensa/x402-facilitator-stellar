@@ -219,6 +219,91 @@ test('MCP (#169): a malformed version is treated as unsupported, never echoed', 
   assert.equal(warnings.length, 1, 'a non-string version is a mismatch worth logging');
 });
 
+describe('MCP ping — the liveness contract', () => {
+  /**
+   * `ping` is the liveness check a client sends before it trusts a session
+   * (docs/MCP.md lists it in the method surface this server implements,
+   * alongside initialize, tools/list, tools/call and notifications/initialized).
+   * Two things a client relies on: it gets a result rather than the -32601
+   * "Method not found" fallback, and the answer carries the id it was given.
+   *
+   * Unlike makeServer() above, which stubs _sendResult to inspect dispatch
+   * decisions, these use the real send path so the assertions cover the frame
+   * as it goes on the wire — `{ jsonrpc, id, result }` — the same shape the
+   * HTTP transport captures and hands back.
+   */
+  function pingServer() {
+    const server = new McpServer({ name: 'ping-test', version: '0.0.1' });
+    const chunks = [];
+    server._stdout = {
+      write: chunk => {
+        chunks.push(chunk.toString());
+        return true;
+      },
+      on: () => {},
+      off: () => {},
+    };
+    server._open = true;
+    const send = async req => {
+      await server._handleRequest(req);
+      await server.flush();
+    };
+    const frames = () => chunks.map(chunk => JSON.parse(chunk.trim()));
+    return { server, send, frames };
+  }
+
+  test('a well-formed ping is answered with { jsonrpc, id, result: {} } and no error', async () => {
+    const { send, frames } = pingServer();
+    for (const id of [7, 'ping-abc']) {
+      await send({ jsonrpc: '2.0', id, method: 'ping' });
+
+      const frame = frames().at(-1);
+      assert.equal(frame.jsonrpc, '2.0');
+      assert.equal(frame.id, id, 'the reply answers with the id the request was given');
+      assert.deepEqual(frame.result, {}, 'ping answers with an empty result object');
+      assert.ok(!('error' in frame), 'a ping is never answered with an error');
+    }
+  });
+
+  test('ping is answered before notifications/initialized has arrived', async () => {
+    const { server, send, frames } = pingServer();
+    await initialize(server, LATEST_PROTOCOL_VERSION); // the #169 helper, not a second harness
+    await send({ jsonrpc: '2.0', id: 2, method: 'ping' });
+
+    assert.equal(frames().length, 2, 'initialize and ping, one frame each');
+    const pong = frames()[1];
+    assert.deepEqual(pong.result, {}, 'liveness is not gated on the initialized notification');
+    assert.equal(pong.id, 2);
+    assert.ok(!('error' in pong));
+  });
+
+  test('ping is answered on a connection that has never seen initialize at all', async () => {
+    const { send, frames } = pingServer();
+    await send({ jsonrpc: '2.0', id: 99, method: 'ping' });
+
+    assert.deepEqual(frames(), [{ jsonrpc: '2.0', id: 99, result: {} }]);
+  });
+
+  test('ping works over the HTTP transport as well as the direct handler', async () => {
+    const server = new McpServer({ name: 'ping-http-test', version: '0.0.1' });
+    const { port, close } = await server.startSSE();
+    try {
+      // A single ping, before initialize — the probe a client sends to decide
+      // whether the session is worth starting.
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'h-1', method: 'ping' }),
+      });
+      assert.equal(res.status, 200);
+      const frame = await res.json();
+      assert.deepEqual(frame, { jsonrpc: '2.0', id: 'h-1', result: {} });
+      assert.equal(frame.error, undefined, 'no error object rides on a successful ping');
+    } finally {
+      await close();
+    }
+  });
+});
+
 describe('JSON-RPC 2.0 batch processing (#428)', () => {
   // Real send helpers (makeServer stubs them), so responses flow through the
   // batch sink exactly as they do on the wire.

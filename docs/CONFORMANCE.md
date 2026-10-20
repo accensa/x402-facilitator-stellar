@@ -339,7 +339,7 @@ Inputs pinned (same locked dependencies as every run here):
 | Input | Value |
 |---|---|
 | Command | `npm run e2e:smart-account` |
-| Fixture | `test/fixtures/smart_account.wasm` — contract source in `test/fixtures/smart-account/` (`Cargo.toml` pins `soroban-sdk 27.0.6`, the protocol line testnet runs today); build/deploy steps in its `README.md` |
+| Fixture | `test/fixtures/smart_account.wasm` — contract source in `test/fixtures/smart-account/` (`Cargo.toml` pins `soroban-sdk 27.0.6`, the protocol line testnet runs today); build/deploy steps in its `README.md`. Setting `SMART_ACCOUNT_WASM` (see `.env.example`) points the run at a rebuilt fixture without overwriting the committed wasm. |
 | `@stellar/stellar-sdk` | `^16.2.0` (locked) |
 | `@x402/stellar` (verify/settle) | `^2.23.0` (locked) |
 | Payer | deployed contract account (C-address) owning the transfer; three instances: no cap, cap `1,000,000` stroops, cap `500` stroops |

@@ -199,6 +199,83 @@ describe('readiness checker', () => {
     assert.equal(report.ok, false);
     assert.equal(report.status, 'shutting_down');
   });
+
+  test('database check failure fails readiness and names the component', async () => {
+    const config = configWith([['stellar:testnet', 'http://rpc.test']]);
+    const checker = createReadinessChecker(config, {
+      rpcCall: rpcStub(),
+      cacheTtlMs: 0,
+      db: async () => ({ ok: false, error: 'connection refused' }),
+    });
+    const report = await checker.check();
+    assert.equal(report.ok, false);
+    assert.equal(report.database.ok, false);
+    assert.equal(report.database.component, 'database');
+    assert.match(report.database.error, /connection refused/);
+  });
+
+  test('redis check failure fails readiness and names the component', async () => {
+    const config = configWith([['stellar:testnet', 'http://rpc.test']]);
+    const checker = createReadinessChecker(config, {
+      rpcCall: rpcStub(),
+      cacheTtlMs: 0,
+      redis: async () => ({ ok: false, error: 'ECONNREFUSED' }),
+    });
+    const report = await checker.check();
+    assert.equal(report.ok, false);
+    assert.equal(report.redis.ok, false);
+    assert.equal(report.redis.component, 'redis');
+    assert.match(report.redis.error, /ECONNREFUSED/);
+  });
+
+  test('rate limiter backend check failure fails readiness and names the component', async () => {
+    const config = configWith([['stellar:testnet', 'http://rpc.test']]);
+    const checker = createReadinessChecker(config, {
+      rpcCall: rpcStub(),
+      cacheTtlMs: 0,
+      rateLimiterBackend: async () => ({ ok: false, error: 'table missing' }),
+    });
+    const report = await checker.check();
+    assert.equal(report.ok, false);
+    assert.equal(report.rate_limiter_backend.ok, false);
+    assert.equal(report.rate_limiter_backend.component, 'rate_limiter_backend');
+    assert.match(report.rate_limiter_backend.error, /table missing/);
+  });
+
+  test('all infrastructure checks pass when healthy', async () => {
+    const config = configWith([['stellar:testnet', 'http://rpc.test']]);
+    const checker = createReadinessChecker(config, {
+      rpcCall: rpcStub(),
+      cacheTtlMs: 0,
+      db: async () => ({ ok: true }),
+      redis: async () => ({ ok: true }),
+      rateLimiterBackend: async () => ({ ok: true }),
+    });
+    const report = await checker.check();
+    assert.equal(report.ok, true);
+    assert.equal(report.database.ok, true);
+    assert.equal(report.redis.ok, true);
+    assert.equal(report.rate_limiter_backend.ok, true);
+  });
+
+  test('infrastructure checks are cached with the same TTL', async () => {
+    let dbCalls = 0;
+    const config = configWith([['stellar:testnet', 'http://rpc.test']]);
+    const checker = createReadinessChecker(config, {
+      rpcCall: rpcStub(),
+      cacheTtlMs: 60_000,
+      db: async () => {
+        dbCalls++;
+        return { ok: true };
+      },
+    });
+    await checker.check();
+    await checker.check();
+    assert.equal(dbCalls, 1, 'db check should be cached');
+    checker.invalidate();
+    await checker.check();
+    assert.equal(dbCalls, 2, 'db check should run again after invalidation');
+  });
 });
 
 describe('GET /readyz over HTTP', () => {

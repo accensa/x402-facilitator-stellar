@@ -121,6 +121,8 @@ export class RedisRateLimiter extends RateLimiter {
   checkVerify(req) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'verify', limits.verifyRpm);
+    if (bypass) return Promise.resolve(bypass);
     return this._checkAsync(ownerId, 'verify', 60, limits.verifyRpm).then(res => {
       if (!res.allowed) res.reason = 'rate_limit_exceeded';
       return res;
@@ -143,6 +145,8 @@ export class RedisRateLimiter extends RateLimiter {
   async checkSettle(req, _network = null) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'settle', limits.settleRpm);
+    if (bypass) return bypass;
     const checks = [
       await this._checkAsync(ownerId, 'settle', 60, limits.settleRpm),
       await this._checkAsync(ownerId, 'settle', 3600, limits.settleRph),
@@ -183,6 +187,8 @@ export class RedisRateLimiter extends RateLimiter {
   checkCatalog(req) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'catalog', limits.catalogRpm);
+    if (bypass) return Promise.resolve(bypass);
     return this._checkAsync(ownerId, 'catalog', 60, limits.catalogRpm).then(res => {
       if (!res.allowed) res.reason = 'catalog_rate_limited';
       return res;
@@ -201,6 +207,8 @@ export class RedisRateLimiter extends RateLimiter {
   checkCatalogRead(req) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'catalog_read', limits.catalogReadRpm ?? 60);
+    if (bypass) return Promise.resolve(bypass);
     return this._checkAsync(ownerId, 'catalog_read', 60, limits.catalogReadRpm ?? 60).then(res => {
       if (!res.allowed) res.reason = 'catalog_read_rate_limited';
       return res;

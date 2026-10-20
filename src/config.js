@@ -238,16 +238,27 @@ export function resolveConfig(env = process.env) {
     return limits;
   };
 
+  /**
+   * Trusted CIDR blocks that bypass rate limiting (#410). Entries are validated
+   * by RateLimiter at boot; a forged X-Forwarded-For header cannot reach this
+   * check because the rate limiter reads only the resolved req.ip.
+   */
+  const rateLimitAllowlist = (env.RATE_LIMIT_ALLOWLIST ?? '')
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(Boolean);
+
   const rateLimits = {
     global: parseLimits(env.RATE_LIMIT_GLOBAL),
     keys: {},
+    allowlist: rateLimitAllowlist,
   };
 
   // Build a set of configured key ids (uppercased) for validation
   const configuredKeyIds = new Set(apiKeys.map(k => k.id.toUpperCase()));
 
   for (const k of Object.keys(env)) {
-    if (k.startsWith('RATE_LIMIT_') && k !== 'RATE_LIMIT_GLOBAL') {
+    if (k.startsWith('RATE_LIMIT_') && k !== 'RATE_LIMIT_GLOBAL' && k !== 'RATE_LIMIT_ALLOWLIST') {
       const keyId = k.substring(11); // remove RATE_LIMIT_
       // Validate that the key id exists in configured API keys (case-insensitive)
       if (!configuredKeyIds.has(keyId.toUpperCase())) {
@@ -381,6 +392,15 @@ export function resolveConfig(env = process.env) {
      * METRICS_HOST=0.0.0.0). Unused when METRICS_PORT is unset.
      */
     metricsHost: (env.METRICS_HOST ?? '127.0.0.1').trim() || '127.0.0.1',
+
+    /**
+     * AUDIT_LOG_FILE: when set, every audit record is appended to this file as
+     * well as written to stdout, giving the operator a separable retention
+     * surface (#587). Unset keeps the pre-#587 behaviour exactly: stdout only,
+     * no file created, no new boot requirement. An unwritable path is reported
+     * once and audit continues on stdout — see src/audit.js.
+     */
+    auditLogFile: env.AUDIT_LOG_FILE?.trim() || null,
 
     /**
      * Deployment environment. Unset in the Docker image by default; only used

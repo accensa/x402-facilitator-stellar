@@ -21,6 +21,7 @@ test('publish throws when receiver url is missing and makes zero network calls',
 test('publish throws with the last status when all retries fail', async () => {
   let calls = 0;
   const dispatcher = await createWebhookDispatcher({
+    baseBackoffMs: 1,
     fetchImpl: async () => {
       calls++;
       return { status: 503 };
@@ -36,12 +37,13 @@ test('publish throws with the last status when all retries fail', async () => {
       }),
     /webhook delivery to https:\/\/receiver\.example\/hook failed after retries \(last status 503\)/,
   );
-  assert.equal(calls, 5);
+  assert.equal(calls, 6);
 });
 
 test('publish throws with transport-error wording when every attempt throws', async () => {
   let calls = 0;
   const dispatcher = await createWebhookDispatcher({
+    baseBackoffMs: 1,
     fetchImpl: async () => {
       calls++;
       throw new Error('ECONNRESET');
@@ -57,7 +59,7 @@ test('publish throws with transport-error wording when every attempt throws', as
       }),
     /webhook delivery to https:\/\/receiver\.example\/hook failed after retries \(last status transport error\)/,
   );
-  assert.equal(calls, 5);
+  assert.equal(calls, 6);
 });
 
 test('publish resolves the record on immediate success', async () => {
@@ -80,6 +82,7 @@ test('publish resolves the record on immediate success', async () => {
 test('publish resolves after one failed attempt and one later success', async () => {
   let calls = 0;
   const dispatcher = await createWebhookDispatcher({
+    baseBackoffMs: 1,
     fetchImpl: async () => {
       calls++;
       if (calls === 1) return { status: 500 };

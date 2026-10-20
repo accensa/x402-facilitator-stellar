@@ -142,3 +142,39 @@ test('fails when an allowlist citation no longer matches the code', () => {
     `expected the failure to report the stale allowlist entry, got:\n${output}`,
   );
 });
+
+test('fails, naming the variable, when one is documented but never read and not allowlisted', () => {
+  // #504 regression: STELLAR_SECRET documented in .env.example, read nowhere.
+  const dir = fixture([], ['STELLAR_SECRET=']);
+  try {
+    let output = '';
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [SCRIPT, '--root', dir], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }),
+      err => {
+        output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+        return err.status === 1 && output.includes('STELLAR_SECRET');
+      },
+      `expected failure naming STELLAR_SECRET, got:\n${output}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('passes when documented-but-dead names are on the declared-dead allowlist', () => {
+  // Computed-read family (FACILITATOR_SECRET*) and a compose-only name
+  // (POSTGRES_PASSWORD) are documented, never read, and explicitly excused.
+  const dir = fixture([], ['FACILITATOR_SECRET=', 'POSTGRES_PASSWORD=']);
+  try {
+    execFileSync(process.execPath, [SCRIPT, '--root', dir], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

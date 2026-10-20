@@ -9,7 +9,7 @@
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { serve, stubFacilitator } from './helpers/app.js';
+import { serve, stubFacilitator, testConfig, TEST_SECRET } from './helpers/app.js';
 
 const ALLOWED = 'https://seller.example.com';
 
@@ -144,6 +144,87 @@ describe('CORS: authenticated payment routes', () => {
         headers: { origin: ALLOWED },
       });
       assert.equal(facilitator.calls.length, 0);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('CORS: GET /usage and the settlement reads', () => {
+  // The three routes the authenticated policy claims to cover but which had no
+  // OPTIONS route: a browser preflighting any of them fell through to the 404
+  // handler, so the caller saw a missing route instead of a CORS verdict.
+  const AFFECTED = ['/usage', '/settlements/idem-1', '/settlements/idem-1/events'];
+
+  test("an allowlisted origin's preflight answers 204 and names the served methods", async () => {
+    const app = await serve({ corsAllowedOrigins: [ALLOWED] });
+    try {
+      for (const path of AFFECTED) {
+        const res = await app.request(path, {
+          method: 'OPTIONS',
+          headers: { origin: ALLOWED, 'access-control-request-method': 'GET' },
+        });
+        assert.equal(res.status, 204, path);
+        assert.equal(res.headers.get('access-control-allow-origin'), ALLOWED, path);
+
+        // The verb list must name what the route actually serves — GET — and
+        // must not borrow POST from the authenticated class default.
+        const methods = res.headers.get('access-control-allow-methods') ?? '';
+        assert.match(methods, /\bGET\b/, `${path}: ${methods}`);
+        assert.match(methods, /\bOPTIONS\b/, `${path}: ${methods}`);
+        assert.doesNotMatch(methods, /\bPOST\b/, `${path}: ${methods}`);
+
+        // Authorization is what forces the preflight in the first place, so
+        // the answer has to permit it.
+        const allowHeaders = (res.headers.get('access-control-allow-headers') ?? '').toLowerCase();
+        assert.ok(allowHeaders.includes('authorization'), path);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('an unlisted origin gets 204 with no ACAO — never a 404', async () => {
+    const app = await serve({ corsAllowedOrigins: [ALLOWED] });
+    try {
+      for (const path of AFFECTED) {
+        const res = await app.request(path, {
+          method: 'OPTIONS',
+          headers: { origin: 'https://evil.example.com', 'access-control-request-method': 'GET' },
+        });
+        assert.equal(
+          res.status,
+          204,
+          `${path}: a denied preflight must be answered by the OPTIONS route, not the 404 handler`,
+        );
+        assert.equal(res.headers.get('access-control-allow-origin'), null, path);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a real cross-origin GET /usage reflects the allowlisted origin', async () => {
+    const app = await serve({
+      config: testConfig({
+        apiKeys: [`admin:${TEST_SECRET}`],
+        corsAllowedOrigins: [ALLOWED],
+      }),
+    });
+    try {
+      const granted = await app.get('/usage', {
+        origin: ALLOWED,
+        authorization: `Bearer ${TEST_SECRET}`,
+      });
+      assert.equal(granted.status, 200);
+      assert.equal(granted.headers.get('access-control-allow-origin'), ALLOWED);
+
+      const denied = await app.get('/usage', {
+        origin: 'https://evil.example.com',
+        authorization: `Bearer ${TEST_SECRET}`,
+      });
+      assert.equal(denied.status, 200);
+      assert.equal(denied.headers.get('access-control-allow-origin'), null);
     } finally {
       await app.close();
     }

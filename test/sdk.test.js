@@ -271,6 +271,19 @@ describe('SEP-0007 pay URI conformance matrix (#424)', () => {
     });
   }
 
+  test('a reordered but valid URI parses and rebuilds in canonical order', () => {
+    // parsePayUri is order-independent; buildPayUri always emits PARAMS order.
+    // Round-tripping is byte-for-byte only for canonically ordered input — a
+    // swapped pair is accepted and normalised, not preserved.
+    const reordered = `web+stellar:pay?amount=10&destination=${DEST}`;
+    const canonical = `web+stellar:pay?destination=${DEST}&amount=10`;
+
+    const parsed = parsePayUri(reordered);
+    assert.deepEqual(parsed, { destination: DEST, amount: '10' });
+    assert.equal(buildPayUri(parsed), canonical);
+    assert.notEqual(buildPayUri(parsed), reordered);
+  });
+
   test('minimal and optional-field forms', () => {
     assert.deepEqual(parsePayUri(base), { destination: DEST });
     assert.equal(parsePayUri(`${base}&amount=0`).amount, '0');

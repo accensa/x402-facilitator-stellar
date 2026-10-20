@@ -104,12 +104,21 @@ export function startOutboxWorker({ intervalMs = 5_000, ...pollOptions }) {
   let running = false;
   let stopped = false;
 
+  /**
+   * Runs one cycle. Resolves with the cycle's `{ claimed, published, failed }`
+   * counts so a caller or test can tell an empty cycle from one whose publishes
+   * all failed. A poll that throws resolves with an empty cycle (zero counts)
+   * and is logged, so the interval loop keeps running.
+   *
+   * @returns {Promise<{claimed: number, published: number, failed: number}>}
+   */
   const tick = async () => {
-    if (stopped) return;
+    if (stopped) return { claimed: 0, published: 0, failed: 0 };
     try {
-      await pollOutboxOnce(pollOptions);
+      return await pollOutboxOnce(pollOptions);
     } catch (err) {
       pollOptions.log?.(`[Outbox] loop error: ${err.message}`);
+      return { claimed: 0, published: 0, failed: 0 };
     }
   };
 
@@ -128,7 +137,10 @@ export function startOutboxWorker({ intervalMs = 5_000, ...pollOptions }) {
       if (timer) globalThis.clearInterval(timer);
       timer = null;
     },
-    /** Runs one cycle immediately — also what tests drive. */
+    /**
+     * Runs one cycle immediately — also what tests drive. Resolves with the
+     * cycle's counts; see the tick JSDoc above.
+     */
     tick,
   };
 }

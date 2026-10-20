@@ -69,6 +69,64 @@ export function renderFullMetrics(metricsRegistry) {
 }
 
 /**
+ * Creates a database health check function.
+ * @param {string} databaseUrl - postgres connection string
+ * @returns {Function} async () => { ok: boolean, error?: string }
+ */
+export function createDbHealthCheck(databaseUrl) {
+  return async () => {
+    try {
+      const { default: pg } = await import('pg');
+      const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+      await pool.query('SELECT 1');
+      await pool.end();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+}
+
+/**
+ * Creates a Redis health check function.
+ * @param {string} redisUrl - Redis connection URL
+ * @returns {Function} async () => { ok: boolean, error?: string }
+ */
+export function createRedisHealthCheck(redisUrl) {
+  return async () => {
+    try {
+      const { default: createClient } = await import('redis');
+      const client = createClient({ url: redisUrl });
+      await client.connect();
+      await client.ping();
+      await client.disconnect();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+}
+
+/**
+ * Creates a rate limiter backend health check function.
+ * @param {string} databaseUrl - postgres connection string for the rate limiter store
+ * @returns {Function} async () => { ok: boolean, error?: string }
+ */
+export function createRateLimiterHealthCheck(databaseUrl) {
+  return async () => {
+    try {
+      const { default: pg } = await import('pg');
+      const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+      await pool.query('SELECT 1');
+      await pool.end();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+}
+
+/**
  * Builds the Fastify app.
  *
  * Takes its collaborators rather than reaching for module state, which is what
@@ -79,7 +137,7 @@ export function renderFullMetrics(metricsRegistry) {
  * @param {object} config - resolved config from resolveConfig()
  * @param {{verify: Function, settle: Function, getSupported: Function}} facilitator
  * @param {object} rateLimiter - RateLimiter, or a stub with the same surface
- * @param {{upsertResource: Function, listResources: Function, search?: Function, getResource?: Function, getVersion?: Function, getLastModified?: Function}} catalog
+ * @param {{keyFor: Function, listResources: Function, search?: Function, getResource?: Function, getVersion?: Function, getLastModified?: Function}} catalog
  * @param {{keyFor: Function, begin: Function, complete: Function}} [idempotency]
  * @param {object} [extras] - optional collaborators
  * @returns {Promise<import('fastify').FastifyInstance>}
@@ -98,6 +156,7 @@ export async function createApp(
     dlq = null,
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
+    assetCaches = extras.assetCaches ?? {},
   } = extras;
 
   // Observability collaborators.
@@ -189,7 +248,11 @@ export async function createApp(
     done?.();
   });
 
-  const audit = extras.audit ?? createAuditLogger();
+  const audit = extras.audit ?? createAuditLogger({ file: config.auditLogFile });
+  // The limiter audits trusted-CIDR bypasses (#410). Stubs used by tests have
+  // no setAudit, so this stays optional.
+  rateLimiter?.setAudit?.(audit);
+  if (typeof app.decorate === 'function') app.decorate('auditLogger', audit);
 
   const readiness =
     extras.readiness ??
@@ -197,6 +260,17 @@ export async function createApp(
       ? createReadinessChecker(config, {
           breakerStates: extras.breakerStates ?? (() => null),
           catalog,
+          db:
+            extras.dbHealthCheck ??
+            (config.databaseUrl ? createDbHealthCheck(config.databaseUrl) : null),
+          redis:
+            extras.redisHealthCheck ??
+            (config.redisUrl ? createRedisHealthCheck(config.redisUrl) : null),
+          rateLimiterBackend:
+            extras.rateLimiterHealthCheck ??
+            (config.databaseUrl && config.rateLimitStore === 'postgres'
+              ? createRateLimiterHealthCheck(config.databaseUrl)
+              : null),
         })
       : null);
 
@@ -257,7 +331,25 @@ export async function createApp(
    */
   async function processCataloging(req, body, reply, source = 'verify') {
     try {
-      const validation = validateForCatalog(body.paymentPayload, body.paymentRequirements);
+      const network = body.paymentRequirements?.network ?? config.networks[0];
+      const assetCache = assetCaches[network];
+      let assetDecimalsMap = null;
+      if (assetCache) {
+        // Build a synchronous map of known asset decimals for validation
+        assetDecimalsMap = {};
+        for (const [asset, cached] of assetCache.cache) {
+          if (cached.expiresAt > Date.now()) {
+            assetDecimalsMap[asset] = cached.decimals;
+          }
+        }
+        // Ensure native XLM is always present
+        assetDecimalsMap.native = 7;
+      }
+      const validation = validateForCatalog(
+        body.paymentPayload,
+        body.paymentRequirements,
+        assetDecimalsMap,
+      );
       const outcome = {};
 
       if (validation.hardDrop) {
@@ -384,10 +476,16 @@ export async function createApp(
 
   app.get('/supported', { onRequest: cors('public') }, async () => facilitator.getSupported());
 
-  app.get('/usage', { preHandler: requireApiKeyStrict }, async req => {
-    annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/usage' });
-    return rateLimiter.getUsage(req.keyId);
-  });
+  app.get(
+    '/usage',
+    // Authenticated class, as src/cors.js and docs/AUTHENTICATION.md both
+    // classify it: a key-carrying route never defaults open.
+    { onRequest: cors('authenticated'), preHandler: requireApiKeyStrict },
+    async req => {
+      annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/usage' });
+      return rateLimiter.getUsage(req.keyId);
+    },
+  );
 
   if (serveMetrics) {
     app.get('/metrics', async (_req, reply) => {
@@ -534,47 +632,23 @@ export async function createApp(
           return rejectRateLimited(req, reply, '/settle', checkSettle, audit);
 
         const idempotencyKey = settlementStore.deriveIdempotencyKey(req);
-        const existingRecord = await settlementStore.get(idempotencyKey);
+        // Tenant-safe store key: keyed callers scope the idempotency namespace
+        // by their API key so one caller cannot read another caller's settled
+        // response. Open-mode callers (req.keyId === undefined) keep the
+        // byte-identical derivation so single-process dedup is unchanged.
+        const storeKey = req.keyId ? `${req.keyId}:${idempotencyKey}` : idempotencyKey;
+        const existingRecord = await settlementStore.get(storeKey);
 
         if (existingRecord) {
-          if (existingRecord.state === 'settled') {
-            const limited = handleRateLimit(reply, checkSettle);
-            if (limited) return limited;
-            if (existingRecord.response) {
-              const respPayload =
-                typeof existingRecord.response === 'string'
-                  ? JSON.parse(existingRecord.response)
-                  : existingRecord.response;
-              return reply.send(respPayload);
-            }
-            return reply.send({
-              success: true,
-              transaction: existingRecord.tx_hash,
-              network: existingRecord.network,
-              payer: existingRecord.payer,
-            });
-          }
-          if (existingRecord.state === 'submitted' || existingRecord.state === 'unknown') {
-            const limited = handleRateLimit(reply, checkSettle);
-            if (limited) return limited;
-            return reply.send({
-              success: false,
-              errorReason: 'submitted_outcome_unknown',
-              errorMessage:
-                existingRecord.error_message || 'settlement in progress or outcome unknown',
-              transaction: existingRecord.tx_hash || '',
-              network: existingRecord.network,
-            });
-          }
-          if (existingRecord.state === 'failed') {
-            const RETRYABLE = new Set([
-              'rate_limited',
-              'catalog_rate_limited',
-              'soroban_rpc_unreachable',
-              'lock_timeout',
-              'request_timeout',
-            ]);
-            if (!RETRYABLE.has(existingRecord.error_reason)) {
+          // A record whose key_id is set and differs from this caller must not
+          // be replayed, mirroring the status-read scoping at
+          // GET /settlements/:idempotencyKey (src/app.js:845-847).
+          const ownedByThisCaller =
+            !existingRecord.key_id ||
+            !req.keyId ||
+            existingRecord.key_id.toUpperCase() === req.keyId.toUpperCase();
+          if (ownedByThisCaller) {
+            if (existingRecord.state === 'settled') {
               const limited = handleRateLimit(reply, checkSettle);
               if (limited) return limited;
               if (existingRecord.response) {
@@ -585,18 +659,56 @@ export async function createApp(
                 return reply.send(respPayload);
               }
               return reply.send({
+                success: true,
+                transaction: existingRecord.tx_hash,
+                network: existingRecord.network,
+                payer: existingRecord.payer,
+              });
+            }
+            if (existingRecord.state === 'submitted' || existingRecord.state === 'unknown') {
+              const limited = handleRateLimit(reply, checkSettle);
+              if (limited) return limited;
+              return reply.send({
                 success: false,
-                errorReason: existingRecord.error_reason,
-                errorMessage: existingRecord.error_message,
+                errorReason: 'submitted_outcome_unknown',
+                errorMessage:
+                  existingRecord.error_message || 'settlement in progress or outcome unknown',
                 transaction: existingRecord.tx_hash || '',
                 network: existingRecord.network,
               });
+            }
+            if (existingRecord.state === 'failed') {
+              const RETRYABLE = new Set([
+                'rate_limited',
+                'catalog_rate_limited',
+                'soroban_rpc_unreachable',
+                'lock_timeout',
+                'request_timeout',
+              ]);
+              if (!RETRYABLE.has(existingRecord.error_reason)) {
+                const limited = handleRateLimit(reply, checkSettle);
+                if (limited) return limited;
+                if (existingRecord.response) {
+                  const respPayload =
+                    typeof existingRecord.response === 'string'
+                      ? JSON.parse(existingRecord.response)
+                      : existingRecord.response;
+                  return reply.send(respPayload);
+                }
+                return reply.send({
+                  success: false,
+                  errorReason: existingRecord.error_reason,
+                  errorMessage: existingRecord.error_message,
+                  transaction: existingRecord.tx_hash || '',
+                  network: existingRecord.network,
+                });
+              }
             }
           }
         }
 
         await settlementStore.save({
-          idempotency_key: idempotencyKey,
+          idempotency_key: storeKey,
           network: body.paymentRequirements.network,
           scheme: body.paymentRequirements.scheme,
           payer: body.paymentPayload?.payer ?? null,
@@ -610,12 +722,24 @@ export async function createApp(
         const idemReq = {
           get: name => req.headers[name.toLowerCase()],
           body: req.body,
+          keyId: req.keyId ?? null,
         };
         const replay = idempotency ? await idempotency.begin(idempotency.keyFor(idemReq)) : null;
         if (replay?.replayed) {
           const limited = handleRateLimit(reply, checkSettle);
           if (limited) return limited;
+          reply.header('Idempotency-Replay', 'true');
           return reply.code(replay.statusCode).send(replay.response);
+        }
+        if (replay?.conflict) {
+          const limited = handleRateLimit(reply, checkSettle);
+          if (limited) return limited;
+          reply.header('Idempotency-Replay', 'false');
+          return reply.code(409).send({
+            success: false,
+            errorReason: 'idempotency_conflict',
+            errorMessage: 'a request with this Idempotency-Key is already in flight',
+          });
         }
 
         const lockKey = distributedLock ? lockKeyFor(body.paymentPayload) : null;
@@ -663,7 +787,7 @@ export async function createApp(
                   : null;
 
                 const enqueued = await settlementStore.settleAndEnqueue(
-                  idempotencyKey,
+                  storeKey,
                   { tx_hash: result.transaction, response: result },
                   event,
                 );
@@ -713,7 +837,7 @@ export async function createApp(
                 return result;
               }
 
-              await settlementStore.updateState(idempotencyKey, 'failed', {
+              await settlementStore.updateState(storeKey, 'failed', {
                 tx_hash: result.transaction || null,
                 error_reason: result.errorReason || 'facilitator_error',
                 error_message: result.errorMessage || null,
@@ -804,8 +928,20 @@ export async function createApp(
           ) {
             transaction = body.paymentPayload.transaction;
           }
+          // Release our claim only when we know no transaction was submitted:
+          // a retry must be able to try again after a pre-submission failure,
+          // while an outcome-unknown claim stays held until completion.
+          if (
+            replay &&
+            !replay.replayed &&
+            !replay.conflict &&
+            errorReason !== 'submitted_outcome_unknown'
+          ) {
+            await Promise.resolve(idempotency?.fail?.(replay.key)).catch(() => {});
+          }
+
           const targetState = errorReason === 'submitted_outcome_unknown' ? 'unknown' : 'failed';
-          await settlementStore.updateState(idempotencyKey, targetState, {
+          await settlementStore.updateState(storeKey, targetState, {
             tx_hash: transaction,
             error_reason: errorReason,
             error_message: describeThrown(err),
@@ -834,10 +970,13 @@ export async function createApp(
     },
     async (req, reply) => {
       const { idempotencyKey } = req.params;
+      // Tenant-safe lookup key mirrors the write-side derivation so a caller
+      // reads only their own records under the same key they settled with.
+      const lookupKey = req.keyId ? `${req.keyId}:${idempotencyKey}` : idempotencyKey;
       const record =
         typeof settlementStore.getConsistent === 'function'
-          ? await settlementStore.getConsistent(idempotencyKey)
-          : await settlementStore.get(idempotencyKey);
+          ? await settlementStore.getConsistent(lookupKey)
+          : await settlementStore.get(lookupKey);
       if (!record) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
@@ -858,7 +997,9 @@ export async function createApp(
     },
     async (req, reply) => {
       const { idempotencyKey } = req.params;
-      const record = await settlementStore.get(idempotencyKey);
+      // Tenant-safe lookup key mirrors the write-side derivation.
+      const lookupKey = req.keyId ? `${req.keyId}:${idempotencyKey}` : idempotencyKey;
+      const record = await settlementStore.get(lookupKey);
       if (!record) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
@@ -867,7 +1008,7 @@ export async function createApp(
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
 
-      const events = await settlementStore.getEventLog(idempotencyKey);
+      const events = await settlementStore.getEventLog(lookupKey);
       return reply.send({ ok: true, idempotencyKey, events });
     },
   );
@@ -1188,6 +1329,27 @@ export async function createApp(
   );
   app.options('/verify', { onRequest: cors('authenticated') }, preflight('authenticated'));
   app.options('/settle', { onRequest: cors('authenticated') }, preflight('authenticated'));
+  // The authenticated GET routes: every call carries Authorization, so a
+  // browser preflights each of them — and without these routes the preflight
+  // fell through to the 404 handler, handing the caller `route_not_found`
+  // instead of a CORS verdict. The verb list is explicit because the class
+  // default (`POST, OPTIONS`) would advertise a method these routes do not
+  // serve.
+  app.options(
+    '/usage',
+    { onRequest: cors('authenticated') },
+    preflight('authenticated', 'GET, OPTIONS'),
+  );
+  app.options(
+    '/settlements/:idempotencyKey',
+    { onRequest: cors('authenticated') },
+    preflight('authenticated', 'GET, OPTIONS'),
+  );
+  app.options(
+    '/settlements/:idempotencyKey/events',
+    { onRequest: cors('authenticated') },
+    preflight('authenticated', 'GET, OPTIONS'),
+  );
 
   // ---------------------------------------------------------------------------
   // 404 and Error Handlers

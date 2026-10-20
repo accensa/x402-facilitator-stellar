@@ -2,6 +2,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { toStroops, createStellarDiscoveryResource } from '../src/sdk/index.js';
 import { STELLAR_DECIMALS } from '../src/sdk/validation.js';
+import { validateForCatalog } from '../src/catalog/validation.js';
+import { createAssetDecimalsCache } from '../src/asset-cache.js';
 
 /**
  * SEP-41 token amount handling (#152).
@@ -76,5 +78,103 @@ describe('SEP-41 7-decimal amount handling (#152)', () => {
       },
     });
     assert.equal(resource.pricing.amount, '27500000');
+  });
+});
+
+/**
+ * Catalog-level sub-precision rejection (#415).
+ *
+ * The BigInt stroop maths above is shared and stays untouched: truncation
+ * there is another issue's pinned behaviour. The catalog instead refuses to
+ * list a price it cannot represent — a sub-stroop fraction is a hard drop,
+ * never a silent truncation.
+ */
+describe('SEP-41 catalog sub-precision rejection (#415)', () => {
+  function catalogResult(amount, asset, assetDecimalsMap = null) {
+    const paymentPayload = {
+      x402Version: 2,
+      resource: { url: 'http://example.com' },
+      extensions: {
+        bazaar: {
+          info: { input: { type: 'http', method: 'GET' }, scheme: 'exact' },
+          schema: { type: 'object' },
+          routeTemplate: '/a',
+          pricing: { amount, asset },
+        },
+      },
+    };
+    const paymentRequirements = { network: 'stellar:testnet', payTo: 'G123', asset };
+    return validateForCatalog(paymentPayload, paymentRequirements, assetDecimalsMap);
+  }
+
+  test('rejects a fractional amount for a 0-decimal asset', () => {
+    const res = catalogResult('1.5', 'ZERO', { ZERO: 0 });
+    assert.equal(res.hardDrop, true);
+    assert.equal(res.reason, 'invalid_pricing_amount');
+  });
+
+  test('accepts an integer amount for a 0-decimal asset', () => {
+    const res = catalogResult('100', 'ZERO', { ZERO: 0 });
+    assert.equal(res.hardDrop, false);
+  });
+
+  test('rejects an 8-decimal amount for 7-decimal native XLM', () => {
+    const res = catalogResult('1.00000001', 'native');
+    assert.equal(res.hardDrop, true);
+    assert.equal(res.reason, 'invalid_pricing_amount');
+  });
+
+  test('accepts a 7-decimal amount for 7-decimal native XLM', () => {
+    const res = catalogResult('1.0000000', 'native');
+    assert.equal(res.hardDrop, false);
+  });
+
+  test('rejects a 19-decimal amount for an 18-decimal asset', () => {
+    const res = catalogResult('1.0000000000000000001', 'WRAPPED', { WRAPPED: 18 });
+    assert.equal(res.hardDrop, true);
+    assert.equal(res.reason, 'invalid_pricing_amount');
+  });
+
+  test('accepts an 18-decimal amount for an 18-decimal asset', () => {
+    const res = catalogResult('1.000000000000000000', 'WRAPPED', { WRAPPED: 18 });
+    assert.equal(res.hardDrop, false);
+  });
+});
+
+describe('Asset decimals cache (#415)', () => {
+  test('cache returns preloaded native XLM decimals', async () => {
+    const cache = createAssetDecimalsCache({
+      preloaded: new Map([
+        ['native', 7],
+        ['XLM', 7],
+      ]),
+    });
+    assert.equal(await cache.getDecimals('native'), 7);
+    assert.equal(await cache.getDecimals('XLM'), 7);
+    assert.equal(await cache.getDecimals('xlm'), 7);
+  });
+
+  test('cache rejects unknown asset contract IDs', async () => {
+    const cache = createAssetDecimalsCache({ rpcCall: null });
+    await assert.rejects(cache.getDecimals('INVALID'), /Invalid asset contract ID/);
+  });
+
+  test('cache clears pending state after a failed fetch', async () => {
+    const cache = createAssetDecimalsCache({
+      rpcCall: null,
+      preloaded: new Map(),
+    });
+    const contractId = 'C' + 'A'.repeat(55);
+    assert.equal(cache.cache.has(contractId), false);
+    await assert.rejects(cache.getDecimals(contractId));
+    assert.equal(cache.cache.has(contractId), false);
+  });
+
+  test('cache clear restores preloaded entries', async () => {
+    const cache = createAssetDecimalsCache({
+      preloaded: new Map([['native', 7]]),
+    });
+    cache.clear();
+    assert.equal(await cache.getDecimals('native'), 7);
   });
 });
