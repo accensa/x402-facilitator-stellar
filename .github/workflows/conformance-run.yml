@@ -194,6 +194,23 @@ jobs:
             --min -v 2>&1 \
             | tee ../../conformance-output.txt
 
+      # The smart-account run (docs/CONFORMANCE.md § “__check_auth smart-account
+      # payers settle end to end”) proving the second payer credential shape: a
+      # custom Soroban account contract implementing __check_auth. It is
+      # self-contained — it funds fresh testnet accounts through friendbot and
+      # spawns its own facilitator on a random port unless FACILITATOR_URL says
+      # otherwise — so it costs nothing but the fixture's deploy ledger and does
+      # not share state with the upstream suite above. Same reporting bar as the
+      # upstream run: captured output, job-summary result, and failure fails the
+      # job after the artifact is published.
+      - name: Run the smart-account e2e run
+        id: smart_account
+        working-directory: facilitator
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run e2e:smart-account 2>&1 | tee ../../smart-account-output.txt
+
       - name: Summarise
         if: always()
         run: |
@@ -232,6 +249,21 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Summarise the smart-account run
+        if: always()
+        run: |
+          {
+            echo "## Smart-account e2e run"
+            echo
+            echo "- command: \`npm run e2e:smart-account\` (see docs/CONFORMANCE.md)"
+            echo "- facilitator: \`${{ github.sha }}\`"
+            echo "- result: **${{ steps.smart_account.outcome }}**"
+            echo
+            echo '```'
+            tail -40 smart-account-output.txt 2>/dev/null || echo "(no output captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish the full output
         if: always()
         uses: actions/upload-artifact@v4
@@ -243,6 +275,7 @@ jobs:
             conformance-output.txt
             setup-output.txt
             component-selection.txt
+            smart-account-output.txt
           if-no-files-found: warn
           retention-days: 90
 
@@ -254,4 +287,10 @@ jobs:
         if: steps.run.outcome == 'failure'
         run: |
           echo "::error::The upstream e2e suite did not pass. See the conformance-output artifact."
+          exit 1
+
+      - name: Fail if the smart-account run failed
+        if: steps.smart_account.outcome == 'failure'
+        run: |
+          echo "::error::The smart-account e2e run did not pass. See docs/CONFORMANCE.md and the conformance-output artifact."
           exit 1

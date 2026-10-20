@@ -42,6 +42,29 @@ function threshold(level) {
   return LEVELS[level] ?? LEVELS.info;
 }
 
+/**
+ * Extracts the W3C trace context (#411). `traceparent` is authoritative when
+ * present and well formed; explicit x-trace-id/x-span-id are accepted for
+ * callers that do not emit W3C headers. Missing context is null rather than a
+ * fabricated id, so a log query cannot join unrelated requests.
+ */
+function traceContext(req) {
+  const headers = req?.headers ?? {};
+  const traceparent = headers.traceparent;
+  if (typeof traceparent === 'string') {
+    const match = /^[0-9a-f]{2}-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i.exec(
+      traceparent.trim(),
+    );
+    if (match) return { trace_id: match[1].toLowerCase(), span_id: match[2].toLowerCase() };
+  }
+  const traceId = headers['x-trace-id'];
+  const spanId = headers['x-span-id'];
+  return {
+    trace_id: typeof traceId === 'string' && traceId ? traceId : null,
+    span_id: typeof spanId === 'string' && spanId ? spanId : null,
+  };
+}
+
 function routeOf(req) {
   // Fastify decorates the matched route before any handler runs.
   if (req.routeOptions?.url) return req.routeOptions.url;
@@ -68,6 +91,7 @@ export function createRequestLog({ level = 'info', sink = msg => console.log(msg
     return {
       requestId,
       startedAt: Date.now(),
+      ...traceContext(req),
       route: routeOf(req),
       network: undefined,
       scheme: undefined,
@@ -97,6 +121,8 @@ export function createRequestLog({ level = 'info', sink = msg => console.log(msg
       ts: new Date().toISOString(),
       level: lineLevel,
       event: 'request',
+      trace_id: span.trace_id ?? null,
+      span_id: span.span_id ?? null,
       requestId: span.requestId,
       route: span.route,
       network: span.network ?? null,

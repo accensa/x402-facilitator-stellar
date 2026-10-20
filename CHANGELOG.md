@@ -97,6 +97,17 @@ pinned.
 
 ### Changed
 
+- The container runs with production semantics (#495): the image sets
+  `NODE_ENV=production` and the facilitator service in `docker-compose.yml`
+  pins it, so the production-only HSTS header is sent and a stray `.env` in the
+  build context is no longer loaded at runtime. The image's `CMD` is now
+  `node src/server.js` instead of `npm start`, so SIGTERM/SIGINT reach the
+  server's graceful-shutdown handlers.
+- **Behaviour change:** the dedicated metrics listener binds to `METRICS_HOST`
+  (default `127.0.0.1` loopback) instead of `0.0.0.0` (#491). An operator that
+  relied on scraping `METRICS_PORT` from another host must now set
+  `METRICS_HOST=0.0.0.0` explicitly (behind a firewall or on an internal
+  interface). Unset `METRICS_PORT` behaviour is unchanged.
 - **Breaking:** API key secrets must be at least 32 characters, enforced at boot
   (#207). The stored digest is a single unsalted SHA-256 — not a work factor — so
   the secret's own entropy is the whole of the key's strength, and a short one is
@@ -111,6 +122,35 @@ pinned.
 
 ### Fixed
 
+- `npm run env:check` now fails on the other direction of drift: a variable
+  documented in `.env.example` that no code in `src/` reads. Reads that are
+  computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
+  names that are compose-only are excused by a per-name allowlist in
+  `scripts/check-env-doc.mjs`, each citing the line that reads it — and an
+  allowlist entry fails the build once the code it excuses is gone, so the
+  list cannot quietly become the blind spot it was written to close (#504).
+- Signer secrets are validated with a checksum-aware StrKey decode (#498) in
+  `resolveConfig` and `KeyManager`, so a truncated, wrongly-prefixed or
+  bad-checksum secret is refused at boot — or when a remote key source is read —
+  instead of failing later inside the signer factory. Error messages keep their
+  existing wording and never echo the secret.
+- The MCP CLI fails closed on a malformed `MAX_FEE_PER_CALL_STROOPS` or
+  `MAX_SESSION_SPEND_STROOPS`: the error names the variable and the expected
+  unit and the process exits non-zero, instead of a bare `SyntaxError` escaping
+  while the module loads (#497).
+- README merge-conflict residue removed and the docs-links gate widened to the
+  repository root with a conflict-marker scan, so root README damage fails CI
+  (#490).
+- The dedicated `METRICS_PORT` listener now serves the full exposition
+  (registry plus signer-selection series) through the same `renderFullMetrics`
+  function as the app `GET /metrics` route, so signer alert series exist on
+  the scraped endpoint (#492).
+- Bounded outbound deadlines under the house `AbortSignal.timeout` convention:
+  the remote key-source fetch (`KEY_MANAGER_FETCH_TIMEOUT_MS`, default 5s,
+  with a `keys`-field shape check), the reconciliation RPC
+  (`RECONCILIATION_RPC_TIMEOUT_MS`, default 5s) and the three MCP CLI fetches
+  (`MCP_FETCH_TIMEOUT_MS`, default 10s, with a deadline message); MCP
+  spend-cap parsing names the field that failed (#493).
 - A failed re-embed no longer leaves the previous vector attached to a listing
   whose content has changed (#220). An upsert builds the new entry on top of the
   existing one, so it inherited the old vector; when the text changed, the dense

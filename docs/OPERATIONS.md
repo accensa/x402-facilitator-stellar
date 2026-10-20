@@ -144,7 +144,7 @@ A resource server debugging a failed payment hands us a single `X-Request-Id` ra
 
 ### Metrics (`GET /metrics`)
 
-Prometheus text format, unauthenticated. By default it is served on `PORT`; set `METRICS_PORT` to bind it to a separate listener (typically an internal interface) so it is not on the public surface. Series:
+Prometheus text format, unauthenticated. By default it is served on `PORT`; set `METRICS_PORT` to bind it to a separate listener so it is not on the public surface. The dedicated listener binds to `METRICS_HOST` (default `127.0.0.1` loopback) — it is reachable only from the local host unless you opt into a wider bind such as `0.0.0.0` behind a firewall or on an internal interface. Both the app `GET /metrics` route and the dedicated listener serve the identical exposition (registry plus signer-selection series). Series:
 
 `active_verifications` is a process-wide gauge of calls currently waiting on the upstream Stellar verification operation. It is the custom metric used by the Kubernetes HPA. Apply `deploy/kubernetes/active-verifications-hpa.yaml` and install Prometheus Adapter with `deploy/kubernetes/prometheus-adapter-values.yaml` to expose it through the Kubernetes custom metrics API.
 
@@ -156,6 +156,7 @@ Prometheus text format, unauthenticated. By default it is served on `PORT`; set 
 | `x402_settlement_fee_stroops` | histogram | `network` | **actual fee paid** — the number that shows whether `MAX_TX_FEE_STROOPS` is sane | alert if p95 fee approaches `MAX_TX_FEE_STROOPS` (fee ceiling about to throttle settlements) |
 | `x402_rpc_retries_total` | counter | `code`, `host` | Soroban RPC connection-level retries | alert if rate > 0 for a host over several minutes (RPC degradation / IPv6 dead-ends) |
 | `x402_signer_inflight` | gauge | `network`, `signer` | in-flight settlements per signer — **the sequence-contention signal (#9)** | alert when it sits at or above the modelled knee (§ [Where a single signer stops keeping up](#where-a-single-signer-stops-keeping-up-203)) for a sustained window, not on any non-zero reading — see that section for why `≥ 1` fires on healthy traffic |
+| `x402_signer_selected_total` | counter | `network`, `signer` | total signer selections — the stuck-signer signal alongside `x402_signer_inflight` above; served on both the app and the dedicated metrics listener | alert when a signer's counter stops incrementing while peers advance (desynced sequence), or when `x402_signer_inflight` for that signer stays non-zero past max settlement latency |
 | `active_verifications` | gauge | none | process-wide number of verification calls waiting on Stellar Horizon | HPA target is 5 average active verifications per pod |
 | `x402_catalog_cache_lookups_total` | counter | `tier` (`l1`/`l2`), `outcome` (`hit`/`miss`/`error`) | catalog search cache effectiveness (#392) — the Postgres CPU signal | `l1` hit ratio persistently low with `CATALOG_SEARCH_CACHE=1` means the LRU is too small or queries are too varied; any `outcome="error"` means Redis is timing out (the cache is bypassed, not wrong) |
 

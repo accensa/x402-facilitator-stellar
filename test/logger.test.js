@@ -67,6 +67,8 @@ test('finish emits exactly one line with the whitelisted fields and nothing else
     'requestId',
     'route',
     'scheme',
+    'span_id',
+    'trace_id',
     'ts',
     'txHash',
   ]);
@@ -101,18 +103,52 @@ test('level filter drops lines below LOG_LEVEL', () => {
   assert.equal(lines.length, 1);
 });
 
-test('a secret-shaped field added later is still redacted by defence-in-depth', () => {
+test('W3C traceparent populates trace_id and span_id', () => {
+  const logger = createRequestLog({ sink: () => {} });
+  const span = logger.begin({
+    headers: {
+      traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+    },
+  });
+  assert.equal(span.trace_id, '4bf92f3577b34da6a3ce929d0e0e4736');
+  assert.equal(span.span_id, '00f067aa0ba902b7');
+});
+
+test('missing trace context is null, not fabricated', () => {
   const lines = [];
   const logger = createRequestLog({ sink: msg => lines.push(msg) });
   const span = logger.begin({ headers: {}, routeOptions: { url: '/verify' } });
-  // Deliberately abuse the whitelist with a secret-looking value on a real field
-  // to prove redact() still scrubs secret-* key names if one is ever added.
+  logger.finish(span, { outcome: 'ok', reason: 'none' });
+  const logged = JSON.parse(lines[0]);
+  assert.equal(logged.trace_id, null);
+  assert.equal(logged.span_id, null);
+});
+
+test('value scanning redacts Stellar seeds, bearer tokens, passwords and card numbers', () => {
+  const seed = `S${'A'.repeat(55)}`;
+  const card = '4111 1111 1111 1111'; // valid Luhn
+  const redacted = redact({
+    note: `paid with ${card}`,
+    transaction: seed,
+    detail: 'Authorization: Bearer abc.def.ghi',
+    message: 'password=hunter2',
+    amount: '1234567890123', // not a valid PAN, must survive
+  });
+
+  assert.equal(redacted.transaction, '[REDACTED]');
+  assert.equal(redacted.detail.includes('abc.def.ghi'), false);
+  assert.equal(redacted.detail.includes('[REDACTED]'), true);
+  assert.equal(redacted.message.includes('hunter2'), false);
+  assert.equal(redacted.message.includes('[REDACTED]'), true);
+  assert.equal(redacted.note.includes('4111'), false);
+  assert.equal(redacted.amount, '1234567890123');
+});
+
+test('a secret-shaped value in a logged field is redacted at the sink', () => {
+  const lines = [];
+  const logger = createRequestLog({ sink: msg => lines.push(msg) });
+  const span = logger.begin({ headers: {}, routeOptions: { url: '/verify' } });
   span.txHash = 'SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   logger.finish(span, { outcome: 'ok', reason: 'none' });
-  // txHash is not a secret-shaped key, so it is preserved — the guarantee is the
-  // whitelist, not value scanning. Assert the line parses and carries txHash.
-  assert.equal(
-    JSON.parse(lines[0]).txHash,
-    'SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-  );
+  assert.equal(JSON.parse(lines[0]).txHash, '[REDACTED]');
 });

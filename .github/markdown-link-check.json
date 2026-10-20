@@ -3,6 +3,10 @@
     {
       "comment": "mailto and tel links are not HTTP resources",
       "pattern": "^(mailto|tel):"
+    },
+    {
+      "comment": "Issue #490: the public status page 404s until GitHub Pages has a first deployment (no public endpoint exists yet); the README link is intentional, not dead",
+      "pattern": "^https://accensa\\.github\\.io/x402-facilitator-stellar/"
     }
   ],
   "timeout": "10s",

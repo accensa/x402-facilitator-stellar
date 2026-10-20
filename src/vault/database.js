@@ -48,24 +48,36 @@ function withTimeout(promise, ms, label) {
 export async function createVaultManagedDatabase({
   vault,
   databaseUrl,
-  nodeVault,
+  // Default to the declared runtime dependency so production never evaluates
+  // `nodeVault(...)` with undefined (a boot with VAULT_ADDR configured used to
+  // die with `nodeVault is not a function` before the degrade handler could
+  // run). Tests inject a fake instead; the require here is the same lazily
+  // resolved dependency path `pg` takes below (#561).
+  nodeVault = require('node-vault'),
   Pool,
   warn = msg => console.warn(msg),
   log = () => {},
   now = () => Date.now(),
   bootTimeoutMs = 10_000,
 }) {
-  const client = createVaultClient({ ...vault, nodeVault, now });
-  const creds = createDatabaseCredentialManager({
-    fetchCredentials: () =>
-      client.readDatabaseCredentials({ mount: vault.dbMount, role: vault.dbRole }),
-    pollIntervalMs: vault.pollIntervalMs,
-    warn,
-    now,
-  });
-
-  let pool = null;
+  let client = null;
+  let creds = null;
   try {
+    // The client construction and the credential manager sit inside the
+    // degrade `try`: a Vault wiring failure (unreachable address, a throwing
+    // factory, a bad option shape) must take the documented degrade path —
+    // the service starts without a database-backed pool — rather than abort
+    // boot from above the handler.
+    client = createVaultClient({ ...vault, nodeVault, now });
+    creds = createDatabaseCredentialManager({
+      fetchCredentials: () =>
+        client.readDatabaseCredentials({ mount: vault.dbMount, role: vault.dbRole }),
+      pollIntervalMs: vault.pollIntervalMs,
+      warn,
+      now,
+    });
+
+    let pool = null;
     const initial = await withTimeout(
       creds.getCredentials(),
       bootTimeoutMs,
@@ -100,7 +112,7 @@ export async function createVaultManagedDatabase({
       },
     };
   } catch (err) {
-    creds.stop();
+    creds?.stop();
     warn(
       `[Vault] ${err.message} — starting without a database-backed pool; stores will use their degrade paths`,
     );

@@ -4,15 +4,34 @@ const DEFAULT_TESTNET_RPC = 'https://soroban-testnet.stellar.org';
 
 /**
  * Default JSON-RPC call helper for reconciliation.
+ *
+ * Bounded by AbortSignal.timeout under the house convention (see
+ * facilitator.js, embeddings, readiness): a hung RPC errors into the sweep's
+ * existing per-record warning instead of stalling unknown-settlement
+ * resolution. Configurable via RECONCILIATION_RPC_TIMEOUT_MS (default 5s).
  */
-async function defaultRpcCall(rpcUrl, body) {
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+async function defaultRpcCall(rpcUrl, body, timeoutMs = reconciliationRpcTimeoutMs()) {
+  let res;
+  try {
+    res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new Error(`reconciliation rpc timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  }
   if (!res.ok) throw new Error(`rpc http ${res.status}`);
   return await res.json();
+}
+
+function reconciliationRpcTimeoutMs() {
+  const raw = Number(process.env.RECONCILIATION_RPC_TIMEOUT_MS ?? 5_000);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5_000;
 }
 
 /**
@@ -97,3 +116,5 @@ export function startReconciliationLoop(store, config, { intervalMs = 30_000, rp
     stop: () => globalThis.clearInterval(timer),
   };
 }
+
+export { defaultRpcCall };

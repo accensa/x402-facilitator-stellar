@@ -91,7 +91,7 @@ The complete env-var table and topology guidance are in
 
 ## 2. Every environment variable
 
-`docs/DEPLOYMENT.md` has the full table; `examples/.env.example` at the repo root is the
+`docs/DEPLOYMENT.md` has the full table; [.env.example](../.env.example) at the repo root is the
 checklist. The groups:
 
 | Group | Variables |

@@ -159,7 +159,7 @@ register them as applied before using node-pg-migrate:
 npm run db:seed-legacy
 ```
 
-This inserts records into `pgmigrations` for the three original SQL migrations
+This inserts records into `pgmigrations` for the six legacy SQL migrations
 so node-pg-migrate knows they are done and will not re-create them.
 
 For fresh databases, run `npm run db:migrate` — it applies all migrations from
@@ -167,11 +167,12 @@ scratch.
 
 ## Docker Compose Integration
 
-The facilitator container runs migrations automatically on startup:
+The facilitator container does not run migrations automatically. Operators must run
+`npm run db:migrate` (or override the entrypoint) before serving traffic.
 
 ```dockerfile
-# In your Dockerfile or entrypoint:
-CMD ["sh", "-c", "node scripts/db-migrate.js up && node src/server.js"]
+# In your Dockerfile or entrypoint — operator responsible for migrating first:
+CMD ["sh", "-c", "npm run db:migrate && node src/server.js"]
 ```
 
 Or run migrations as a separate init container:

@@ -41,10 +41,15 @@ export function registerDlqRoutes(
         return reply.code(400).send({ error: 'invalid_request', reason: 'invalid_status' });
       }
 
+      // Clamp here as well as in the store so the reported pagination
+      // describes the query that actually ran; the store's clamp stays the
+      // backstop for direct callers.
       let limit = parseInt(req.query.limit, 10);
       if (isNaN(limit)) limit = 50;
+      limit = Math.min(Math.max(1, limit), 200);
       let offset = parseInt(req.query.offset, 10);
       if (isNaN(offset)) offset = 0;
+      offset = Math.max(0, offset);
 
       const result = await dlq.list({ status: status ?? null, limit, offset });
       return reply.send({

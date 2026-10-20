@@ -15,7 +15,11 @@ import { resolveConfig, MIN_API_KEY_LENGTH } from '../src/config.js';
 import { verifyApiKey } from '../src/auth.js';
 import { serve, testConfig, TEST_SECRET } from './helpers/app.js';
 
-const BASE_ENV = { FACILITATOR_SECRET: 'S123', STELLAR_RPC_URL: 'https://rpc.test' };
+// A real ed25519 seed: resolveConfig validates signer secrets with a
+// checksum-aware StrKey decode (#498), so an "S"-prefixed placeholder would be
+// rejected before these tests could exercise the API-key rules.
+const SIGNER_SECRET = 'SAO2MAIQCR5T27QDICO3QJTD2YZ4PMEAVLCLQ6AANVGPCZ53TEACPDOQ';
+const BASE_ENV = { FACILITATOR_SECRET: SIGNER_SECRET, STELLAR_RPC_URL: 'https://rpc.test' };
 const resolveWith = overrides => resolveConfig({ ...BASE_ENV, ...overrides });
 
 const LONG = 'a'.repeat(MIN_API_KEY_LENGTH);

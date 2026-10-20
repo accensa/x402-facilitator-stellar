@@ -7,6 +7,10 @@ services:
       - '${PORT:-3402}:3402'
     environment:
       - FACILITATOR_SECRET=${FACILITATOR_SECRET}
+      # #495: the image already sets this; kept explicit so an operator who
+      # overrides the environment cannot silently drop back to development
+      # semantics (no HSTS, .env loaded from the image).
+      - NODE_ENV=production
       - DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-x402_facilitator}
       - REDIS_URL=redis://redis:6379
       # Redlock quorum (#116): three independent masters.

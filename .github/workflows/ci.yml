@@ -56,7 +56,10 @@ jobs:
       - name: Environment documentation
         # Issue #144: .env.example is the operator's setup reference; a variable
         # read in src/ that is not documented there is an invisible default, and
-        # for the spend-limit variables a money question.
+        # for the spend-limit variables a money question. The check runs both
+        # ways: a variable documented there that no code reads is a promise the
+        # service never keeps, and fails too — unless the allowlist in the
+        # script excuses it with a citation to the code that reads it.
         run: npm run env:check
 
       - name: Migration compatibility

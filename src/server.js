@@ -27,7 +27,7 @@ import { withSearchCache } from './catalog/cache.js';
 import { createWebhookDispatcher } from './webhooks/dispatcher.js';
 import { FailoverHealthChecker } from './failover-health.js';
 import { initTracing } from './tracing.js';
-import { createApp } from './app.js';
+import { createApp, renderFullMetrics } from './app.js';
 import { buildSettlementStore } from './store/index.js';
 import { startReconciliationLoop } from './store/reconciliation.js';
 import { startOutboxWorker } from './outbox/index.js';
@@ -354,8 +354,9 @@ function onListening() {
   });
 
   // Optional separate metrics listener. Off the public port by design: an
-  // operator binds METRICS_PORT to an internal interface and scrapes it from
-  // there, so the payment surface never serves /metrics. When unset, /metrics
+  // operator scrapes METRICS_PORT from an internal network, and the bind
+  // address is configurable via METRICS_HOST (default 127.0.0.1 loopback) so
+  // the payment surface never serves /metrics. When unset, /metrics
   // is served on the main listener instead (see createApp's serveMetrics).
   if (config.metricsPort != null) {
     const metricsServer = http.createServer((req, res) => {
@@ -363,14 +364,16 @@ function onListening() {
         res.writeHead(200, {
           'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
         });
-        res.end(metrics.render());
+        res.end(renderFullMetrics(metrics));
       } else {
         res.writeHead(404);
         res.end('not found');
       }
     });
-    metricsServer.listen(config.metricsPort, '0.0.0.0', () => {
-      console.log(`metrics listening on :${config.metricsPort} (METRICS_PORT)`);
+    metricsServer.listen(config.metricsPort, config.metricsHost ?? '127.0.0.1', () => {
+      console.log(
+        `metrics listening on ${config.metricsHost ?? '127.0.0.1'}:${config.metricsPort} (METRICS_PORT)`,
+      );
     });
     // #205: a metrics-listener bind failure must not be a silent death either.
     metricsServer.on('error', err => {
@@ -444,6 +447,9 @@ async function shutdown(signal) {
       await catalog.searchCache?.stop?.().catch(() => {});
 
       await rateLimiter?.close?.().catch(() => {});
+      // Flush the AUDIT_LOG_FILE sink (#587) so a record written immediately
+      // before a graceful stop is not lost in the stream buffer.
+      await app.auditLogger?.close?.();
 
       horizon.restore();
     } catch (err) {

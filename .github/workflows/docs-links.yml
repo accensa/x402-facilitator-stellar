@@ -2,20 +2,31 @@ name: docs-links
 
 # Issue #214: nothing verified the links in docs/, so a renamed page could
 # leave the rest of the tree pointing at nothing. This workflow checks every
-# .md file under docs/ with the community markdown-link-check action. 403 and
-# 429 are treated as alive because many documentation hosts (npm, opensource
-# license registries) answer automated checkers with a block rather than an
-# HTML page even though the URL is valid.
+# .md file under docs/ with the community markdown-link-check action, plus
+# the markdown at the repository root (README.md and the other root files)
+# with markdown-link-check directly. 403 and 429 are treated as alive because
+# many documentation hosts (npm, opensource license registries) answer
+# automated checkers with a block rather than an HTML page even though the
+# URL is valid.
+# Issue #490: the root README carried merge-conflict residue as prose while
+# this job only scanned docs/, so the damage passed CI green. The root-link
+# step below covers the root, and a conflict-marker scan fails the job
+# outright.
+# Scope note: only docs/ and the root *.md are checked. Subdirectory markdown
+# (monitoring/, examples/, eval/, test/fixtures/) is owned by other surfaces
+# and stays out of this job.
 
 on:
   push:
     branches: ['main']
-  # Path-filtered instead of unconditional: this checks links under docs/, so a
-  # code-only PR gained nothing from it. Doc PRs still get the check before
-  # merge; a stale link introduced elsewhere is caught on the merge to `main`.
+  # Path-filtered instead of unconditional: this checks links under docs/ and
+  # the root markdown, so a code-only PR gained nothing from it. Doc PRs still
+  # get the check before merge; a stale link introduced elsewhere is caught on
+  # the merge to `main`.
   pull_request:
     paths:
       - 'docs/**'
+      - '*.md'
       - '.github/markdown-link-check.json'
       - '.github/workflows/docs-links.yml'
 
@@ -29,13 +40,25 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Fail on merge-conflict markers in markdown
+        # Exact git markers only (a bare setext `===` underline in some other
+        # file must not trip this); node_modules/.git are never scanned.
+        run: |
+          if grep -rEn '^(<<<<<<< |>>>>>>> |=======$)' --include='*.md' --exclude-dir=node_modules --exclude-dir=.git .; then
+            echo 'Merge-conflict markers found in markdown; remove them before merge.'
+            exit 1
+          fi
       - uses: gaurav-nelson/github-action-markdown-link-check@v1
         with:
           use-quiet-mode: 'yes'
           use-verbose-mode: 'no'
-          checkout: 'yes'
           base-branch: 'main'
           config-file: '.github/markdown-link-check.json'
           folder-path: 'docs'
           file-extension: '.md'
           check-modified-files-only: 'no'
+      - name: Check root markdown links
+        run: |
+          for f in *.md; do
+            npx --yes markdown-link-check "$f" --config .github/markdown-link-check.json
+          done

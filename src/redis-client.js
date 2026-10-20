@@ -43,20 +43,6 @@
  *   tests. When given, no import happens and the client is never closed here.
  * @param {string|null} [options.redisUrl] - redis:// URL. Null means "no Redis
  *   configured", which is a supported deployment (single instance).
- * @param {(message: string) => void} [options.onEvent] - receives
- *   `{type: 'degraded'|'recovered'|'unavailable', message}`. The caller formats
- *   its own log line, so the prefix (`[RateLimit]`, `[CatalogCache]`) stays with
- *   the subsystem that knows the consequence.
- * @returns {RedisConnection}
- */
-/**
- * Creates a lazily-connected Redis handle.
- *
- * @param {object} options
- * @param {object} [options.client] - an ioredis-compatible client, injected in
- *   tests. When given, no import happens and the client is never closed here.
- * @param {string|null} [options.redisUrl] - redis:// URL. Null means "no Redis
- *   configured", which is a supported deployment (single instance).
  * @param {(event: {type: 'degraded'|'recovered'|'unavailable', message: string}) => void} [options.onEvent]
  *   receives readiness transitions; the caller formats its own log line.
  * @returns {RedisConnection}

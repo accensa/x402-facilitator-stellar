@@ -307,13 +307,13 @@ describe('CQRS read replica settlement store (#121)', () => {
 
     // Row exists on primary (written by another pod moments ago), lagging on
     // replica. A status read must still return it via the primary fallback.
-    primary.store.set('settlement-A', {
-      idempotency_key: 'settlement-A',
+    primary.store.set('CALLERA:settlement-A', {
+      idempotency_key: 'CALLERA:settlement-A',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
       state: 'settled',
       tx_hash: 'hashA',
-      key_id: 'callerA',
+      key_id: 'CALLERA',
       created_at: new Date(),
       updated_at: new Date(),
     });

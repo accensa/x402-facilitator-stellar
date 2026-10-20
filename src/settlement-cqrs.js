@@ -397,10 +397,24 @@ export class ProjectionWorker {
       await this.checkpoint.updateCheckpoint(lastSeq);
     }
 
-    // Record metrics
+    // Record metrics. The duration is already computed above from the
+    // batch's own start time, so the throughput gauge is derived from the
+    // same two inputs operators scrape beside it (events processed, batch
+    // duration). The rate is the most recent completed batch's observed
+    // rate — averaging the scrape across polls reconstructs the steady-state
+    // rate, which the gauge help text in src/metrics.js states.
     const duration = (Date.now() - startTime) / 1000;
+    const rawRate = processedCount / duration;
+    // Guard the divide: a sub-millisecond batch would produce Infinity, an
+    // empty batch would produce NaN. Clamping to 1 ms keeps both finite.
+    const durationS = Math.max(duration, 0.001);
     this.metrics.observeProjectionBatchDuration(duration);
     this.metrics.incProjectionEventsProcessed(processedCount);
+    if (Number.isFinite(rawRate)) {
+      this.metrics.setProjectionThroughput(rawRate);
+    } else {
+      this.metrics.setProjectionThroughput(processedCount / durationS);
+    }
 
     this.log.debug(
       `Processed ${processedCount} events in ${duration.toFixed(3)}s, checkpoint: ${lastSeq}`,

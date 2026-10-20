@@ -22,6 +22,30 @@ import assert from 'node:assert';
 import { resolveConfig, TESTNET, PUBNET } from '../src/config.js';
 
 // ---------------------------------------------------------------------------
+// Secret fixtures
+// ---------------------------------------------------------------------------
+//
+// resolveConfig validates every signer secret with a checksum-aware StrKey
+// decode (#498), so fixtures must be real ed25519 seeds rather than
+// "S"-prefixed placeholders. SECRET_1..SECRET_8 replace the old S123/S456/...
+// literals; BAD_CHECKSUM and WRONG_VERSION are the malformed shapes the old
+// first-character check let through to the signer factory.
+const SECRET_1 = 'SAO2MAIQCR5T27QDICO3QJTD2YZ4PMEAVLCLQ6AANVGPCZ53TEACPDOQ';
+const SECRET_2 = 'SDKL5BFVNLUCIP64CY3ZXSEAOQYJ7YNG35OKBFUW5QEZNZRKV6Q5DER6';
+const SECRET_3 = 'SBVJMEEBGBFBKJXSBLSJULHD5SI477DHNCV3XGIFV23NPGP4Z5O36KUJ';
+const SECRET_4 = 'SDAY2K6J5MYNUCHBELE4SRDAV2V7BFGO2EKXWHFICO3XZP35NEJ5R4RG';
+const SECRET_5 = 'SCCBYHKCAE7U67NUIM2UXUUT2QXDK227HU4JECMTWWCBXJGAZRCXOB7L';
+const SECRET_6 = 'SD5EMBYQ5ZZIEVIXG3PH6MPTSXAR2R4BPJAEJSOX7KYNYQCWR56AJHHZ';
+const SECRET_7 = 'SCVNPZXNFGCZN7MMGK3W5UHOE2EGMIZLJARXFNRXTU435X4EACUOYNZ2';
+const SECRET_8 = 'SBL7GTSM7AP7KVM3KGZZH7NRMEH3DIOYTZZEVVYWFEUSO4JLQVILWVNG';
+
+/** 56 chars starting with S, but the last base32 digit breaks the StrKey checksum. */
+const BAD_CHECKSUM = `${SECRET_1.slice(0, 55)}${SECRET_1[55] === 'A' ? 'B' : 'A'}`;
+
+/** A 56-character StrKey with the wrong version byte: a public key, not a seed. */
+const WRONG_VERSION = 'GAZILSAJN5CE5KZWBNTUTWF7TTFIMJ3BSBCBUIVR56QKBGW3BPSIZ2TW';
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -36,7 +60,7 @@ import { resolveConfig, TESTNET, PUBNET } from '../src/config.js';
  *
  * @returns {Readonly<Record<string, string>>} The shared minimal env.
  */
-const BASE_ENV = Object.freeze({ FACILITATOR_SECRET: 'S123' });
+const BASE_ENV = Object.freeze({ FACILITATOR_SECRET: SECRET_1 });
 
 function baseEnv() {
   return BASE_ENV;
@@ -55,7 +79,7 @@ function withPubnet(overrides = {}) {
   return {
     ...baseEnv(),
     ENABLE_PUBNET: 'true',
-    FACILITATOR_SECRET_PUBNET: 'S456',
+    FACILITATOR_SECRET_PUBNET: SECRET_2,
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
     ...overrides,
   };
@@ -102,7 +126,7 @@ test('resolveConfig: testnet only by default', () => {
   const config = resolveConfig(baseEnv());
   assert.deepStrictEqual(config.networks, [TESTNET]);
   assert.ok(config.perNetwork[TESTNET]);
-  assert.strictEqual(config.perNetwork[TESTNET].secret, 'S123');
+  assert.strictEqual(config.perNetwork[TESTNET].secret, SECRET_1);
   assert.strictEqual(config.perNetwork[TESTNET].maxTransactionFeeStroops, 50000);
 });
 
@@ -132,6 +156,45 @@ test('resolveConfig: requires secret', () => {
   assert.throws(() => resolveConfig({ FACILITATOR_SECRET: 'G123' }), /starts with S/);
 });
 
+test('resolveConfig: rejects a 56-character secret that fails the StrKey checksum (#498)', () => {
+  let error;
+  try {
+    resolveConfig({ FACILITATOR_SECRET: BAD_CHECKSUM });
+  } catch (err) {
+    error = err;
+  }
+  assert.ok(error, 'a bad-checksum secret must be refused at boot, not by the signer factory');
+  assert.match(error.message, /must be a Stellar secret key/);
+  assert.ok(!error.message.includes(BAD_CHECKSUM), 'the error must not echo the secret material');
+});
+
+test('resolveConfig: rejects a wrongly-prefixed 56-character seed (#498)', () => {
+  let error;
+  try {
+    resolveConfig({ FACILITATOR_SECRET: WRONG_VERSION });
+  } catch (err) {
+    error = err;
+  }
+  assert.ok(error, 'a public key is not a secret seed and must be refused at boot');
+  assert.match(error.message, /must be a Stellar secret key/);
+  assert.ok(!error.message.includes(WRONG_VERSION), 'the error must not echo the rejected input');
+});
+
+test('resolveConfig: rejects a bad-checksum seed in the plural and optional fields (#498)', () => {
+  assert.throws(
+    () => resolveConfig({ FACILITATOR_SECRETS: `${SECRET_1},${BAD_CHECKSUM}` }),
+    /must be a Stellar secret key/,
+  );
+  assert.throws(
+    () => resolveConfig({ FACILITATOR_SECRET: SECRET_1, FEE_BUMP_SECRET: BAD_CHECKSUM }),
+    /FEE_BUMP_SECRET must be a valid Stellar secret key/,
+  );
+  assert.throws(
+    () => resolveConfig(withPubnet({ FACILITATOR_SECRET_PUBNET: BAD_CHECKSUM })),
+    /must be a Stellar secret key/,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Pubnet
 // ---------------------------------------------------------------------------
@@ -149,7 +212,7 @@ test('resolveConfig: pubnet requires its own RPC URL', () => {
       resolveConfig({
         ...baseEnv(),
         ENABLE_PUBNET: 'true',
-        FACILITATOR_SECRET_PUBNET: 'S456',
+        FACILITATOR_SECRET_PUBNET: SECRET_2,
       }),
     /STELLAR_RPC_URL_PUBNET is unset/,
   );
@@ -157,22 +220,22 @@ test('resolveConfig: pubnet requires its own RPC URL', () => {
 
 test('resolveConfig: pubnet sets per-network values correctly', () => {
   const config = resolveConfig({
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     STELLAR_RPC_URL: 'https://testnet.local',
     MAX_TX_FEE_STROOPS: '10000',
     ENABLE_PUBNET: 'true',
-    FACILITATOR_SECRET_PUBNET: 'S456',
+    FACILITATOR_SECRET_PUBNET: SECRET_2,
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
     MAX_TX_FEE_STROOPS_PUBNET: '20000',
   });
 
   assert.deepStrictEqual(config.networks, [TESTNET, PUBNET]);
 
-  assert.strictEqual(config.perNetwork[TESTNET].secret, 'S123');
+  assert.strictEqual(config.perNetwork[TESTNET].secret, SECRET_1);
   assert.strictEqual(config.perNetwork[TESTNET].rpcUrl, 'https://testnet.local');
   assert.strictEqual(config.perNetwork[TESTNET].maxTransactionFeeStroops, 10000);
 
-  assert.strictEqual(config.perNetwork[PUBNET].secret, 'S456');
+  assert.strictEqual(config.perNetwork[PUBNET].secret, SECRET_2);
   assert.strictEqual(config.perNetwork[PUBNET].rpcUrl, 'https://pubnet.local');
   assert.strictEqual(config.perNetwork[PUBNET].maxTransactionFeeStroops, 20000);
 });
@@ -287,62 +350,62 @@ test('resolveConfig: MAX_TX_FEE_STROOPS_PUBNET rejects non-numeric and out-of-ra
 
 test('resolveConfig: handles FEE_BUMP_SECRET correctly', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
-    FEE_BUMP_SECRET: 'S999',
+    FACILITATOR_SECRET: SECRET_1,
+    FEE_BUMP_SECRET: SECRET_8,
   };
   const config = resolveConfig(env);
-  assert.strictEqual(config.perNetwork[TESTNET].feeBumpSecret, 'S999');
+  assert.strictEqual(config.perNetwork[TESTNET].feeBumpSecret, SECRET_8);
 });
 
 test('resolveConfig: handles FEE_BUMP_SECRET_PUBNET correctly', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     ENABLE_PUBNET: 'true',
-    FACILITATOR_SECRET_PUBNET: 'S456',
+    FACILITATOR_SECRET_PUBNET: SECRET_2,
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
-    FEE_BUMP_SECRET_PUBNET: 'S888',
+    FEE_BUMP_SECRET_PUBNET: SECRET_7,
   };
   const config = resolveConfig(env);
-  assert.strictEqual(config.perNetwork[PUBNET].feeBumpSecret, 'S888');
+  assert.strictEqual(config.perNetwork[PUBNET].feeBumpSecret, SECRET_7);
 });
 
 test('resolveConfig: handles FACILITATOR_SECRETS (plural) correctly', () => {
   const env = {
-    FACILITATOR_SECRETS: 'S123,S456,S789',
+    FACILITATOR_SECRETS: `${SECRET_1},${SECRET_2},${SECRET_3}`,
   };
   const config = resolveConfig(env);
-  assert.deepStrictEqual(config.perNetwork[TESTNET].secrets, ['S123', 'S456', 'S789']);
-  assert.strictEqual(config.perNetwork[TESTNET].secret, 'S123'); // first secret
+  assert.deepStrictEqual(config.perNetwork[TESTNET].secrets, [SECRET_1, SECRET_2, SECRET_3]);
+  assert.strictEqual(config.perNetwork[TESTNET].secret, SECRET_1); // first secret
 });
 
 test('resolveConfig: handles FACILITATOR_SECRETS_PUBNET (plural) correctly', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123', // Need testnet secret too
-    FACILITATOR_SECRETS_PUBNET: 'S111,S222,S333',
+    FACILITATOR_SECRET: SECRET_1, // Need testnet secret too
+    FACILITATOR_SECRETS_PUBNET: `${SECRET_4},${SECRET_5},${SECRET_6}`,
     ENABLE_PUBNET: 'true',
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
   };
   const config = resolveConfig(env);
-  assert.deepStrictEqual(config.perNetwork[PUBNET].secrets, ['S111', 'S222', 'S333']);
-  assert.strictEqual(config.perNetwork[PUBNET].secret, 'S111'); // first secret
+  assert.deepStrictEqual(config.perNetwork[PUBNET].secrets, [SECRET_4, SECRET_5, SECRET_6]);
+  assert.strictEqual(config.perNetwork[PUBNET].secret, SECRET_4); // first secret
 });
 
 test('resolveConfig: rejects duplicate secret keys in FACILITATOR_SECRET', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123,S123',
+    FACILITATOR_SECRET: `${SECRET_1},${SECRET_1}`,
   };
   assert.throws(() => resolveConfig(env), /Duplicate secret key found/);
 });
 
 test('resolveConfig: rejects duplicate secret keys in FACILITATOR_SECRETS', () => {
   const env = {
-    FACILITATOR_SECRETS: 'S123,S456,S123',
+    FACILITATOR_SECRETS: `${SECRET_1},${SECRET_2},${SECRET_1}`,
   };
   assert.throws(() => resolveConfig(env), /Duplicate secret key found/);
 });
 
 test('resolveConfig: validates API key IDs are alphanumeric and underscore only', () => {
-  const base = { FACILITATOR_SECRET: 'S123' };
+  const base = { FACILITATOR_SECRET: SECRET_1 };
 
   // Valid key IDs
   assert.doesNotThrow(() =>
@@ -375,7 +438,7 @@ test('resolveConfig: validates API key IDs are alphanumeric and underscore only'
 
 test('resolveConfig: parses API keys without explicit ID (uses index-based IDs)', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     FACILITATOR_API_KEYS:
       'secret1-0123456789abcdefghijklmnopqrstuvwxyz,secret2-0123456789abcdefghijklmnopqrstuvwxyz,secret3-0123456789abcdefghijklmnopqrstuvwxyz',
   };
@@ -389,7 +452,7 @@ test('resolveConfig: parses API keys without explicit ID (uses index-based IDs)'
 
 test('resolveConfig: throws when RATE_LIMIT_ key references non-existent API key', () => {
   const base = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     FACILITATOR_API_KEYS: 'existing:secret123-0123456789abcdefghijklmnopqrstuvwxyz',
   };
   assert.throws(
@@ -404,7 +467,7 @@ test('resolveConfig: throws when RATE_LIMIT_ key references non-existent API key
 
 test('resolveConfig: handles TRUST_PROXY as numeric hop count', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     TRUST_PROXY: '1',
   };
   const config = resolveConfig(env);
@@ -413,7 +476,7 @@ test('resolveConfig: handles TRUST_PROXY as numeric hop count', () => {
 
 test('resolveConfig: handles TRUST_PROXY as comma-separated list', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     TRUST_PROXY: '1.2.3.4, 1.2.3.5, loopback',
   };
   const config = resolveConfig(env);
@@ -421,7 +484,7 @@ test('resolveConfig: handles TRUST_PROXY as comma-separated list', () => {
 });
 
 test('resolveConfig: rejects TRUST_PROXY with boolean values', () => {
-  const base = { FACILITATOR_SECRET: 'S123' };
+  const base = { FACILITATOR_SECRET: SECRET_1 };
   for (const value of ['true', 'false', 'yes', 'no', 'TRUE', 'FALSE']) {
     assert.throws(
       () =>
@@ -436,7 +499,7 @@ test('resolveConfig: rejects TRUST_PROXY with boolean values', () => {
 
 test('resolveConfig: handles IP_HASH_SECRET', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     IP_HASH_SECRET: 'custom-secret-123',
   };
   const config = resolveConfig(env);
@@ -444,13 +507,13 @@ test('resolveConfig: handles IP_HASH_SECRET', () => {
 });
 
 test('resolveConfig: handles IP_HASH_SECRET as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.ipHashSecret, null);
 });
 
 test('resolveConfig: handles REDIS_URL', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     REDIS_URL: 'redis://localhost:6379',
   };
   const config = resolveConfig(env);
@@ -458,13 +521,13 @@ test('resolveConfig: handles REDIS_URL', () => {
 });
 
 test('resolveConfig: handles REDIS_URL as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.redisUrl, null);
 });
 
 test('resolveConfig: handles REDIS_NODES', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     REDIS_NODES: 'redis1:6379, redis2:6379, redis3:6379',
   };
   const config = resolveConfig(env);
@@ -472,13 +535,13 @@ test('resolveConfig: handles REDIS_NODES', () => {
 });
 
 test('resolveConfig: handles REDIS_NODES as empty array when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.deepStrictEqual(config.redisNodes, []);
 });
 
 test('resolveConfig: handles DATABASE_URL', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
   };
   const config = resolveConfig(env);
@@ -486,13 +549,13 @@ test('resolveConfig: handles DATABASE_URL', () => {
 });
 
 test('resolveConfig: handles DATABASE_URL as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.databaseUrl, null);
 });
 
 test('resolveConfig: handles DATABASE_URL_REPLICA', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     DATABASE_URL_REPLICA: 'postgres://user:pass@localhost:5433/db',
   };
   const config = resolveConfig(env);
@@ -500,13 +563,13 @@ test('resolveConfig: handles DATABASE_URL_REPLICA', () => {
 });
 
 test('resolveConfig: handles DATABASE_URL_REPLICA as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.databaseReplicaUrl, null);
 });
 
 test('resolveConfig: handles SETTLEMENT_REPLICA_LAG_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     SETTLEMENT_REPLICA_LAG_MS: '2000',
   };
   const config = resolveConfig(env);
@@ -514,13 +577,13 @@ test('resolveConfig: handles SETTLEMENT_REPLICA_LAG_MS', () => {
 });
 
 test('resolveConfig: handles SETTLEMENT_REPLICA_LAG_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.settlementReplicaLagMs, 1000);
 });
 
 test('resolveConfig: handles OUTBOX_POLL_INTERVAL_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     OUTBOX_POLL_INTERVAL_MS: '2000',
   };
   const config = resolveConfig(env);
@@ -528,13 +591,13 @@ test('resolveConfig: handles OUTBOX_POLL_INTERVAL_MS', () => {
 });
 
 test('resolveConfig: handles OUTBOX_POLL_INTERVAL_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.outboxPollIntervalMs, 5000);
 });
 
 test('resolveConfig: handles VAULT configuration with all required fields', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     VAULT_ADDR: 'https://vault.example.com:8200',
     VAULT_APPROLE_ROLE_ID: 'role-id-123',
     VAULT_APPROLE_SECRET_ID: 'secret-id-456',
@@ -551,7 +614,7 @@ test('resolveConfig: handles VAULT configuration with all required fields', () =
 
 test('resolveConfig: throws when VAULT_ADDR is set but VAULT_APPROLE_ROLE_ID is missing', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     VAULT_ADDR: 'https://vault.example.com:8200',
     VAULT_APPROLE_SECRET_ID: 'secret-id-456',
     DATABASE_URL: 'postgres://host:5432/database',
@@ -564,7 +627,7 @@ test('resolveConfig: throws when VAULT_ADDR is set but VAULT_APPROLE_ROLE_ID is 
 
 test('resolveConfig: throws when VAULT_ADDR is set but VAULT_APPROLE_SECRET_ID is missing', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     VAULT_ADDR: 'https://vault.example.com:8200',
     VAULT_APPROLE_ROLE_ID: 'role-id-123',
     DATABASE_URL: 'postgres://host:5432/database',
@@ -577,7 +640,7 @@ test('resolveConfig: throws when VAULT_ADDR is set but VAULT_APPROLE_SECRET_ID i
 
 test('resolveConfig: throws when VAULT_ADDR is set but DATABASE_URL is missing', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     VAULT_ADDR: 'https://vault.example.com:8200',
     VAULT_APPROLE_ROLE_ID: 'role-id-123',
     VAULT_APPROLE_SECRET_ID: 'secret-id-456',
@@ -587,7 +650,7 @@ test('resolveConfig: throws when VAULT_ADDR is set but DATABASE_URL is missing',
 
 test('resolveConfig: throws when VAULT_ADDR is set but DATABASE_URL contains userinfo', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     VAULT_ADDR: 'https://vault.example.com:8200',
     VAULT_APPROLE_ROLE_ID: 'role-id-123',
     VAULT_APPROLE_SECRET_ID: 'secret-id-456',
@@ -601,7 +664,7 @@ test('resolveConfig: throws when VAULT_ADDR is set but DATABASE_URL contains use
 
 test('resolveConfig: handles VAULT with custom namespace, db mount, and role', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     VAULT_ADDR: 'https://vault.example.com:8200',
     VAULT_NAMESPACE: 'team/stellar',
     VAULT_DB_MOUNT: 'postgres',
@@ -618,7 +681,7 @@ test('resolveConfig: handles VAULT with custom namespace, db mount, and role', (
 
 test('resolveConfig: handles REGION', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     REGION: 'us-east-1',
   };
   const config = resolveConfig(env);
@@ -626,13 +689,13 @@ test('resolveConfig: handles REGION', () => {
 });
 
 test('resolveConfig: handles REGION as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.region, null);
 });
 
 test('resolveConfig: handles REGIONS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     REGIONS: 'us-east-1:1:http://us-east-1.example.com, eu-west-1:2:http://eu-west-1.example.com',
   };
   const config = resolveConfig(env);
@@ -643,13 +706,13 @@ test('resolveConfig: handles REGIONS', () => {
 });
 
 test('resolveConfig: handles REGIONS as empty array when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.deepStrictEqual(config.regions, []);
 });
 
 test('resolveConfig: handles KAFKA_BROKERS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KAFKA_BROKERS: 'kafka1:9092, kafka2:9092, kafka3:9092',
   };
   const config = resolveConfig(env);
@@ -657,13 +720,13 @@ test('resolveConfig: handles KAFKA_BROKERS', () => {
 });
 
 test('resolveConfig: handles KAFKA_BROKERS as empty array when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.deepStrictEqual(config.kafka.brokers, []);
 });
 
 test('resolveConfig: handles KAFKA_CLIENT_ID custom value', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KAFKA_CLIENT_ID: 'my-custom-client',
   };
   const config = resolveConfig(env);
@@ -671,13 +734,13 @@ test('resolveConfig: handles KAFKA_CLIENT_ID custom value', () => {
 });
 
 test('resolveConfig: handles KAFKA_CLIENT_ID default value', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.kafka.clientId, 'x402-facilitator-stellar');
 });
 
 test('resolveConfig: handles KAFKA_WEBHOOK_TOPIC custom value', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KAFKA_WEBHOOK_TOPIC: 'custom-webhook-topic',
   };
   const config = resolveConfig(env);
@@ -685,13 +748,13 @@ test('resolveConfig: handles KAFKA_WEBHOOK_TOPIC custom value', () => {
 });
 
 test('resolveConfig: handles KAFKA_WEBHOOK_TOPIC default value', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.kafka.topic, 'x402-webhook-delivery');
 });
 
 test('resolveConfig: handles KAFKA_WEBHOOK_GROUP_ID custom value', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KAFKA_WEBHOOK_GROUP_ID: 'my-custom-group',
   };
   const config = resolveConfig(env);
@@ -699,13 +762,13 @@ test('resolveConfig: handles KAFKA_WEBHOOK_GROUP_ID custom value', () => {
 });
 
 test('resolveConfig: handles KAFKA_WEBHOOK_GROUP_ID default value', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.kafka.groupId, 'x402-webhook-dispatchers');
 });
 
 test('resolveConfig: handles KAFKA_WEBHOOK_DLQ_TOPIC', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KAFKA_WEBHOOK_DLQ_TOPIC: 'dlq-topic',
   };
   const config = resolveConfig(env);
@@ -713,13 +776,13 @@ test('resolveConfig: handles KAFKA_WEBHOOK_DLQ_TOPIC', () => {
 });
 
 test('resolveConfig: handles KAFKA_WEBHOOK_DLQ_TOPIC as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.kafka.dlqTopic, null);
 });
 
 test('resolveConfig: handles WEBHOOK_URL', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     WEBHOOK_URL: 'https://example.com/webhook',
   };
   const config = resolveConfig(env);
@@ -727,13 +790,13 @@ test('resolveConfig: handles WEBHOOK_URL', () => {
 });
 
 test('resolveConfig: handles WEBHOOK_URL as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.webhookUrl, null);
 });
 
 test('resolveConfig: handles DLQ configuration', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     DATABASE_URL: 'postgres://localhost:5432/db',
     DLQ_POLL_INTERVAL_MS: '5000',
     DLQ_MAX_RETRY_ATTEMPTS: '3',
@@ -749,7 +812,7 @@ test('resolveConfig: handles DLQ configuration', () => {
 
 test('resolveConfig: handles DLQ configuration with defaults', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     DATABASE_URL: 'postgres://localhost:5432/db',
   };
   const config = resolveConfig(env);
@@ -761,7 +824,7 @@ test('resolveConfig: handles DLQ configuration with defaults', () => {
 
 test('resolveConfig: handles EMBEDDINGS_URL', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     EMBEDDINGS_URL: 'https://embeddings.example.com',
   };
   const config = resolveConfig(env);
@@ -769,13 +832,13 @@ test('resolveConfig: handles EMBEDDINGS_URL', () => {
 });
 
 test('resolveConfig: handles EMBEDDINGS_URL as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.embeddingsUrl, null);
 });
 
 test('resolveConfig: handles EMBEDDINGS_TIMEOUT_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     EMBEDDINGS_TIMEOUT_MS: '5000',
   };
   const config = resolveConfig(env);
@@ -783,13 +846,13 @@ test('resolveConfig: handles EMBEDDINGS_TIMEOUT_MS', () => {
 });
 
 test('resolveConfig: handles EMBEDDINGS_TIMEOUT_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.embeddingsTimeoutMs, 3000);
 });
 
 test('resolveConfig: handles CATALOG_MAX_RESOURCES_PER_PAYTO', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     CATALOG_MAX_RESOURCES_PER_PAYTO: '25',
   };
   const config = resolveConfig(env);
@@ -797,13 +860,13 @@ test('resolveConfig: handles CATALOG_MAX_RESOURCES_PER_PAYTO', () => {
 });
 
 test('resolveConfig: handles CATALOG_MAX_RESOURCES_PER_PAYTO default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.catalogMaxResourcesPerPayTo, 50);
 });
 
 test('resolveConfig: handles CATALOG_VERIFY_TTL_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     CATALOG_VERIFY_TTL_MS: '7200000', // 2 hours
   };
   const config = resolveConfig(env);
@@ -811,14 +874,14 @@ test('resolveConfig: handles CATALOG_VERIFY_TTL_MS', () => {
 });
 
 test('resolveConfig: handles CATALOG_VERIFY_TTL_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   // 24 * 60 * 60 * 1000 = 86400000 (24 hours)
   assert.strictEqual(config.catalogVerifyTtlMs, 86400000);
 });
 
 test('resolveConfig: handles ENABLE_RERANKING', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     ENABLE_RERANKING: 'true',
     RERANK_URL: 'https://rerank.example/v1/rerank',
   };
@@ -831,7 +894,7 @@ test('resolveConfig: ENABLE_RERANKING without RERANK_URL is refused at boot (#17
   // Reranking must never be claimed but not wired: nothing is inferred from
   // EMBEDDINGS_URL, so enabling it with no explicit endpoint fails at boot.
   assert.throws(
-    () => resolveConfig({ FACILITATOR_SECRET: 'S123', ENABLE_RERANKING: 'true' }),
+    () => resolveConfig({ FACILITATOR_SECRET: SECRET_1, ENABLE_RERANKING: 'true' }),
     /RERANK_URL is unset/,
   );
 });
@@ -840,7 +903,7 @@ test('resolveConfig: RERANK_URL must be an absolute http(s) URL', () => {
   assert.throws(
     () =>
       resolveConfig({
-        FACILITATOR_SECRET: 'S123',
+        FACILITATOR_SECRET: SECRET_1,
         ENABLE_RERANKING: 'true',
         RERANK_URL: 'not-a-url',
       }),
@@ -850,7 +913,7 @@ test('resolveConfig: RERANK_URL must be an absolute http(s) URL', () => {
 
 test('resolveConfig: handles ENABLE_RERANKING falsy value', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     ENABLE_RERANKING: 'false',
   };
   const config = resolveConfig(env);
@@ -858,13 +921,13 @@ test('resolveConfig: handles ENABLE_RERANKING falsy value', () => {
 });
 
 test('resolveConfig: handles ENABLE_RERANKING default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.enableReranking, false);
 });
 
 test('resolveConfig: handles DISCOVERY_CACHE_MAX_AGE_SECONDS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     DISCOVERY_CACHE_MAX_AGE_SECONDS: '120',
   };
   const config = resolveConfig(env);
@@ -872,13 +935,13 @@ test('resolveConfig: handles DISCOVERY_CACHE_MAX_AGE_SECONDS', () => {
 });
 
 test('resolveConfig: handles DISCOVERY_CACHE_MAX_AGE_SECONDS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.discoveryCache.maxAgeSeconds, 60);
 });
 
 test('resolveConfig: handles DISCOVERY_CACHE_STALE_SECONDS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     DISCOVERY_CACHE_STALE_SECONDS: '600',
   };
   const config = resolveConfig(env);
@@ -886,13 +949,13 @@ test('resolveConfig: handles DISCOVERY_CACHE_STALE_SECONDS', () => {
 });
 
 test('resolveConfig: handles DISCOVERY_CACHE_STALE_SECONDS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.discoveryCache.staleWhileRevalidateSeconds, 300);
 });
 
 test('resolveConfig: handles SHUTDOWN_GRACE_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     SHUTDOWN_GRACE_MS: '20000',
   };
   const config = resolveConfig(env);
@@ -900,13 +963,13 @@ test('resolveConfig: handles SHUTDOWN_GRACE_MS', () => {
 });
 
 test('resolveConfig: handles SHUTDOWN_GRACE_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.shutdownGraceMs, 15000);
 });
 
 test('resolveConfig: handles REQUEST_TIMEOUT_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     REQUEST_TIMEOUT_MS: '45000',
   };
   const config = resolveConfig(env);
@@ -914,13 +977,13 @@ test('resolveConfig: handles REQUEST_TIMEOUT_MS', () => {
 });
 
 test('resolveConfig: handles REQUEST_TIMEOUT_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.requestTimeoutMs, 30000);
 });
 
 test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     SETTLE_REQUIRE_DURABLE_STORE: 'true',
   };
   const config = resolveConfig(env);
@@ -929,7 +992,7 @@ test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE', () => {
 
 test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE falsy value', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     SETTLE_REQUIRE_DURABLE_STORE: 'false',
   };
   const config = resolveConfig(env);
@@ -937,7 +1000,7 @@ test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE falsy value', () => {
 });
 
 test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.requireDurableSettlementStore, false);
 });
 
@@ -947,7 +1010,7 @@ test('resolveConfig: handles SETTLE_REQUIRE_DURABLE_STORE default', () => {
 
 test('resolveConfig: handles empty string for FACILITATOR_API_KEYS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     FACILITATOR_API_KEYS: '',
   };
   const config = resolveConfig(env);
@@ -956,7 +1019,7 @@ test('resolveConfig: handles empty string for FACILITATOR_API_KEYS', () => {
 
 test('resolveConfig: handles whitespace-only FACILITATOR_API_KEYS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     FACILITATOR_API_KEYS: '   ,  ,  ',
   };
   const config = resolveConfig(env);
@@ -965,7 +1028,7 @@ test('resolveConfig: handles whitespace-only FACILITATOR_API_KEYS', () => {
 
 test('resolveConfig: handles CORS_ALLOWED_ORIGINS with only spaces and commas', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     CORS_ALLOWED_ORIGINS: '   ,  ,  ',
   };
   const config = resolveConfig(env);
@@ -974,7 +1037,7 @@ test('resolveConfig: handles CORS_ALLOWED_ORIGINS with only spaces and commas', 
 
 test('resolveConfig: handles RATE_LIMIT_GLOBAL with empty string', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     RATE_LIMIT_GLOBAL: '',
   };
   const config = resolveConfig(env);
@@ -989,7 +1052,7 @@ test('resolveConfig: handles RATE_LIMIT_GLOBAL with empty string', () => {
 
 test('resolveConfig: handles RATE_LIMIT_GLOBAL with malformed pairs', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     RATE_LIMIT_GLOBAL: 'verify_rpm=invalid,settle_rpm=,=100,catalog_rpm',
   };
   const config = resolveConfig(env);
@@ -1004,7 +1067,7 @@ test('resolveConfig: handles RATE_LIMIT_GLOBAL with malformed pairs', () => {
 
 test('resolveConfig: handles METRICS_PORT', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     METRICS_PORT: '9090',
   };
   const config = resolveConfig(env);
@@ -1012,13 +1075,31 @@ test('resolveConfig: handles METRICS_PORT', () => {
 });
 
 test('resolveConfig: handles METRICS_PORT as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.metricsPort, null);
+});
+
+test('resolveConfig: reads RATE_LIMIT_ALLOWLIST as CIDRs, not a key override', () => {
+  const config = resolveConfig({
+    FACILITATOR_SECRET: SECRET_1,
+    RATE_LIMIT_ALLOWLIST: '10.0.0.0/8, 192.168.1.0/24',
+  });
+  assert.deepStrictEqual(config.rateLimits.allowlist, ['10.0.0.0/8', '192.168.1.0/24']);
+  assert.equal(config.rateLimits.keys.ALLOWLIST, undefined);
+});
+
+test('resolveConfig: reads AUDIT_LOG_FILE and defaults to null', () => {
+  assert.strictEqual(
+    resolveConfig({ FACILITATOR_SECRET: SECRET_1, AUDIT_LOG_FILE: ' /var/log/audit.jsonl ' })
+      .auditLogFile,
+    '/var/log/audit.jsonl',
+  );
+  assert.strictEqual(resolveConfig({ FACILITATOR_SECRET: SECRET_1 }).auditLogFile, null);
 });
 
 test('resolveConfig: handles KEY_MANAGER_URL', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KEY_MANAGER_URL: 'http://keymanager:8080',
   };
   const config = resolveConfig(env);
@@ -1026,13 +1107,13 @@ test('resolveConfig: handles KEY_MANAGER_URL', () => {
 });
 
 test('resolveConfig: handles KEY_MANAGER_URL as null when unset', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.perNetwork[TESTNET].keyManagerUrl, null);
 });
 
 test('resolveConfig: handles KEY_MANAGER_POLL_INTERVAL_MS', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     KEY_MANAGER_POLL_INTERVAL_MS: '3000',
   };
   const config = resolveConfig(env);
@@ -1040,15 +1121,15 @@ test('resolveConfig: handles KEY_MANAGER_POLL_INTERVAL_MS', () => {
 });
 
 test('resolveConfig: handles KEY_MANAGER_POLL_INTERVAL_MS default', () => {
-  const config = resolveConfig({ FACILITATOR_SECRET: 'S123' });
+  const config = resolveConfig({ FACILITATOR_SECRET: SECRET_1 });
   assert.strictEqual(config.perNetwork[TESTNET].keyManagerPollIntervalMs, 0);
 });
 
 test('resolveConfig: handles PUBNET key manager URL and poll interval', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     ENABLE_PUBNET: 'true',
-    FACILITATOR_SECRET_PUBNET: 'S456',
+    FACILITATOR_SECRET_PUBNET: SECRET_2,
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
     KEY_MANAGER_URL_PUBNET: 'http://keymanager-pubnet:8080',
     KEY_MANAGER_POLL_INTERVAL_MS_PUBNET: '4000',
@@ -1060,9 +1141,9 @@ test('resolveConfig: handles PUBNET key manager URL and poll interval', () => {
 
 test('resolveConfig: handles PUBNET key manager falling back to regular key manager', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     ENABLE_PUBNET: 'true',
-    FACILITATOR_SECRET_PUBNET: 'S456',
+    FACILITATOR_SECRET_PUBNET: SECRET_2,
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
     KEY_MANAGER_URL: 'http://keymanager:8080',
     KEY_MANAGER_POLL_INTERVAL_MS: '3000',
@@ -1074,9 +1155,9 @@ test('resolveConfig: handles PUBNET key manager falling back to regular key mana
 
 test('resolveConfig: handles PUBNET key manager defaulting to 0 when both unset', () => {
   const env = {
-    FACILITATOR_SECRET: 'S123',
+    FACILITATOR_SECRET: SECRET_1,
     ENABLE_PUBNET: 'true',
-    FACILITATOR_SECRET_PUBNET: 'S456',
+    FACILITATOR_SECRET_PUBNET: SECRET_2,
     STELLAR_RPC_URL_PUBNET: 'https://pubnet.local',
   };
   const config = resolveConfig(env);

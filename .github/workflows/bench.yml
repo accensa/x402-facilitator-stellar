@@ -1,0 +1,61 @@
+name: bench
+
+# Runs the benchmark scripts that claim CI reproducibility (issue #552).
+#
+# Not a merge gate: the `ci` job stays single-pass (#511). This runs on a
+# schedule and on demand. It needs no secrets, testnet or .env — every bench
+# stubs its collaborators.
+#
+# `npm run test:bench` only compares duration against a baseline when
+# bench-results/resource-history.jsonl exists. That directory is gitignored, so
+# the history is carried between runs in the Actions cache. The first run has
+# no baseline and passes, matching checkBudget's null-baseline behaviour.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1' # Mondays 04:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Restore bench history
+        uses: actions/cache/restore@v4
+        with:
+          path: bench-results
+          key: bench-results-${{ github.run_id }}
+          restore-keys: bench-results-
+
+      - run: npm run bench
+      - run: npm run bench:cataloging
+      - run: npm run bench:signer
+      - run: npm run test:bench
+
+      # A new key per run: caches are immutable, and only a passing budget run
+      # appends to the history, so a failed run never reaches this step.
+      - name: Save bench history
+        uses: actions/cache/save@v4
+        with:
+          path: bench-results
+          key: bench-results-${{ github.run_id }}
+
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results/
+          if-no-files-found: ignore

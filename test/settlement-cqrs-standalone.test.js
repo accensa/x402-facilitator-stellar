@@ -12,6 +12,7 @@ import {
   ProjectionWorker,
 } from '../src/settlement-cqrs.js';
 import { SETTLEMENT_EVENT_TYPES } from '../src/eventstore/events.js';
+import { createMetrics } from '../src/metrics.js';
 import { validateEventOrdering } from '../src/eventstore/projection-worker.js';
 
 /**
@@ -244,5 +245,100 @@ describe('CQRS Event Streaming - Core Functionality', () => {
     assert.strictEqual(pool.projections.size, 2);
     assert.ok(pool.projections.has('multi-1'));
     assert.ok(pool.projections.has('multi-2'));
+  });
+
+  test('The worker publishes the projection throughput gauge (#557)', async () => {
+    const pool = createFakePool();
+    pool.events.push(
+      {
+        seq: 1,
+        idempotency_key: 'thr-1',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'thr-1',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+      {
+        seq: 2,
+        idempotency_key: 'thr-2',
+        event_type: SETTLEMENT_EVENT_TYPES.INITIATED,
+        event_version: 1,
+        payload: {
+          idempotency_key: 'thr-2',
+          network: 'stellar:testnet',
+          scheme: 'exact-stellar',
+          key_id: 'merchant-1',
+        },
+        recorded_at: new Date().toISOString(),
+      },
+    );
+
+    const metrics = createMetrics();
+    const seen = {
+      throughput: 0,
+      processed: 0,
+      duration: null,
+    };
+    assert.equal(typeof metrics.setProjectionThroughput, 'function');
+    const realSetThroughput = metrics.setProjectionThroughput.bind(metrics);
+    metrics.setProjectionThroughput = value => {
+      seen.throughput = value;
+      realSetThroughput(value);
+    };
+    const realIncProcessed = metrics.incProjectionEventsProcessed.bind(metrics);
+    metrics.incProjectionEventsProcessed = count => {
+      seen.processed = count;
+      realIncProcessed(count);
+    };
+    const realObserveDuration = metrics.observeProjectionBatchDuration.bind(metrics);
+    metrics.observeProjectionBatchDuration = value => {
+      seen.duration = value;
+      realObserveDuration(value);
+    };
+
+    const worker = new ProjectionWorker(pool, metrics, {
+      log: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    await worker.initialize();
+    await worker.processBatch();
+
+    // The gauge was actually driven by the worker and reads back through the
+    // exposition format, not only through the mutator.
+    const exposition = metrics.render();
+    const gaugeLines = exposition
+      .split('\n')
+      .filter(l => l.startsWith('x402_projection_throughput_events_per_second '));
+    const value = Number(gaugeLines.at(-1).split(' ')[1]);
+
+    assert.equal(gaugeLines.length, 1, 'the throughput series appears exactly once');
+    assert.ok(Number.isFinite(value), 'the exposition value is a finite number');
+    assert.ok(value > 0, `the throughput gauge is non-zero (${gaugeLines.at(-1)})`);
+
+    // Consistency: the same batch's processed count and duration are the
+    // inputs to the rate, scraped beside it.
+    assert.ok(seen.processed > 0);
+    assert.ok(seen.duration >= 0);
+    const extremeRate = seen.processed / seen.duration;
+    assert.ok(
+      !Number.isFinite(extremeRate) || Math.abs(value - extremeRate) < 1e-6 * Math.max(value, 1),
+      `gauge (${value}) is consistent with processed(${seen.processed})/duration(${seen.duration})`,
+    );
+
+    // Empty batch: processBatch returns before the metric block; the gauge
+    // keeps its last reading and gains no second series.
+    const before = metrics.render();
+    await worker.processBatch();
+    const after = metrics.render();
+    assert.strictEqual(before, after, 'an empty batch leaves the exposition unchanged');
+
+    // The doubled set (rawRate Infinity path) is impossible: the setProjection
+    // mutator always receives a finite number.
+    assert.ok(Number.isFinite(seen.throughput));
   });
 });

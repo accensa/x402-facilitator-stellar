@@ -3,8 +3,8 @@ info:
   title: x402 Facilitator (Stellar)
   version: 0.0.1
   description: |
-    This document describes the **transport** — the eight HTTP routes in
-    `src/app.js` — and nothing more. It is deliberately silent about what
+    This document describes the **transport** — the HTTP routes in
+    `src/app.js` and `src/dlq/routes.js` — and nothing more. It is deliberately silent about what
     makes a payment valid or a settlement succeed: verify/settle semantics
     live in the upstream, Apache-2.0 `@x402/stellar` package
     (`ExactStellarScheme`), and this repo's house rule is that we do not
@@ -35,11 +35,16 @@ servers:
 
 tags:
   - name: payments
-    description: The x402 verify/settle surface.
+    description: The x402 verify/settle surface, plus settlement status reads.
   - name: discovery
     description: The Bazaar catalog — automatic and manual resource discovery.
   - name: meta
-    description: Liveness, capability advertisement, and usage.
+    description: Liveness, readiness, capability advertisement, usage, and metrics.
+  - name: ops
+    description: |
+      Operator dead-letter queue — view, replay, or discard poisoned webhook
+      messages. Registered only when a DeadLetterStore is supplied (Postgres
+      configured), and always under the strict API-key check.
 
 security:
   - ApiKeyAuth: []
@@ -50,9 +55,11 @@ paths:
       tags: [meta]
       summary: Liveness check
       description: |
-        Currently unconditional — it reports process liveness, not
-        readiness (it does not check RPC connectivity or signer health).
-        See #100 for making this reflect actual readiness.
+        Liveness only, by design — it reports that the process is up and
+        must never consult a dependency (a liveness probe that fails on a
+        downstream outage causes restart loops). Readiness — RPC
+        connectivity and signer funding per network — is what `GET /readyz`
+        reports (#100).
       security: []
       responses:
         '200':
@@ -69,6 +76,52 @@ paths:
               examples:
                 default:
                   value: { ok: true }
+
+  /readyz:
+    get:
+      tags: [meta]
+      summary: Readiness check
+      description: |
+        Whether this instance can actually settle right now (#100), reported
+        per network: Soroban RPC reachability plus signer-account funding.
+        Catalog-store trouble is reported but never fails readiness — a
+        cataloging failure must never fail a payment, and readiness predicts
+        payment capability. Answers 503 while unhealthy or shutting down;
+        without a configured checker it answers 503 with reason
+        `readiness_not_configured`.
+      security: []
+      responses:
+        '200':
+          description: Ready to settle on every configured network.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Not ready — see `reason` and the per-network report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+
+  /metrics:
+    get:
+      tags: [meta]
+      summary: Prometheus metrics exposition
+      description: |
+        Operator surface, not API surface: the full Prometheus exposition
+        served as `text/plain`. Unauthenticated like the other meta reads.
+        When `METRICS_PORT` is set the same exposition is additionally bound
+        to a separate loopback listener (`METRICS_HOST`, default
+        `127.0.0.1`); either way this document describes the same bytes.
+      security: []
+      responses:
+        '200':
+          description: Prometheus text exposition (version 0.0.4).
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /supported:
     get:
@@ -272,6 +325,98 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/RateLimited'
+
+  /settlements/{idempotencyKey}:
+    get:
+      tags: [payments]
+      summary: Read one settlement by idempotency key
+      description: |
+        The status read behind `/settle`'s exactly-once key: retrying with
+        the same key replays the recorded response instead of settling again.
+        Scoped to the caller's key id — a record written under another key
+        reads back as 404, indistinguishable from "never existed".
+      security:
+        - ApiKeyAuth: []
+        - {}
+      parameters:
+        - name: idempotencyKey
+          in: path
+          required: true
+          description: The key `/settle` derived from the request (explicit header or body hash).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The settlement record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, settlement]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  settlement:
+                    type: object
+                    description: |
+                      The durable record (`state` one of `submitted`,
+                      `settled`, `failed`, `unknown`; `tx_hash`,
+                      `error_reason` and `response` as stored).
+                    additionalProperties: true
+        '404':
+          description: No record for this key under this caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /settlements/{idempotencyKey}/events:
+    get:
+      tags: [payments]
+      summary: Ordered event history for one settlement
+      description: |
+        The audit trail behind the status read (#130): every state
+        transition for the key, oldest first. Same caller scoping as the
+        status read itself.
+      security:
+        - ApiKeyAuth: []
+        - {}
+      parameters:
+        - name: idempotencyKey
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The event log for the key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, idempotencyKey, events]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  idempotencyKey:
+                    type: string
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '404':
+          description: No record for this key under this caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /discovery/resources:
     post:
@@ -649,6 +794,247 @@ paths:
                   reason:
                     type: string
 
+  /admin/dlq:
+    get:
+      tags: [ops]
+      summary: List dead letters, newest first
+      description: |
+        Operator API over the dead-letter store (poisoned webhook messages
+        whose delivery path exhausted its retry budget). Registered only when
+        a `DeadLetterStore` is supplied (Postgres configured). Requires a
+        real API key — the strict check, like `/usage`, even in open mode:
+        this surface reads in-flight settlement notifications.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, exhausted, resolved, discarded]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: A page of dead letters, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, items, pagination]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeadLetter'
+                  pagination:
+                    type: object
+                    required: [limit, offset, total]
+                    properties:
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                      total:
+                        type: integer
+        '400':
+          description: '`status` is not a known dead-letter status (`invalid_status`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestError'
+        '401':
+          description: |
+            Missing/invalid key — the strict check, so this is also the
+            answer in open mode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  /admin/dlq/{id}:
+    get:
+      tags: [ops]
+      summary: Read a single dead letter
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The dead letter.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, deadLetter]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  deadLetter:
+                    $ref: '#/components/schemas/DeadLetter'
+        '400':
+          description: '`id` is not an integer (`invalid_id`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestError'
+        '401':
+          description: Missing/invalid key — the strict check, even in open mode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+        '404':
+          description: No dead letter with this id (`dead_letter_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+    delete:
+      tags: [ops]
+      summary: Permanently discard a dead letter
+      description: |
+        Never retried again after this. Audited as `dlq_discard`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Discarded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, status]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  status:
+                    type: string
+                    const: discarded
+        '400':
+          description: '`id` is not an integer (`invalid_id`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestError'
+        '401':
+          description: Missing/invalid key — the strict check, even in open mode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+        '404':
+          description: No dead letter with this id (`dead_letter_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+
+  /admin/dlq/{id}/replay:
+    post:
+      tags: [ops]
+      summary: Attempt immediate redelivery of a dead letter
+      description: |
+        Runs outside the backoff schedule and resolves synchronously, so
+        the operator sees the outcome of the action rather than polling.
+        Audited as `dlq_replay`. A discarded or already-resolved letter is
+        a 409, not a retry.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Redelivered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, status]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  status:
+                    type: string
+                    const: resolved
+        '400':
+          description: '`id` is not an integer (`invalid_id`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestError'
+        '401':
+          description: Missing/invalid key — the strict check, even in open mode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+        '404':
+          description: No dead letter with this id (`dead_letter_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+        '409':
+          description: Already terminal (`already_discarded` / `already_resolved`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, reason]
+                properties:
+                  error:
+                    type: string
+                    const: conflict
+                  reason:
+                    type: string
+                    enum: [already_discarded, already_resolved]
+        '502':
+          description: Redelivery failed; `error` carries the delivery error.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, status]
+                properties:
+                  ok:
+                    type: boolean
+                    const: false
+                  status:
+                    type: string
+                    const: redelivery_failed
+                  error:
+                    type: string
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -664,9 +1050,10 @@ components:
         `/usage` is unauthenticated — correct for a free testnet instance,
         strongly discouraged on pubnet. See `docs/AUTHENTICATION.md`.
 
-        `/usage` requires a key even in open mode (`open_mode_usage_forbidden`
-        otherwise). `/healthz`, `/supported`, and both `GET /discovery/*`
-        routes are always open regardless of mode.
+        `/usage` and the `/admin/dlq` routes require a key even in open mode
+        (`open_mode_usage_forbidden` otherwise — the strict check).
+        `/healthz`, `/readyz`, `/metrics`, `/supported`, and both
+        `GET /discovery/*` routes are always open regardless of mode.
 
   headers:
     ExtensionResponses:
@@ -846,6 +1233,83 @@ components:
             - malformed_auth_header
             - invalid_api_key
             - open_mode_usage_forbidden
+
+    RequestError:
+      type: object
+      required: [error, reason]
+      properties:
+        error:
+          type: string
+          const: invalid_request
+        reason:
+          type: string
+
+    NotFoundError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          const: not_found
+        reason:
+          type: string
+        message:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      description: |
+        Readiness per #100: `ok` is true only when every configured network
+        is ready. `networks` maps each network to its RPC-reachability and
+        signer-funding checks; catalog state is reported but never fails
+        readiness. Without a configured checker the answer is
+        `{ok: false, status: 'not_ready', reason:
+        'readiness_not_configured'}`.
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        status:
+          type: string
+        reason:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+        networks:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    DeadLetter:
+      type: object
+      description: |
+        One poisoned webhook message: which delivery path gave up on it
+        (`source`), what it carries (`payload`), how many attempts each leg
+        made, and where it sits in the retry schedule (`status`, one of
+        `pending`, `exhausted`, `resolved`, `discarded`).
+      properties:
+        id:
+          type: integer
+        message_id:
+          type: string
+        source:
+          type: string
+        type:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        error:
+          type: string
+        delivery_attempts:
+          type: integer
+        dlq_attempts:
+          type: integer
+        status:
+          type: string
+          enum: [pending, exhausted, resolved, discarded]
+      additionalProperties: true
 
     SupportedResponse:
       type: object

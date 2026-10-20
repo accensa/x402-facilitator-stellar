@@ -230,7 +230,7 @@ export function createMetrics() {
 
   const projectionThroughput = new Gauge(
     'x402_projection_throughput_events_per_second',
-    'Event processing throughput (events/second).',
+    'Projection throughput in events/second, observed over the most recent completed projection batch (its processed count divided by its wall duration); the worker in src/settlement-cqrs.js sets it, so averaging the scrape across polls reconstructs the steady-state rate.',
     [],
   );
   projectionThroughput.set({}, 0);
@@ -337,6 +337,14 @@ class SignerMetrics {
 
   /**
    * Generate Prometheus formatted metrics text.
+   *
+   * x402_signer_inflight is deliberately NOT rendered here: the registry gauge
+   * fed by `setSignerInflight` is that series' single owner, and GET /metrics
+   * concatenates this text after `createMetrics().render()`. A second HELP/TYPE
+   * pair for the same name made the exposition declare the series twice — a
+   * scrape-time parse error — and the private inflight map disagreed with the
+   * registry gauge because nothing feeds it (see #558). The selection counter
+   * is the only series this class uniquely owns.
    * @returns {string}
    */
   toPrometheusText() {
@@ -346,14 +354,9 @@ class SignerMetrics {
     ];
 
     for (const { network, signer, count } of this.selectedTotal.values()) {
-      lines.push(`x402_signer_selected_total{network="${network}",signer="${signer}"} ${count}`);
-    }
-
-    lines.push('# HELP x402_signer_inflight Current in-flight settlements per signer.');
-    lines.push('# TYPE x402_signer_inflight gauge');
-
-    for (const { network, signer, count } of this.inflight.values()) {
-      lines.push(`x402_signer_inflight{network="${network}",signer="${signer}"} ${count}`);
+      lines.push(
+        `x402_signer_selected_total{network="${escapeLabelValue(network)}",signer="${escapeLabelValue(signer)}"} ${count}`,
+      );
     }
 
     return lines.join('\n') + '\n';

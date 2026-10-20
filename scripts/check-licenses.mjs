@@ -38,8 +38,11 @@ const WEAK_COPYLEFT = [/\bGPL-/i, /\bLGPL/i, /\bMPL-/i, /\bEPL-/i];
 /**
  * Reads the licence of one package, tolerating every shape npm has ever used:
  * a string, an SPDX expression, a {type} object, or a legacy `licenses` array.
+ *
+ * Exported so test/licenses-policy.test.js can pin the policy without
+ * importing the filesystem walk; see the import guard below.
  */
-function licenseOf(pkg) {
+export function licenseOf(pkg) {
   if (typeof pkg.license === 'string') return pkg.license;
   if (pkg.license && typeof pkg.license.type === 'string') return pkg.license.type;
   if (Array.isArray(pkg.licenses)) {
@@ -89,7 +92,11 @@ function* packages(dir) {
   }
 }
 
-function classify(license) {
+/**
+ * Decides forbidden vs review vs ok for one licence string. Also exported
+ * for the policy tests; the lists above are the policy, this is its referee.
+ */
+export function classify(license) {
   if (FORBIDDEN.some(re => re.test(license))) return 'forbidden';
   // A dual licence offering a permissive option is fine — we take that option.
   if (WEAK_COPYLEFT.some(re => re.test(license)) && !/\bOR\b/i.test(license)) return 'review';
@@ -97,42 +104,46 @@ function classify(license) {
   return 'ok';
 }
 
-const found = [...packages(join(ROOT, 'node_modules'))];
-if (found.length === 0) {
-  console.error('No packages found. Run npm ci first.');
-  process.exit(2);
-}
-
-const forbidden = [];
-const review = [];
-for (const pkg of found) {
-  const verdict = classify(pkg.license);
-  if (verdict === 'forbidden') forbidden.push(pkg);
-  else if (verdict === 'review') review.push(pkg);
-}
-
-if (process.argv.includes('--list')) {
-  const counts = new Map();
-  for (const pkg of found) counts.set(pkg.license, (counts.get(pkg.license) ?? 0) + 1);
-  for (const [license, n] of [...counts].sort((a, b) => b[1] - a[1])) {
-    console.log(`${String(n).padStart(4)}  ${license}`);
+// The walk/report/exit block only runs when the file is the program, so a
+// test importing licenseOf/classify neither walks node_modules nor exits.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const found = [...packages(join(ROOT, 'node_modules'))];
+  if (found.length === 0) {
+    console.error('No packages found. Run npm ci first.');
+    process.exit(2);
   }
-  console.log(`\n${found.length} packages`);
-}
 
-if (review.length > 0) {
-  console.log(`\n${review.length} package(s) need a human look (not a failure):`);
-  for (const pkg of review) console.log(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
-}
+  const forbidden = [];
+  const review = [];
+  for (const pkg of found) {
+    const verdict = classify(pkg.license);
+    if (verdict === 'forbidden') forbidden.push(pkg);
+    else if (verdict === 'review') review.push(pkg);
+  }
 
-if (forbidden.length > 0) {
-  console.error(`\nFORBIDDEN LICENCE in the dependency path:`);
-  for (const pkg of forbidden) console.error(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
-  console.error(
-    '\nThis project commits to a permissive OSI licence with no AGPL in the ' +
-      'dependency path. Remove the dependency or find a permissive alternative.',
-  );
-  process.exit(1);
-}
+  if (process.argv.includes('--list')) {
+    const counts = new Map();
+    for (const pkg of found) counts.set(pkg.license, (counts.get(pkg.license) ?? 0) + 1);
+    for (const [license, n] of [...counts].sort((a, b) => b[1] - a[1])) {
+      console.log(`${String(n).padStart(4)}  ${license}`);
+    }
+    console.log(`\n${found.length} packages`);
+  }
 
-console.log(`\nLicence check passed — ${found.length} packages, none forbidden.`);
+  if (review.length > 0) {
+    console.log(`\n${review.length} package(s) need a human look (not a failure):`);
+    for (const pkg of review) console.log(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
+  }
+
+  if (forbidden.length > 0) {
+    console.error(`\nFORBIDDEN LICENCE in the dependency path:`);
+    for (const pkg of forbidden) console.error(`  ${pkg.name}@${pkg.version} — ${pkg.license}`);
+    console.error(
+      '\nThis project commits to a permissive OSI licence with no AGPL in the ' +
+        'dependency path. Remove the dependency or find a permissive alternative.',
+    );
+    process.exit(1);
+  }
+
+  console.log(`\nLicence check passed — ${found.length} packages, none forbidden.`);
+}
