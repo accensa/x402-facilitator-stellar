@@ -122,6 +122,13 @@ pinned.
 
 ### Fixed
 
+- `npm run env:check` now fails on the other direction of drift: a variable
+  documented in `.env.example` that no code in `src/` reads. Reads that are
+  computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
+  names that are compose-only are excused by a per-name allowlist in
+  `scripts/check-env-doc.mjs`, each citing the line that reads it — and an
+  allowlist entry fails the build once the code it excuses is gone, so the
+  list cannot quietly become the blind spot it was written to close (#504).
 - Signer secrets are validated with a checksum-aware StrKey decode (#498) in
   `resolveConfig` and `KeyManager`, so a truncated, wrongly-prefixed or
   bad-checksum secret is refused at boot — or when a remote key source is read —

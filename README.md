@@ -198,7 +198,7 @@ Everything in `scripts/`, and where it is documented:
 | Script | npm script | Purpose |
 |---|---|---|
 | `check-licenses.mjs` | `npm run licenses` | Fails on any non-permissive (AGPL) dependency in the tree. |
-| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`. |
+| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`, and when `.env.example` documents a variable no code reads. |
 | `smoke-examples.mjs` | `npm run smoke:examples` | Starts both examples and asserts real behaviour (402 challenge; MCP `initialize`/`tools/list`); the CI examples gate. |
 | `e2e.mjs` | `npm run e2e` | End-to-end x402 payment against a running facilitator on testnet. |
 | `fund-testnet-accounts.mjs` | `npm run testnet:fund` | Generates and friendbot-funds the three testnet accounts the suite needs. |
