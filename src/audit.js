@@ -40,10 +40,29 @@ function redact(fields) {
  * @param {string} [options.file] - AUDIT_LOG_FILE: append records to a file as
  *   well as stdout, which gives an operator a separable retention surface
  *   without shipping infrastructure this spike does not have
+ * @param {(message: string) => void} [options.onError] - receives the one
+ *   warning emitted if the file sink fails, so a test can capture it
  */
-export function createAuditLogger({ write, file } = {}) {
+export function createAuditLogger({
+  write,
+  file,
+  onError = message => console.error(message),
+} = {}) {
   let stream;
-  if (file) stream = fs.createWriteStream(file, { flags: 'a' });
+  if (file) {
+    stream = fs.createWriteStream(file, { flags: 'a' });
+    // POSTURE: an unusable AUDIT_LOG_FILE is reported once and the stdout
+    // channel keeps working. The file sink is an extra retention surface, so
+    // it must never be able to take settlement serving down through the
+    // process-level uncaught-exception handler (src/server.js).
+    stream.on('error', err => {
+      if (!stream) return;
+      stream = null;
+      onError(
+        `[Audit] cannot write AUDIT_LOG_FILE (${err.message}); audit records continue on stdout only`,
+      );
+    });
+  }
 
   function emit(line) {
     if (write) {
@@ -64,7 +83,7 @@ export function createAuditLogger({ write, file } = {}) {
    * @param {object} fields - timestamp and channel are added here; pass only
    *   fields you would be comfortable showing the caller being recorded
    */
-  return function audit(event, fields = {}) {
+  function audit(event, fields = {}) {
     emit(
       JSON.stringify({
         ts: new Date().toISOString(),
@@ -73,5 +92,21 @@ export function createAuditLogger({ write, file } = {}) {
         ...redact(fields),
       }),
     );
+  }
+
+  /**
+   * Flushes and closes the file sink. Awaiting this in shutdown() is what
+   * guarantees a record written immediately before a graceful stop reaches
+   * the file rather than sitting in the stream's buffer.
+   *
+   * @returns {Promise<void>}
+   */
+  audit.close = function close() {
+    const open = stream;
+    stream = null;
+    if (!open) return Promise.resolve();
+    return new Promise(resolve => open.end(resolve));
   };
+
+  return audit;
 }

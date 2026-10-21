@@ -22,20 +22,82 @@
  * preceding check failed closed while the store was down, a sustained outage
  * does not accumulate uncounted spend.
  */
+import net from 'node:net';
 import { MemoryStore } from './rate-limit-store.js';
+import { ipMatchesCidr } from './trust-proxy.js';
+
+/** True when `entry` is a bare IP or an IP/prefix pair the matcher can use. */
+function isValidCidr(entry) {
+  const slash = entry.lastIndexOf('/');
+  const address = slash === -1 ? entry : entry.slice(0, slash);
+  const kind = net.isIP(address);
+  if (kind === 0) return false;
+  if (slash === -1) return true;
+  const prefix = Number(entry.slice(slash + 1));
+  return Number.isInteger(prefix) && prefix >= 0 && prefix <= (kind === 6 ? 128 : 32);
+}
 
 export class RateLimiter {
   /**
-   * @param {object} config - { global: {...}, keys: {...}, perNetwork: {...} } limits
+   * @param {object} config - { global: {...}, keys: {...}, perNetwork: {...},
+   *   allowlist?: string[] } limits
    * @param {{get: Function, increment: Function, sweep: Function}} [store]
    *   Defaults to in-process memory. Pass a shared store to enforce combined
    *   limits across replicas; two limiters pointed at one store behave as one.
+   * @param {{audit?: Function}} [options] - audit sink for bypass records
    */
-  constructor(config, store = new MemoryStore()) {
+  constructor(config, store = new MemoryStore(), { audit = null } = {}) {
     this.config = config;
     this.store = store;
+    this.audit = audit;
+    this.allowlist = Array.isArray(config.allowlist) ? config.allowlist : [];
+    for (const entry of this.allowlist) {
+      // A typo must fail at boot, where a restart fixes it, instead of silently
+      // matching nobody on every request.
+      if (!isValidCidr(entry)) {
+        throw new Error(`RATE_LIMIT_ALLOWLIST entries must be IPs or CIDRs — got "${entry}".`);
+      }
+    }
     this._sweepInterval = null;
     this._startSweepInterval();
+  }
+
+  /** Late-bound so createApp can hand the limiter the app's audit sink. */
+  setAudit(audit) {
+    this.audit = audit;
+  }
+
+  /**
+   * Returns the matched allowlist CIDR for this request, or null. Only the
+   * resolved `req.ip` is consulted: the trust-proxy hook has already decided
+   * whether an X-Forwarded-For entry may be believed, so a forged header
+   * cannot spoof an allowlisted address (#410).
+   */
+  _allowlistMatch(req) {
+    if (!req || typeof req.ip !== 'string' || this.allowlist.length === 0) return null;
+    return this.allowlist.find(cidr => ipMatchesCidr(req.ip, cidr)) ?? null;
+  }
+
+  /**
+   * Short-circuits a limit check for a trusted source and records the bypass
+   * in the audit channel. Reads are not consumed: an allowlisted caller is
+   * never counted, so its quota is untouched.
+   */
+  _bypass(req, route, limit, windowSec = 60) {
+    const cidr = this._allowlistMatch(req);
+    if (!cidr) return null;
+    this.audit?.('rate_limit_bypass', {
+      actor: req.keyId ? `key:${req.keyId}` : `ip:${req.ip}`,
+      route,
+      cidr,
+    });
+    return {
+      allowed: true,
+      bypassed: true,
+      limit,
+      remaining: limit,
+      resetAt: Math.floor(Date.now() / 1000) + windowSec,
+    };
   }
 
   _startSweepInterval() {
@@ -130,6 +192,8 @@ export class RateLimiter {
   async checkVerify(req) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'verify', limits.verifyRpm);
+    if (bypass) return bypass;
     const res = await this._check(ownerId, 'verify', 60, limits.verifyRpm);
     if (!res.allowed && !res.reason) res.reason = 'rate_limit_exceeded';
     return res;
@@ -170,6 +234,8 @@ export class RateLimiter {
   async checkSettle(req, network = null) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'settle', limits.settleRpm);
+    if (bypass) return bypass;
 
     // Check all three limits for settle
     const checks = [
@@ -244,6 +310,8 @@ export class RateLimiter {
     // Both check and record key on req.keyId || req.ip to share a single catalog budget for unauthenticated callers per IP, or per authenticated caller regardless of IP.
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'catalog', limits.catalogRpm);
+    if (bypass) return bypass;
     const res = await this._check(ownerId, 'catalog', 60, limits.catalogRpm);
     if (!res.allowed && !res.reason) res.reason = 'catalog_rate_limited';
     return res;
@@ -277,6 +345,8 @@ export class RateLimiter {
   async checkCatalogRead(req) {
     const ownerId = req.keyId || req.ip;
     const limits = this._getKeyConfig(req.keyId);
+    const bypass = this._bypass(req, 'catalog_read', limits.catalogReadRpm ?? 60);
+    if (bypass) return bypass;
     const res = await this._check(ownerId, 'catalog_read', 60, limits.catalogReadRpm ?? 60);
     if (!res.allowed && !res.reason) res.reason = 'catalog_read_rate_limited';
     return res;

@@ -5,7 +5,9 @@
 Sensitive operations are recorded by `src/audit.js` as one JSON object per
 line, each carrying `"channel": "audit"` so records are separable from
 diagnostic logs (filterable at shipment; optionally mirrored to `AUDIT_LOG_FILE`
-for independent retention). Every record carries a timestamp (`ts`), the
+for independent retention). An unwritable `AUDIT_LOG_FILE` is reported once at
+startup and audit records continue on stdout — the file sink never stops
+settlement serving. `close()` flushes the file during graceful shutdown. Every record carries a timestamp (`ts`), the
 authenticated caller (`actor`: `keyId`, or `ip:<pseudonym>` in open mode),
 the action (`event`) and the outcome. The open-mode actor is a keyed,
 non-reversible pseudonym of the source address, never the address itself — see

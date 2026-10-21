@@ -447,6 +447,9 @@ async function shutdown(signal) {
       await catalog.searchCache?.stop?.().catch(() => {});
 
       await rateLimiter?.close?.().catch(() => {});
+      // Flush the AUDIT_LOG_FILE sink (#587) so a record written immediately
+      // before a graceful stop is not lost in the stream buffer.
+      await app.auditLogger?.close?.();
 
       horizon.restore();
     } catch (err) {

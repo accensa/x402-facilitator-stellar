@@ -179,6 +179,18 @@ funded accounts:
 ```bash
 FACILITATOR_SECRET=$(stellar keys show facilitator) npm start &
 ALICE_SECRET=$(stellar keys show alice) npm run e2e
+
+## Environment variables for e2e
+
+The e2e script uses three operator-facing variables:
+- **MERCHANT_ADDRESS** – default is a shared throwaway testnet payee (
+  GCALKSGAZRJLSUEJT3M5W6LN4R7XQOLIRCOS6ZA6EDZVTZDBIIPPFKJ6) that must
+  be overridden by operators verifying a real settlement destination.
+- **RESOURCE_PORT** – default is 3401; must not collide with the facilitator port
+  (3402) that the same recipe starts.
+- **VERBOSE** – when set, prints the full failure stack on payment errors
+  (referenced in scripts/e2e.mjs:221).
+
 ```
 
 #### Testnet setup scripts
@@ -198,7 +210,7 @@ Everything in `scripts/`, and where it is documented:
 | Script | npm script | Purpose |
 |---|---|---|
 | `check-licenses.mjs` | `npm run licenses` | Fails on any non-permissive (AGPL) dependency in the tree. |
-| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`. |
+| `check-env-doc.mjs` | `npm run env:check` | Fails when a variable read in `src/` is missing from `.env.example`, and when `.env.example` documents a variable no code reads. |
 | `smoke-examples.mjs` | `npm run smoke:examples` | Starts both examples and asserts real behaviour (402 challenge; MCP `initialize`/`tools/list`); the CI examples gate. |
 | `e2e.mjs` | `npm run e2e` | End-to-end x402 payment against a running facilitator on testnet. |
 | `fund-testnet-accounts.mjs` | `npm run testnet:fund` | Generates and friendbot-funds the three testnet accounts the suite needs. |

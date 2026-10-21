@@ -23,8 +23,10 @@ import { fetch as undiciFetch } from 'undici';
 import {
   createWebhookDispatcher,
   deliverWebhook,
+  backoffMsForAttempt,
   isCertificateRejection,
 } from '../src/webhooks/dispatcher.js';
+import { DeadLetterManager } from '../src/dlq/manager.js';
 import {
   createDeliveryAuthenticator,
   MtlsCredentialProvider,
@@ -982,3 +984,239 @@ describe('isCertificateRejection', () => {
     assert.equal(isCertificateRejection(null), false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Exponential backoff schedule (1m, 5m, 15m, 1h, 6h, 24h)
+// ---------------------------------------------------------------------------
+
+describe('exponential backoff schedule', () => {
+  const MIN = 60_000;
+
+  test('backoffMsForAttempt lands on 1m, 5m, 15m, 1h, 6h, 24h (within jitter)', () => {
+    const expected = [1, 5, 15, 60, 360, 1440].map(m => m * MIN);
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      const value = backoffMsForAttempt(attempt, MIN);
+      const lo = expected[attempt - 1] * 0.75;
+      const hi = expected[attempt - 1] * 1.25;
+      assert.ok(value >= lo && value <= hi, `attempt ${attempt}: ${value} not in [${lo}, ${hi}]`);
+    }
+  });
+
+  test('beyond six attempts keeps doubling', () => {
+    const six = backoffMsForAttempt(6, MIN);
+    const seven = backoffMsForAttempt(7, MIN);
+    // Each call applies its own ±25% jitter, so their ratio ranges 0.6–1.67 and
+    // comparing two independent draws to each other failed about one run in
+    // four. Bound each draw against its own nominal instead: attempt 6 is the
+    // last schedule entry (24h) and attempt 7 doubles it (48h).
+    assert.ok(six >= 1440 * MIN * 0.75 && six <= 1440 * MIN * 1.25, `attempt 6: ${six}`);
+    assert.ok(seven >= 2880 * MIN * 0.75 && seven <= 2880 * MIN * 1.25, `attempt 7: ${seven}`);
+  });
+
+  test('deliverWebhook uses the six-attempt schedule (stubs clock via baseBackoffMs=1ms)', async () => {
+    let attempts = 0;
+    const result = await deliverWebhook({
+      url: 'https://receiver.example/hook',
+      body: {},
+      maxAttempts: 6,
+      baseBackoffMs: 1,
+      fetchImpl: async () => {
+        attempts++;
+        throw new Error('ETIMEDOUT');
+      },
+      warn: () => {},
+    });
+    assert.equal(result.delivered, false);
+    assert.equal(attempts, 6);
+
+    // Verify each inter-attempt gap matches the schedule (within jitter) by
+    // re-running with an injected clock via setTimeout shim is not possible
+    // here; instead assert nominal multipliers through backoffMsForAttempt.
+    const nominal = [1, 5, 15, 60, 360, 1440];
+    for (let i = 0; i < 5; i++) {
+      const lo = nominal[i] * 0.75;
+      const hi = nominal[i] * 1.25;
+      const got = backoffMsForAttempt(i + 1, 1);
+      assert.ok(got >= lo && got <= hi, `gap ${i + 1}: ${got} not in [${lo}, ${hi}]`);
+    }
+  });
+
+  test('gives up after six attempts and reports non-delivery', async () => {
+    let attempts = 0;
+    const warns = [];
+    const result = await deliverWebhook({
+      url: 'https://receiver.example/hook',
+      body: {},
+      maxAttempts: 6,
+      baseBackoffMs: 1,
+      warn: m => warns.push(m),
+      fetchImpl: async () => {
+        attempts++;
+        throw new Error('ETIMEDOUT');
+      },
+    });
+    assert.equal(attempts, 6);
+    assert.equal(result.delivered, false);
+    assert.ok(warns[0].includes('failed after 6 attempts'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dead Letter Queue manager
+// ---------------------------------------------------------------------------
+
+describe('DeadLetterManager', () => {
+  function stubStore(rows = []) {
+    const stored = [...rows];
+    let nextId = stored.length + 1;
+    return {
+      pool: {
+        query: async (_sql, _params) => ({ rows: [], rowCount: 0 }),
+      },
+      insert: async event => {
+        const id = nextId++;
+        stored.push({ id, ...event, status: 'pending' });
+        return id;
+      },
+      get: async id => stored.find(r => r.id === id) ?? null,
+      list: async ({ status = null, limit = 50, offset = 0 } = {}) => {
+        let filtered = stored;
+        if (status) filtered = filtered.filter(r => r.status === status);
+        // newest first: latest insert first
+        filtered = [...filtered].reverse();
+        const total = filtered.length;
+        const items = filtered.slice(offset, offset + limit);
+        return { items, total };
+      },
+      markResolved: async id => {
+        const row = stored.find(r => r.id === id);
+        if (row) row.status = 'resolved';
+      },
+      markRetryFailed: async (_id, _error) => {},
+      countByStatus: async () => ({
+        pending: stored.filter(r => r.status === 'pending').length,
+        exhausted: stored.filter(r => r.status === 'exhausted').length,
+        resolved: stored.filter(r => r.status === 'resolved').length,
+        discarded: stored.filter(r => r.status === 'discarded').length,
+      }),
+      clear: async () => {
+        stored.length = 0;
+      },
+      _stored: stored,
+    };
+  }
+
+  test('enqueue + inspect lists dead letters newest first', async () => {
+    const store = stubStore();
+    const mgr = new DeadLetterManager(store);
+    await mgr.enqueue({ messageId: 'm1', source: 'direct', payload: { a: 1 } });
+    await mgr.enqueue({ messageId: 'm2', source: 'kafka-consumer', payload: { b: 2 } });
+    const listed = await mgr.inspect();
+    assert.equal(listed.total, 2);
+    assert.equal(listed.items[0].messageId, 'm2');
+    assert.equal(listed.items[1].messageId, 'm1');
+  });
+
+  test('inspect filters by status', async () => {
+    const store = stubStore([{ id: 1, messageId: 'm1', status: 'pending' }]);
+    await store.insert({ messageId: 'm2', source: 'direct', payload: {} });
+    store._stored[1].status = 'exhausted';
+    const pending = await mgrInspect(store, { status: 'pending' });
+    assert.equal(pending.total, 1);
+    assert.equal(pending.items[0].messageId, 'm1');
+  });
+
+  test('replay delivers and marks resolved', async () => {
+    const store = stubStore([{ id: 1, messageId: 'm1', status: 'pending', payload: { x: 1 } }]);
+    const mgr = new DeadLetterManager(store);
+    let published = null;
+    const result = await mgr.replay(1, async payload => {
+      published = payload;
+    });
+    assert.equal(result.delivered, true);
+    assert.deepEqual(published, { x: 1 });
+    assert.equal(store._stored[0].status, 'resolved');
+  });
+
+  test('replay rejects discarded and resolved rows', async () => {
+    const store = stubStore([
+      { id: 1, messageId: 'm1', status: 'discarded', payload: {} },
+      { id: 2, messageId: 'm2', status: 'resolved', payload: {} },
+    ]);
+    const mgr = new DeadLetterManager(store);
+    const d = await mgr.replay(1, async () => {});
+    assert.equal(d.delivered, false);
+    assert.equal(d.error, 'already_discarded');
+    const r = await mgr.replay(2, async () => {});
+    assert.equal(r.delivered, false);
+    assert.equal(r.error, 'already_resolved');
+  });
+
+  test('replay of a missing row returns not_found', async () => {
+    const store = stubStore();
+    const mgr = new DeadLetterManager(store);
+    const result = await mgr.replay(999, async () => {});
+    assert.equal(result.delivered, false);
+    assert.equal(result.error, 'not_found');
+  });
+
+  test('purge requires a filter', async () => {
+    const store = stubStore();
+    const mgr = new DeadLetterManager(store);
+    await assert.rejects(() => mgr.purge({}), /requires a status or olderThan/);
+  });
+
+  test('purge removes matching rows', async () => {
+    const store = stubStore([
+      { id: 1, messageId: 'm1', status: 'discarded', created_at: new Date('2024-01-01') },
+      { id: 2, messageId: 'm2', status: 'discarded', created_at: new Date('2025-01-01') },
+    ]);
+    const mgr = new DeadLetterManager(store);
+    // override pool.query to actually delete
+    store.pool.query = async (sql, params) => {
+      const status = params[0];
+      const before = store._stored.length;
+      store._stored = store._stored.filter(r => r.status !== status);
+      return { rows: [], rowCount: before - store._stored.length };
+    };
+    const result = await mgr.purge({ status: 'discarded' });
+    assert.equal(result.purged, 2);
+    assert.equal(store._stored.length, 0);
+  });
+
+  test('checkThreshold fires alert once per breach and resets below', async () => {
+    const store = stubStore([
+      { id: 1, status: 'pending' },
+      { id: 2, status: 'pending' },
+    ]);
+    const alerts = [];
+    const mgr = new DeadLetterManager(store, { onAlert: () => alerts.push('alert') });
+    assert.equal(await mgr.checkThreshold(0), false); // 0 disables the check
+    assert.equal(await mgr.checkThreshold(2), false); // 2 not > 2
+    assert.equal(await mgr.checkThreshold(1), true); // 2 > 1, fires
+    assert.equal(alerts.length, 1);
+    // second check at same threshold: no repeat
+    assert.equal(await mgr.checkThreshold(1), true);
+    assert.equal(alerts.length, 1);
+    // clear the queue
+    await store.clear();
+    assert.equal(await mgr.checkThreshold(1), false); // reset below threshold
+    assert.equal(await mgr.checkThreshold(1), false); // not alerting again
+    assert.equal(alerts.length, 1);
+  });
+
+  test('dlqSize returns pending + exhausted', async () => {
+    const store = stubStore([
+      { id: 1, status: 'pending' },
+      { id: 2, status: 'exhausted' },
+      { id: 3, status: 'resolved' },
+    ]);
+    const mgr = new DeadLetterManager(store);
+    assert.equal(await mgr.dlqSize(), 2);
+  });
+});
+
+function mgrInspect(store, opts) {
+  const mgr = new DeadLetterManager(store);
+  return mgr.inspect(opts);
+}

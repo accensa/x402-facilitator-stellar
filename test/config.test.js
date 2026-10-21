@@ -1079,6 +1079,24 @@ test('resolveConfig: handles METRICS_PORT as null when unset', () => {
   assert.strictEqual(config.metricsPort, null);
 });
 
+test('resolveConfig: reads RATE_LIMIT_ALLOWLIST as CIDRs, not a key override', () => {
+  const config = resolveConfig({
+    FACILITATOR_SECRET: SECRET_1,
+    RATE_LIMIT_ALLOWLIST: '10.0.0.0/8, 192.168.1.0/24',
+  });
+  assert.deepStrictEqual(config.rateLimits.allowlist, ['10.0.0.0/8', '192.168.1.0/24']);
+  assert.equal(config.rateLimits.keys.ALLOWLIST, undefined);
+});
+
+test('resolveConfig: reads AUDIT_LOG_FILE and defaults to null', () => {
+  assert.strictEqual(
+    resolveConfig({ FACILITATOR_SECRET: SECRET_1, AUDIT_LOG_FILE: ' /var/log/audit.jsonl ' })
+      .auditLogFile,
+    '/var/log/audit.jsonl',
+  );
+  assert.strictEqual(resolveConfig({ FACILITATOR_SECRET: SECRET_1 }).auditLogFile, null);
+});
+
 test('resolveConfig: handles KEY_MANAGER_URL', () => {
   const env = {
     FACILITATOR_SECRET: SECRET_1,

@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { serve, stubFacilitator, VALID_BODY } from './helpers/app.js';
+import { OPERATIONAL_ROUTES } from '../src/app.js';
 import { createRequestLog } from '../src/log.js';
 import { createMetrics } from '../src/metrics.js';
 
@@ -52,6 +53,8 @@ test('every request emits exactly one structured JSON line with the required fie
     'requestId',
     'route',
     'scheme',
+    'span_id',
+    'trace_id',
     'ts',
     'txHash',
   ]);
@@ -259,4 +262,79 @@ test('metrics reflect observed requests, settlements, fees and signer state', as
     ),
     'request duration histogram not recorded',
   );
+});
+
+/**
+ * Probe traffic is operational, not payment traffic (#494).
+ *
+ * The exclusion in src/app.js once named `/health/ready`, a route the app does
+ * not register, so every readiness poll — the Docker HEALTHCHECK, the 1-minute
+ * external probe docs/OPERATIONS.md commits to, every Kubernetes readiness
+ * probe — was counted into x402_requests_total{route="/readyz"}, the very
+ * counter the payment dashboards and alerts read.
+ */
+test('readiness, health and metrics probes never reach x402_requests_total', async () => {
+  const metrics = createMetrics();
+  const app = await serve({
+    extras: {
+      logger: createRequestLog({ sink: () => {} }),
+      metrics,
+      serveMetrics: true,
+    },
+  });
+  try {
+    for (const path of ['/healthz', '/readyz', '/metrics']) {
+      const res = await app.get(path);
+      assert.ok(res.status === 200 || res.status === 503, `${path}: probe answered ${res.status}`);
+    }
+
+    let text = metrics.render();
+    for (const path of ['/healthz', '/readyz', '/metrics']) {
+      assert.ok(
+        !text.includes(`route="${path}"`),
+        `${path} is an operational probe and must not appear in the payment metrics exposition`,
+      );
+    }
+
+    // Not a blanket suppression: the payment routes still emit their series,
+    // so the probes' absence above is the exclusion, not a broken counter.
+    assert.equal((await app.post('/verify', VALID_BODY)).status, 200);
+    assert.equal((await app.post('/settle', VALID_BODY)).status, 200);
+    text = metrics.render();
+    assert.ok(
+      text.includes(
+        'x402_requests_total{route="/verify",network="stellar:testnet",outcome="ok",reason="none"} 1',
+      ),
+      'verify must still be counted after the probes',
+    );
+    assert.ok(
+      text.includes(
+        'x402_requests_total{route="/settle",network="stellar:testnet",outcome="ok",reason="none"} 1',
+      ),
+      'settle must still be counted after the probes',
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+/**
+ * The half of #494 the functional test above cannot see on its own: a name in
+ * the exclusion set that no route registers stops excluding anything, silently.
+ * Pinning every entry to a registered GET route is what fails CI on the
+ * `/health/ready` shape of bug instead of only documenting it.
+ */
+test('every route the probe exclusion names is a GET route the app registers', async () => {
+  const app = await serve();
+  try {
+    for (const route of OPERATIONAL_ROUTES) {
+      assert.ok(
+        app.app.hasRoute({ method: 'GET', url: route }),
+        `OPERATIONAL_ROUTES names "${route}", but no GET route registers it — ` +
+          'the exclusion would not apply to anything (#494)',
+      );
+    }
+  } finally {
+    await app.close();
+  }
 });

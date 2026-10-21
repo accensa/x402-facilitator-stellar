@@ -251,4 +251,70 @@ describe('dynamic fee estimation (#426)', () => {
     );
     assert.throws(() => createFeeEstimator({ maxFeeStroops: 5000 }), /horizonUrl/);
   });
+
+  test('a non-2xx fee_stats response rejects with the status and leaves the cache untouched', async () => {
+    const calls = [];
+    let fail = true;
+    const est = createFeeEstimator({
+      horizonUrl: 'https://h',
+      maxFeeStroops: 50_000,
+      fetchFn: async url => {
+        calls.push(url);
+        if (fail) return new Response('', { status: 503 });
+        return new Response(JSON.stringify(NORMAL), { status: 200 });
+      },
+    });
+    await assert.rejects(est.fetchFeeStats(), /fee_stats returned HTTP 503/);
+
+    fail = false;
+    const stats = await est.fetchFeeStats();
+    assert.deepEqual([stats.p50, stats.p90, stats.p99], [100, 120, 300]);
+    assert.equal(calls.length, 2, 'the failed load was not cached, so the next call retried');
+  });
+
+  test('a missing last_ledger_base_fee falls back to the minimum base fee and clamps each tier', async () => {
+    const est = createFeeEstimator({
+      horizonUrl: 'https://h',
+      maxFeeStroops: 50_000,
+      fetchFn: okFetch({
+        ledger_capacity_usage: '0.1',
+        fee_charged: { p50: '10', p90: '20', p99: '30' },
+      }),
+    });
+    const stats = await est.fetchFeeStats();
+    assert.equal(stats.baseFee, MIN_BASE_FEE_STROOPS);
+    assert.deepEqual(
+      [stats.p50, stats.p90, stats.p99],
+      [MIN_BASE_FEE_STROOPS, MIN_BASE_FEE_STROOPS, MIN_BASE_FEE_STROOPS],
+    );
+  });
+
+  test('concurrent callers during a failing load share one in-flight request and both reject', async () => {
+    const calls = [];
+    const est = createFeeEstimator({
+      horizonUrl: 'https://h',
+      maxFeeStroops: 50_000,
+      fetchFn: async url => {
+        calls.push(url);
+        return new Response('', { status: 500 });
+      },
+    });
+    const [a, b] = await Promise.allSettled([est.fetchFeeStats(), est.fetchFeeStats()]);
+    assert.equal(calls.length, 1, 'only one request was made for both callers');
+    assert.equal(a.status, 'rejected');
+    assert.equal(b.status, 'rejected');
+    assert.equal(a.reason.message, b.reason.message);
+    assert.match(a.reason.message, /fee_stats returned HTTP 500/);
+  });
+
+  test('deadlineMs of 0, a negative number, or a string all throw', async () => {
+    const est = createFeeEstimator({
+      horizonUrl: 'https://h',
+      maxFeeStroops: 50_000,
+      fetchFn: okFetch(NORMAL),
+    });
+    await assert.rejects(est.estimateFee({ deadlineMs: 0 }), /deadlineMs/);
+    await assert.rejects(est.estimateFee({ deadlineMs: -1 }), /deadlineMs/);
+    await assert.rejects(est.estimateFee({ deadlineMs: '5000' }), /deadlineMs/);
+  });
 });

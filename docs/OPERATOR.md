@@ -359,7 +359,8 @@ restarting it (see [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) § Rollback).
   vars, shared stores, sizing, rollback.
 - [`docs/OPERATIONS.md`](./OPERATIONS.md) — rate limiting, metering, multi-signer pool,
   health endpoints in depth.
-- [`docs/AUTHENTICATION.md`](./AUTHENTICATION.md) — caller auth, open mode, CORS.
+- [`docs/AUTHENTICATION.md`](./AUTHENTICATION.md) — caller auth, open mode, CORS, and the
+  `/admin/dlq` operator routes for inspecting, replaying, or discarding dead letters.
 - [`docs/CONFORMANCE.md`](./CONFORMANCE.md) — what "conforms" means and how it is kept
   honest.
 - [`docs/THREAT-MODEL.md`](./THREAT-MODEL.md) — what the service assumes and defends.

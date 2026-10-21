@@ -223,8 +223,10 @@ export function parsePayUri(uri) {
 
 /**
  * Builds a SEP-0007 `pay` URI, validating with the same rules as the parser.
- * Parameters are emitted in the spec's canonical order, so
- * `buildPayUri(parsePayUri(uri)) === uri` for any URI the parser accepts.
+ * Parameters are emitted in the spec's canonical order, so the result is
+ * byte-for-byte identical to the input only when the input was already in that
+ * canonical order. The parser accepts parameters in any order; any other
+ * accepted order is normalised to canonical, not preserved.
  *
  * @param {object} params - as returned by parsePayUri
  * @throws {Sep7Error}

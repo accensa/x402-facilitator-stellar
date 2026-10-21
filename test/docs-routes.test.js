@@ -20,6 +20,23 @@ import { test } from 'node:test';
 import { createApp } from '../src/app.js';
 import { stubCatalog, stubFacilitator, stubRateLimiter, testConfig } from './helpers/app.js';
 
+/**
+ * Minimal DeadLetterStore stub for the `extras.dlq` seam src/app.js:81
+ * exposes — just enough shape for registerDlqRoutes to mount its four
+ * routes; no real Postgres pool is opened for this unit test.
+ */
+function stubDlq() {
+  return {
+    store: {
+      list: async () => ({ items: [], total: 0 }),
+      get: async () => null,
+      discard: async () => {},
+    },
+    publish: async () => {},
+    retryOptions: {},
+  };
+}
+
 /** Enumerates `METHOD /path` for every route the app registers. */
 async function registeredRoutes() {
   const app = await createApp(
@@ -28,7 +45,7 @@ async function registeredRoutes() {
     stubRateLimiter(),
     stubCatalog(),
     undefined,
-    {},
+    { dlq: stubDlq() },
   );
 
   const tree = app.printRoutes({ commonPrefix: false });
@@ -136,6 +153,23 @@ test('both discovery read routes are documented as open by design', () => {
     const row = inventory.split('\n').find(line => line.includes(`| \`${route}\``));
     assert.ok(row, `no inventory row for ${route}`);
     assert.match(row, /open \*\*by design\*\*/, `${route} must be documented as open by design`);
+  }
+});
+
+test('the four /admin/dlq routes are documented with strict, open-mode-refusing auth', () => {
+  const doc = readFileSync(new URL('../docs/AUTHENTICATION.md', import.meta.url), 'utf8');
+  const inventory = doc.split('## Route Inventory')[1] ?? '';
+
+  for (const route of [
+    'GET /admin/dlq',
+    'GET /admin/dlq/:id',
+    'POST /admin/dlq/:id/replay',
+    'DELETE /admin/dlq/:id',
+  ]) {
+    const row = inventory.split('\n').find(line => line.includes(`| \`${route}\``));
+    assert.ok(row, `no inventory row for ${route}`);
+    assert.match(row, /strict/, `${route} must document the strict API key check`);
+    assert.match(row, /refused/, `${route} must document that open mode is refused`);
   }
 });
 
