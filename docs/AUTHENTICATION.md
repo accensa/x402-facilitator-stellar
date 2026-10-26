@@ -30,6 +30,10 @@ This table is the authoritative answer to "what is authenticated here". It is au
 | `GET /settlements/:idempotencyKey` | API key | no | open | Settlement status read, scoped to the caller's `keyId`. |
 | `GET /settlements/:idempotencyKey/events` | API key | no | open | Ordered event history for one settlement (#130) — the audit trail behind the status read, scoped to the caller's `keyId`. |
 | `GET /usage` | API key — **strict** | n/a (reads the meter) | **refused** | The one route that refuses open mode: it exists to meter authenticated callers, and with no keys there is nothing to meter. Returns `401` with reason `open_mode_usage_forbidden`. |
+| `GET /admin/dlq` | API key — **strict** | no | **refused** | Lists dead letters, newest first. Same strict posture as `/usage`: it reads in-flight settlement notifications, which an unauthenticated caller must not see even in open mode. Only registered when a Postgres-backed `DeadLetterStore` is configured. Optional `status` query filters to `pending`, `exhausted`, `resolved`, or `discarded`; any other value answers `400` with reason `invalid_status`. |
+| `GET /admin/dlq/:id` | API key — **strict** | no | **refused** | A single dead letter by id. Same strict posture as `/admin/dlq`. `404` with reason `dead_letter_not_found` when the id does not exist. |
+| `POST /admin/dlq/:id/replay` | API key — **strict** | no | **refused** | Forces an immediate redelivery attempt outside the backoff schedule. Same strict posture as `/admin/dlq`. `409` if the dead letter is already `resolved` or `discarded`; `502` if the redelivery attempt itself fails. |
+| `DELETE /admin/dlq/:id` | API key — **strict** | no | **refused** | Permanently discards a dead letter; it is never retried again. Same strict posture as `/admin/dlq` — this route destroys data, so it is one of the two routes (with replay) that refuses open mode outright rather than merely going unmetered. |
 | `OPTIONS <cors-enabled route>` | none | no | open | CORS preflight; cannot carry an API key, so it is answered before credentials matter. |
 | anything else | n/a | n/a | n/a | `404` with reason `route_not_found`. |
 
@@ -39,7 +43,7 @@ This table is the authoritative answer to "what is authenticated here". It is au
 
 When `FACILITATOR_API_KEYS` is unset or empty, the facilitator runs in **open mode**: every route above that says "open" is truly unauthenticated, and the server logs a loud warning at boot.
 
-The one deliberate refusal is `GET /usage`, which requires `requireApiKeyStrict` — stricter than the `requireApiKey` used everywhere else. In open mode it answers `401` with reason `open_mode_usage_forbidden` instead of serving a meter nobody is metered against.
+The deliberate refusals are `GET /usage` and the four `/admin/dlq` routes, all of which require `requireApiKeyStrict` — stricter than the `requireApiKey` used everywhere else. In open mode `/usage` answers `401` with reason `open_mode_usage_forbidden` instead of serving a meter nobody is metered against, and the `/admin/dlq` routes answer the same way instead of exposing or letting an unauthenticated caller mutate in-flight settlement notifications.
 
 Open mode is acceptable (and often desired) for **public testnet deployments** to allow frictionless developer onboarding. It is strongly discouraged on pubnet, where unauthenticated callers can drain the signer's funds by submitting valid but abusive transactions.
 

@@ -307,13 +307,13 @@ describe('CQRS read replica settlement store (#121)', () => {
 
     // Row exists on primary (written by another pod moments ago), lagging on
     // replica. A status read must still return it via the primary fallback.
-    primary.store.set('settlement-A', {
-      idempotency_key: 'settlement-A',
+    primary.store.set('CALLERA:settlement-A', {
+      idempotency_key: 'CALLERA:settlement-A',
       network: 'stellar:testnet',
       scheme: 'exact-stellar',
       state: 'settled',
       tx_hash: 'hashA',
-      key_id: 'callerA',
+      key_id: 'CALLERA',
       created_at: new Date(),
       updated_at: new Date(),
     });
@@ -855,6 +855,26 @@ describe('CQRS Event Streaming Pipeline', () => {
     const verification = await verifyCheckpointPersistence(pool, 123);
     assert.ok(verification.persisted);
     assert.strictEqual(verification.checkpoint.last_seq, 123);
+  });
+
+  test('Checkpoint persistence verification normalises a string int8 row', async () => {
+    const stubPool = {
+      query: async () => ({ rows: [{ last_seq: '123', last_processed_at: new Date() }] }),
+    };
+
+    const verification = await verifyCheckpointPersistence(stubPool, 123);
+    assert.ok(verification.persisted);
+    assert.strictEqual(verification.checkpoint.last_seq, '123');
+  });
+
+  test('Checkpoint persistence verification reports not-persisted when no row exists', async () => {
+    const stubPool = {
+      query: async () => ({ rows: [] }),
+    };
+
+    const verification = await verifyCheckpointPersistence(stubPool, 123);
+    assert.strictEqual(verification.persisted, false);
+    assert.strictEqual(verification.checkpoint, null);
   });
 
   test('createProjectionWorker factory function', async () => {

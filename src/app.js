@@ -127,6 +127,26 @@ export function createRateLimiterHealthCheck(databaseUrl) {
 }
 
 /**
+ * Routes kept out of the payment metrics (#494).
+ *
+ * `/metrics`, `/healthz` and `/readyz` are operational probes: the Docker
+ * HEALTHCHECK, the 1-minute external probe docs/OPERATIONS.md commits to, and
+ * every Kubernetes readiness poll hit them constantly, and counting that
+ * traffic into `x402_requests_total` would move the counter the payment
+ * dashboards and alerts read.
+ *
+ * The set once named `/health/ready` — a path no route in this server
+ * registers — so every readiness poll instead landed in
+ * `x402_requests_total{route="/readyz"}`. It is exported so
+ * test/observability.test.js can pin every entry to a route the app actually
+ * registers: a stale name fails CI rather than silently rejoining the counter,
+ * and a dropped name fails the probe assertions in the same file.
+ *
+ * @type {ReadonlySet<string>}
+ */
+export const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/readyz']);
+
+/**
  * Builds the Fastify app.
  *
  * Takes its collaborators rather than reaching for module state, which is what
@@ -206,7 +226,6 @@ export async function createApp(
     });
   });
 
-  const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/health/ready']);
   app.addHook('onResponse', (req, reply, done) => {
     activeRequestCount = Math.max(0, activeRequestCount - 1);
     const span = req.span;
@@ -248,7 +267,11 @@ export async function createApp(
     done?.();
   });
 
-  const audit = extras.audit ?? createAuditLogger();
+  const audit = extras.audit ?? createAuditLogger({ file: config.auditLogFile });
+  // The limiter audits trusted-CIDR bypasses (#410). Stubs used by tests have
+  // no setAudit, so this stays optional.
+  rateLimiter?.setAudit?.(audit);
+  if (typeof app.decorate === 'function') app.decorate('auditLogger', audit);
 
   const readiness =
     extras.readiness ??
@@ -472,10 +495,16 @@ export async function createApp(
 
   app.get('/supported', { onRequest: cors('public') }, async () => facilitator.getSupported());
 
-  app.get('/usage', { preHandler: requireApiKeyStrict }, async req => {
-    annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/usage' });
-    return rateLimiter.getUsage(req.keyId);
-  });
+  app.get(
+    '/usage',
+    // Authenticated class, as src/cors.js and docs/AUTHENTICATION.md both
+    // classify it: a key-carrying route never defaults open.
+    { onRequest: cors('authenticated'), preHandler: requireApiKeyStrict },
+    async req => {
+      annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/usage' });
+      return rateLimiter.getUsage(req.keyId);
+    },
+  );
 
   if (serveMetrics) {
     app.get('/metrics', async (_req, reply) => {
@@ -622,47 +651,23 @@ export async function createApp(
           return rejectRateLimited(req, reply, '/settle', checkSettle, audit);
 
         const idempotencyKey = settlementStore.deriveIdempotencyKey(req);
-        const existingRecord = await settlementStore.get(idempotencyKey);
+        // Tenant-safe store key: keyed callers scope the idempotency namespace
+        // by their API key so one caller cannot read another caller's settled
+        // response. Open-mode callers (req.keyId === undefined) keep the
+        // byte-identical derivation so single-process dedup is unchanged.
+        const storeKey = req.keyId ? `${req.keyId}:${idempotencyKey}` : idempotencyKey;
+        const existingRecord = await settlementStore.get(storeKey);
 
         if (existingRecord) {
-          if (existingRecord.state === 'settled') {
-            const limited = handleRateLimit(reply, checkSettle);
-            if (limited) return limited;
-            if (existingRecord.response) {
-              const respPayload =
-                typeof existingRecord.response === 'string'
-                  ? JSON.parse(existingRecord.response)
-                  : existingRecord.response;
-              return reply.send(respPayload);
-            }
-            return reply.send({
-              success: true,
-              transaction: existingRecord.tx_hash,
-              network: existingRecord.network,
-              payer: existingRecord.payer,
-            });
-          }
-          if (existingRecord.state === 'submitted' || existingRecord.state === 'unknown') {
-            const limited = handleRateLimit(reply, checkSettle);
-            if (limited) return limited;
-            return reply.send({
-              success: false,
-              errorReason: 'submitted_outcome_unknown',
-              errorMessage:
-                existingRecord.error_message || 'settlement in progress or outcome unknown',
-              transaction: existingRecord.tx_hash || '',
-              network: existingRecord.network,
-            });
-          }
-          if (existingRecord.state === 'failed') {
-            const RETRYABLE = new Set([
-              'rate_limited',
-              'catalog_rate_limited',
-              'soroban_rpc_unreachable',
-              'lock_timeout',
-              'request_timeout',
-            ]);
-            if (!RETRYABLE.has(existingRecord.error_reason)) {
+          // A record whose key_id is set and differs from this caller must not
+          // be replayed, mirroring the status-read scoping at
+          // GET /settlements/:idempotencyKey (src/app.js:845-847).
+          const ownedByThisCaller =
+            !existingRecord.key_id ||
+            !req.keyId ||
+            existingRecord.key_id.toUpperCase() === req.keyId.toUpperCase();
+          if (ownedByThisCaller) {
+            if (existingRecord.state === 'settled') {
               const limited = handleRateLimit(reply, checkSettle);
               if (limited) return limited;
               if (existingRecord.response) {
@@ -673,18 +678,56 @@ export async function createApp(
                 return reply.send(respPayload);
               }
               return reply.send({
+                success: true,
+                transaction: existingRecord.tx_hash,
+                network: existingRecord.network,
+                payer: existingRecord.payer,
+              });
+            }
+            if (existingRecord.state === 'submitted' || existingRecord.state === 'unknown') {
+              const limited = handleRateLimit(reply, checkSettle);
+              if (limited) return limited;
+              return reply.send({
                 success: false,
-                errorReason: existingRecord.error_reason,
-                errorMessage: existingRecord.error_message,
+                errorReason: 'submitted_outcome_unknown',
+                errorMessage:
+                  existingRecord.error_message || 'settlement in progress or outcome unknown',
                 transaction: existingRecord.tx_hash || '',
                 network: existingRecord.network,
               });
+            }
+            if (existingRecord.state === 'failed') {
+              const RETRYABLE = new Set([
+                'rate_limited',
+                'catalog_rate_limited',
+                'soroban_rpc_unreachable',
+                'lock_timeout',
+                'request_timeout',
+              ]);
+              if (!RETRYABLE.has(existingRecord.error_reason)) {
+                const limited = handleRateLimit(reply, checkSettle);
+                if (limited) return limited;
+                if (existingRecord.response) {
+                  const respPayload =
+                    typeof existingRecord.response === 'string'
+                      ? JSON.parse(existingRecord.response)
+                      : existingRecord.response;
+                  return reply.send(respPayload);
+                }
+                return reply.send({
+                  success: false,
+                  errorReason: existingRecord.error_reason,
+                  errorMessage: existingRecord.error_message,
+                  transaction: existingRecord.tx_hash || '',
+                  network: existingRecord.network,
+                });
+              }
             }
           }
         }
 
         await settlementStore.save({
-          idempotency_key: idempotencyKey,
+          idempotency_key: storeKey,
           network: body.paymentRequirements.network,
           scheme: body.paymentRequirements.scheme,
           payer: body.paymentPayload?.payer ?? null,
@@ -698,12 +741,24 @@ export async function createApp(
         const idemReq = {
           get: name => req.headers[name.toLowerCase()],
           body: req.body,
+          keyId: req.keyId ?? null,
         };
         const replay = idempotency ? await idempotency.begin(idempotency.keyFor(idemReq)) : null;
         if (replay?.replayed) {
           const limited = handleRateLimit(reply, checkSettle);
           if (limited) return limited;
+          reply.header('Idempotency-Replay', 'true');
           return reply.code(replay.statusCode).send(replay.response);
+        }
+        if (replay?.conflict) {
+          const limited = handleRateLimit(reply, checkSettle);
+          if (limited) return limited;
+          reply.header('Idempotency-Replay', 'false');
+          return reply.code(409).send({
+            success: false,
+            errorReason: 'idempotency_conflict',
+            errorMessage: 'a request with this Idempotency-Key is already in flight',
+          });
         }
 
         const lockKey = distributedLock ? lockKeyFor(body.paymentPayload) : null;
@@ -751,7 +806,7 @@ export async function createApp(
                   : null;
 
                 const enqueued = await settlementStore.settleAndEnqueue(
-                  idempotencyKey,
+                  storeKey,
                   { tx_hash: result.transaction, response: result },
                   event,
                 );
@@ -801,7 +856,7 @@ export async function createApp(
                 return result;
               }
 
-              await settlementStore.updateState(idempotencyKey, 'failed', {
+              await settlementStore.updateState(storeKey, 'failed', {
                 tx_hash: result.transaction || null,
                 error_reason: result.errorReason || 'facilitator_error',
                 error_message: result.errorMessage || null,
@@ -892,8 +947,20 @@ export async function createApp(
           ) {
             transaction = body.paymentPayload.transaction;
           }
+          // Release our claim only when we know no transaction was submitted:
+          // a retry must be able to try again after a pre-submission failure,
+          // while an outcome-unknown claim stays held until completion.
+          if (
+            replay &&
+            !replay.replayed &&
+            !replay.conflict &&
+            errorReason !== 'submitted_outcome_unknown'
+          ) {
+            await Promise.resolve(idempotency?.fail?.(replay.key)).catch(() => {});
+          }
+
           const targetState = errorReason === 'submitted_outcome_unknown' ? 'unknown' : 'failed';
-          await settlementStore.updateState(idempotencyKey, targetState, {
+          await settlementStore.updateState(storeKey, targetState, {
             tx_hash: transaction,
             error_reason: errorReason,
             error_message: describeThrown(err),
@@ -922,10 +989,13 @@ export async function createApp(
     },
     async (req, reply) => {
       const { idempotencyKey } = req.params;
+      // Tenant-safe lookup key mirrors the write-side derivation so a caller
+      // reads only their own records under the same key they settled with.
+      const lookupKey = req.keyId ? `${req.keyId}:${idempotencyKey}` : idempotencyKey;
       const record =
         typeof settlementStore.getConsistent === 'function'
-          ? await settlementStore.getConsistent(idempotencyKey)
-          : await settlementStore.get(idempotencyKey);
+          ? await settlementStore.getConsistent(lookupKey)
+          : await settlementStore.get(lookupKey);
       if (!record) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
@@ -946,7 +1016,9 @@ export async function createApp(
     },
     async (req, reply) => {
       const { idempotencyKey } = req.params;
-      const record = await settlementStore.get(idempotencyKey);
+      // Tenant-safe lookup key mirrors the write-side derivation.
+      const lookupKey = req.keyId ? `${req.keyId}:${idempotencyKey}` : idempotencyKey;
+      const record = await settlementStore.get(lookupKey);
       if (!record) {
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
@@ -955,7 +1027,7 @@ export async function createApp(
         return reply.code(404).send({ error: 'not_found', message: 'Settlement record not found' });
       }
 
-      const events = await settlementStore.getEventLog(idempotencyKey);
+      const events = await settlementStore.getEventLog(lookupKey);
       return reply.send({ ok: true, idempotencyKey, events });
     },
   );
@@ -1276,6 +1348,27 @@ export async function createApp(
   );
   app.options('/verify', { onRequest: cors('authenticated') }, preflight('authenticated'));
   app.options('/settle', { onRequest: cors('authenticated') }, preflight('authenticated'));
+  // The authenticated GET routes: every call carries Authorization, so a
+  // browser preflights each of them — and without these routes the preflight
+  // fell through to the 404 handler, handing the caller `route_not_found`
+  // instead of a CORS verdict. The verb list is explicit because the class
+  // default (`POST, OPTIONS`) would advertise a method these routes do not
+  // serve.
+  app.options(
+    '/usage',
+    { onRequest: cors('authenticated') },
+    preflight('authenticated', 'GET, OPTIONS'),
+  );
+  app.options(
+    '/settlements/:idempotencyKey',
+    { onRequest: cors('authenticated') },
+    preflight('authenticated', 'GET, OPTIONS'),
+  );
+  app.options(
+    '/settlements/:idempotencyKey/events',
+    { onRequest: cors('authenticated') },
+    preflight('authenticated', 'GET, OPTIONS'),
+  );
 
   // ---------------------------------------------------------------------------
   // 404 and Error Handlers

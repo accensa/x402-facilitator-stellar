@@ -198,8 +198,15 @@ export async function verifyCheckpointPersistence(pool, testOffset) {
   const result = await pool.query(query);
   const row = result.rows[0];
 
+  if (!row) {
+    return {
+      persisted: false,
+      checkpoint: null,
+    };
+  }
+
   return {
-    persisted: row.last_seq === testOffset,
+    persisted: Number(row.last_seq) === Number(testOffset),
     checkpoint: row,
   };
 }

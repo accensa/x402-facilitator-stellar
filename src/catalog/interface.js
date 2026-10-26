@@ -87,6 +87,22 @@ export class CatalogStore {
   }
 
   /**
+   * Cheap catalog health snapshot (#584).
+   *
+   * The readiness probe reports catalogue trouble without failing readiness
+   * (the CATALOG RULE in src/readiness.js), and this is the store-side half of
+   * that branch: a pure in-process flag read, so a probe never waits on a
+   * dependency. It must never throw and must never touch the network — a
+   * readiness check that can fail loudly has failed the wrong way.
+   *
+   * @returns {{ok: boolean, reason?: string}} `ok` with a short `reason` when
+   *   the store is not healthy.
+   */
+  healthCheck() {
+    return { ok: true };
+  }
+
+  /**
    * Flush any in-flight background tasks (e.g. embeddings).
    * @returns {Promise<void>}
    */

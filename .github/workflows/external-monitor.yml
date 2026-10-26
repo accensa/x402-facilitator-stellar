@@ -4,7 +4,8 @@ name: external-monitor
 #
 # Runs FROM GITHUB'S INFRASTRUCTURE, i.e. outside our own — so an outage on our
 # side cannot also silence its own monitor. It executes monitoring/probes.mjs
-# against the public endpoint and, on failure, opens (or updates) an incident.
+# against the public endpoint and, on failure, posts to ALERT_WEBHOOK_URL, emits a
+# ::error:: annotation, and records incidents in monitoring/out/status.json.
 #
 # Required repo secrets:
 #   FACILITATOR_URL        public endpoint to probe (e.g. https://facilitator.example.com)
@@ -20,7 +21,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   probe:

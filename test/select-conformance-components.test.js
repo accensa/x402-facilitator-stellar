@@ -24,6 +24,8 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createE2eFixture,
@@ -258,6 +260,44 @@ describe('conformance helper utilities', () => {
       excluded: '',
       excluded_count: '0',
     });
+  });
+
+  test('parseGithubOutput rejects a line without = instead of mis-keying it', () => {
+    assert.throws(
+      () => parseGithubOutput('servers=ts/express\nnot-a-pair\n'),
+      /malformed GITHUB_OUTPUT line 2: expected 'key=value', got "not-a-pair"/,
+    );
+  });
+
+  test('executeSelector reports a timed-out selector as a harness fault', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
+    const hang = join(dir, 'hang.mjs');
+    writeFileSync(hang, 'setInterval(() => {}, 1000);\n');
+
+    // Even with expectFailure the run must throw: a killed process has no
+    // exit status, so it says nothing about the script under test.
+    assert.throws(
+      () => executeSelector(hang, dir, null, { expectFailure: true, timeoutMs: 200 }),
+      /killed by SIGKILL before it exited \(timeout 200ms\).*harness fault/,
+    );
+  });
+
+  test('executeSelector names a malformed report and keeps the selector output', t => {
+    const dir = makeE2eDir();
+    t.after(() => cleanupE2eFixture(dir));
+    const broken = join(dir, 'broken.mjs');
+    writeFileSync(
+      broken,
+      "import { appendFileSync } from 'node:fs';\n" +
+        "appendFileSync(process.env.GITHUB_OUTPUT, 'servers\\n');\n" +
+        "console.log('wrote a bad report');\n",
+    );
+
+    assert.throws(
+      () => executeSelector(broken, dir, null),
+      /malformed GITHUB_OUTPUT line 1[\s\S]*wrote a bad report/,
+    );
   });
 
   test('makeSetupLog formats clean setup log without failures', t => {

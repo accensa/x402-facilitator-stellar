@@ -111,6 +111,11 @@ export function makeSetupLog(dir, failures = [], { total = 15 } = {}) {
 /**
  * Parses GITHUB_OUTPUT formatted text into key-value map.
  *
+ * A non-empty line without `=` is a malformed report, which is exactly the
+ * class of selector bug these tests exist to catch, so it throws with the line
+ * number instead of keying a field on a bogus prefix that a later assertion
+ * would then misreport.
+ *
  * @param {string} filePathOrContent
  * @returns {Record<string, string>}
  */
@@ -119,15 +124,18 @@ export function parseGithubOutput(filePathOrContent) {
     ? readFileSync(filePathOrContent, 'utf8')
     : filePathOrContent;
 
-  return Object.fromEntries(
-    content
-      .split('\n')
-      .filter(Boolean)
-      .map(line => {
-        const eq = line.indexOf('=');
-        return [line.slice(0, eq), line.slice(eq + 1)];
-      }),
-  );
+  const outputs = {};
+  content.split('\n').forEach((line, i) => {
+    if (line === '') return;
+    const eq = line.indexOf('=');
+    if (eq === -1) {
+      throw new Error(
+        `malformed GITHUB_OUTPUT line ${i + 1}: expected 'key=value', got ${JSON.stringify(line)}`,
+      );
+    }
+    outputs[line.slice(0, eq)] = line.slice(eq + 1);
+  });
+  return outputs;
 }
 
 /**
@@ -141,13 +149,24 @@ export function parseGithubOutput(filePathOrContent) {
  * @param {boolean} [opts.expectFailure=false]
  * @param {boolean} [opts.githubOutput=true]
  * @param {Record<string, string>} [opts.env={}]
- * @returns {{ stdout: string, outputs: Record<string, string>, failed: boolean }}
+ * @param {number} [opts.timeoutMs=30000] - Kills a selector that never exits.
+ * @returns {{ stdout: string, stderr: string, outputs: Record<string, string>, failed: boolean }}
+ * @throws {Error} When the selector could not be started or was killed by a
+ *   signal (the timeout). Neither carries an exit code, so treating them as
+ *   "the script exited non-zero" would let a test that expects failure pass on
+ *   a broken harness.
  */
 export function executeSelector(
   scriptPath,
   e2eDir,
   setupLog,
-  { family = 'stellar', expectFailure = false, githubOutput = true, env = {} } = {},
+  {
+    family = 'stellar',
+    expectFailure = false,
+    githubOutput = true,
+    env = {},
+    timeoutMs = 30_000,
+  } = {},
 ) {
   const outputFile = join(e2eDir, 'github-output.txt');
   writeFileSync(outputFile, '');
@@ -157,26 +176,46 @@ export function executeSelector(
   if (setupLog) args.push(`--setup-log=${setupLog}`);
 
   let stdout = '';
+  let stderr = '';
   let failed = false;
   try {
     stdout = execFileSync(process.execPath, args, {
       encoding: 'utf8',
       env: { ...process.env, GITHUB_OUTPUT: outputFile, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
     });
   } catch (err) {
+    if (typeof err.status !== 'number') {
+      const why = err.signal
+        ? `was killed by ${err.signal} before it exited (timeout ${timeoutMs}ms)`
+        : `could not be started (${err.code ?? err.message})`;
+      throw new Error(
+        `the selector ${why}, which is a harness fault, not a verdict on the script.\n` +
+          `command: ${process.execPath} ${args.join(' ')}\n` +
+          `--- stdout ---\n${err.stdout ?? ''}\n--- stderr ---\n${err.stderr ?? ''}`,
+      );
+    }
     failed = true;
-    stdout = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    stderr = err.stderr ?? '';
+    stdout = `${err.stdout ?? ''}${stderr}`;
   }
 
   assert.equal(
     failed,
     expectFailure,
-    `expected script to ${expectFailure ? 'fail' : 'succeed'} but it did not.\nOutput:\n${stdout}`,
+    `expected script to ${expectFailure ? 'fail' : 'succeed'} but it did not.\n` +
+      `command: ${process.execPath} ${args.join(' ')}\nOutput:\n${stdout}`,
   );
 
-  const outputs = parseGithubOutput(outputFile);
-  return { stdout, outputs, failed };
+  let outputs;
+  try {
+    outputs = parseGithubOutput(readFileSync(outputFile, 'utf8'));
+  } catch (err) {
+    throw new Error(`${err.message}\nselector output:\n${stdout}`);
+  }
+  return { stdout, stderr, outputs, failed };
 }
 
 /**

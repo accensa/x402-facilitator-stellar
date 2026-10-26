@@ -270,7 +270,9 @@ Security-relevant events — settlements (with transaction hash), verifications,
 catalog writes, authentication failures, and rate-limit rejections — are
 recorded as structured JSON lines with `"channel": "audit"`, separable from
 diagnostic logs. Set `AUDIT_LOG_FILE` to mirror them to a file with its own
-retention handling. See `docs/AUDIT.md` for the event catalogue and retention.
+retention handling. If that path cannot be written, the service logs one
+warning and keeps writing audit records to stdout; it does not fail boot. See
+`docs/AUDIT.md` for the event catalogue and retention.
 
 ## Horizontal Scalability
 

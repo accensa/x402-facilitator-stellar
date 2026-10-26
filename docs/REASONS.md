@@ -13,7 +13,7 @@ Reasons are separated into **Local Transport Reasons** (emitted by this server) 
 | `missing_auth_header` | The Authorization header is missing from the request. | ❌ No | Include a valid API key |
 | `malformed_auth_header` | The Authorization header is malformed or invalid. | ❌ No | Fix header format (Bearer token) |
 | `invalid_api_key` | The provided API key is invalid or unauthorized. | ❌ No | Verify your API key |
-| `open_mode_usage_forbidden` | The `/usage` route requires an API key, but the server is running in open mode. | ❌ No | Run the facilitator in authenticated mode |
+| `open_mode_usage_forbidden` | The /usage route requires an API key, but the server is running in open mode. | ❌ No | Run the facilitator in authenticated mode |
 | `rate_limited` | The caller has exceeded their request rate limit. | ✅ Yes | Wait for `Retry-After` seconds and retry |
 | `catalog_rate_limited` | The caller has exceeded their cataloging rate limit. | ✅ Yes | Wait and retry |
 | `catalog_partial` | The resource was cataloged, but some optional fields were dropped. | ❌ No | Check formatting of dropped fields |
