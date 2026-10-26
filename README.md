@@ -8,6 +8,9 @@
     <img src="https://img.shields.io/badge/stellar-testnet-success.svg" alt="Stellar testnet" />
     <img src="https://img.shields.io/badge/x402-v2-blue.svg" alt="x402 v2" />
     <img src="https://img.shields.io/badge/status-page-blue.svg" alt="Status page" />
+    <a href="https://scorecard.dev/viewer/?uri=github.com/accensa/x402-facilitator-stellar">
+      <img src="https://api.scorecard.dev/projects/github.com/accensa/x402-facilitator-stellar/badge" alt="OpenSSF Scorecard" />
+    </a>
    </p>
   <p>
     <a href="#conformance"><strong>Conformance</strong></a> ·
