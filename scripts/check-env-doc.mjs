@@ -215,6 +215,27 @@ const ALLOWLIST = [
     snippet: 'process.env.SMART_ACCOUNT_WASM',
     why: 'script-only: npm run e2e:smart-account reads it for the contract wasm path; the service in src/ never does',
   },
+  {
+    names: ['CLIENT_STELLAR_PRIVATE_KEY'],
+    kind: 'script-only',
+    file: 'scripts/prepare-testnet-usdc.mjs',
+    snippet: 'process.env.CLIENT_STELLAR_PRIVATE_KEY',
+    why: 'script-only: npm run testnet:usdc reads it for the payer key; the service in src/ never does',
+  },
+  {
+    names: ['SERVER_STELLAR_ADDRESS'],
+    kind: 'script-only',
+    file: 'scripts/prepare-testnet-usdc.mjs',
+    snippet: 'process.env.SERVER_STELLAR_ADDRESS',
+    why: 'script-only: npm run testnet:usdc reads it for the payee address; the service in src/ never does',
+  },
+  {
+    names: ['SERVER_STELLAR_PRIVATE_KEY'],
+    kind: 'script-only',
+    file: 'scripts/prepare-testnet-usdc.mjs',
+    snippet: 'process.env.SERVER_STELLAR_PRIVATE_KEY',
+    why: 'script-only: npm run testnet:usdc reads it to give the payee a USDC trustline; the service in src/ never does',
+  },
 ];
 
 /** Recursively lists the .js/.mjs/.cjs files under dir. */
