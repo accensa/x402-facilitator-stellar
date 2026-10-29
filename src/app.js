@@ -19,6 +19,7 @@ import { annotateSpan, withRequestSpan, tracedSchemeCall } from './tracing.js';
 import { createCorsHook, createPreflightHandler } from './cors.js';
 import { createAuthMiddlewareWithJwt } from './auth-http.js';
 import { handleRateLimit, rejectRateLimited } from './rate-limit-http.js';
+import { createPactSubmitter } from './pact-scheme.js';
 import { applyDiscoveryCache } from './catalog/discovery-cache.js';
 import {
   BODY_LIMIT_BYTES,
@@ -177,6 +178,8 @@ export async function createApp(
     failoverHealth = null,
     settlementStore = extras.settlementStore ?? buildSettlementStore(config),
     assetCaches = extras.assetCaches ?? {},
+    // network → current PactStellarScheme (or undefined); read per request so key refreshes apply.
+    pactSchemeFor = () => undefined,
   } = extras;
 
   // Observability collaborators.
@@ -494,6 +497,50 @@ export async function createApp(
   });
 
   app.get('/supported', { onRequest: cors('public') }, async () => facilitator.getSupported());
+
+  // POST /pact/submit (docs/scheme_pact_stellar.md): fee-sponsored follow-up calls on the
+  // configured Pactwright `pact` contract. Same API keys, rate limits and daily fee budget as
+  // /settle; the facilitator only pays the fee and is never a party to the call.
+  app.post(
+    '/pact/submit',
+    {
+      onRequest: cors('authenticated'),
+      preHandler: requireApiKey,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['network', 'transaction'],
+          additionalProperties: false,
+          properties: {
+            network: { type: 'string', minLength: 1, maxLength: 64 },
+            transaction: { type: 'string', minLength: 1, maxLength: 65_536 },
+          },
+        },
+      },
+      attachValidation: true,
+    },
+    async (req, reply) => {
+      if (req.validationError) {
+        return reply.code(400).send({
+          success: false,
+          errorReason: 'invalid_request',
+          errorMessage: req.validationError.message,
+        });
+      }
+      const { network, transaction } = req.body;
+      const scheme = pactSchemeFor(network);
+      if (!scheme) {
+        return reply.code(404).send({ success: false, errorReason: 'pact_scheme_not_configured' });
+      }
+      const check = await rateLimiter.checkSettle(req, network);
+      if (!check.allowed) return rejectRateLimited(req, reply, '/pact/submit', check, audit);
+      const result = await createPactSubmitter(scheme).submit(network, transaction);
+      const recorded = await rateLimiter.recordSettle(req, result.success ? result.feeStroops : 0);
+      const limited = handleRateLimit(reply, recorded, check);
+      if (limited) return limited;
+      return reply.code(result.success ? 200 : 400).send(result);
+    },
+  );
 
   app.get(
     '/usage',

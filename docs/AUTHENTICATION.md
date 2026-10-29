@@ -27,6 +27,7 @@ This table is the authoritative answer to "what is authenticated here". It is au
 | `DELETE /discovery/resource` | API key | yes (catalog bucket) | open | Catalog removal, keyed by the `url` query parameter with optional `toolName` (#221): deletes a listing, so it is metered and audited like the write. Any valid key may remove any listing — keys carry no owner, so there is no ownership to enforce. `404` with reason `resource_not_found` when nothing matched. |
 | `POST /verify` | API key | yes (verify bucket) | open | Sponsors verification work; consumes resources, so it is metered. |
 | `POST /settle` | API key | yes (settle bucket) | open | Sponsors transaction fees; the expensive, money-moving route, so it is metered and audited. |
+| `POST /pact/submit` | API key | yes (settle bucket) | open | Sponsors fees for follow-up calls on a configured Pactwright `pact` contract (allow-listed functions only; docs/scheme_pact_stellar.md). Shares `/settle`'s daily fee budget. |
 | `GET /settlements/:idempotencyKey` | API key | no | open | Settlement status read, scoped to the caller's `keyId`. |
 | `GET /settlements/:idempotencyKey/events` | API key | no | open | Ordered event history for one settlement (#130) — the audit trail behind the status read, scoped to the caller's `keyId`. |
 | `GET /usage` | API key — **strict** | n/a (reads the meter) | **refused** | The one route that refuses open mode: it exists to meter authenticated callers, and with no keys there is nothing to meter. Returns `401` with reason `open_mode_usage_forbidden`. |
@@ -110,7 +111,7 @@ Cross-origin access is decided **per route class**, because the two classes carr
 | Route class | Routes | Default policy |
 | --- | --- | --- |
 | Public reads | `GET /supported`, `GET /discovery/resources`, `GET /discovery/resource`, `GET /discovery/search` (and `/healthz`) | Any origin. These are unauthenticated and carry no credential worth protecting — a browser-based agent or catalog explorer needs them. |
-| Authenticated | `POST /verify`, `POST /settle`, `GET /usage`, `GET /settlements/:idempotencyKey`, `POST /discovery/resources`, `DELETE /discovery/resource` | **No grant by default.** These routes carry an API key; a permissive policy would let any web page send a caller's key somewhere it should not go. |
+| Authenticated | `POST /verify`, `POST /settle`, `POST /pact/submit`, `GET /usage`, `GET /settlements/:idempotencyKey`, `POST /discovery/resources`, `DELETE /discovery/resource` | **No grant by default.** These routes carry an API key; a permissive policy would let any web page send a caller's key somewhere it should not go. |
 
 Allowed origins for the authenticated class are configured via `CORS_ALLOWED_ORIGINS` as a comma-separated list:
 

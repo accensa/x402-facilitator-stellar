@@ -326,6 +326,44 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /pact/submit:
+    post:
+      tags: [payments]
+      summary: Sponsor a follow-up call on a Pactwright pact
+      description: |
+        Fee-sponsored submission of one call on the configured Pactwright
+        `pact` contract (docs/scheme_pact_stellar.md): `record_verdict`,
+        `settle`, `close_meter`, `release` or `extend_pact_ttl`. The caller
+        signs any auth the call needs; the facilitator only pays the fee and
+        is never a party. Same API keys, rate limits and daily fee budget as
+        `/settle`. 404 when no pact contract is configured for the network.
+      security:
+        - ApiKeyAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PactSubmitRequest'
+      responses:
+        '200':
+          description: Submitted and confirmed on-chain.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PactSubmitResponse'
+        '400':
+          description: Rejected (`errorReason` names the rule) or invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PactSubmitResponse'
+        '404':
+          description: The `pact` scheme is not configured for this network.
+        '429':
+          description: Rate limited or the daily fee budget is spent.
+
   /settlements/{idempotencyKey}:
     get:
       tags: [payments]
@@ -1457,6 +1495,39 @@ components:
         network:
           type: [string, 'null']
         payer:
+          type: string
+      additionalProperties: true
+
+    PactSubmitRequest:
+      type: object
+      required: [network, transaction]
+      additionalProperties: false
+      properties:
+        network:
+          type: string
+          examples: ['stellar:testnet']
+        transaction:
+          type: string
+          description: Base64 XDR transaction with one invokeHostFunction on the pact contract.
+
+    PactSubmitResponse:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        transaction:
+          type: string
+        network:
+          type: string
+        function:
+          type: string
+        feeStroops:
+          type: integer
+        errorReason:
+          type: string
+          description: '`invalid_pact_submit_*` or `pact_submit_*` (docs/scheme_pact_stellar.md §6).'
+        errorMessage:
           type: string
       additionalProperties: true
 

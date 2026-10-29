@@ -134,6 +134,10 @@ keeps open-mode callers out of each other's buckets.
 | `STELLAR_RPC_URL_PUBNET` | Yes (if pubnet) | A provider URL is required for pubnet (see RPC Provider Decision). |
 | `MAX_TX_FEE_STROOPS` | No | Fee ceiling per settlement on testnet (default `50000`). |
 | `MAX_TX_FEE_STROOPS_PUBNET`| No | Fee ceiling per settlement on pubnet (default `50000`). |
+| `PACT_CONTRACT_ID` | No | Pactwright `pact` contract on testnet; enables the `pact` scheme and `POST /pact/submit` there ([spec](scheme_pact_stellar.md)). |
+| `PACT_CONTRACT_ID_PUBNET` | No | Same, on pubnet. |
+| `PACT_MAX_TX_FEE_STROOPS` | No | Fee ceiling for `pact` transactions on testnet (default `250000`; `open` pays storage rent). |
+| `PACT_MAX_TX_FEE_STROOPS_PUBNET` | No | Same, on pubnet (default `250000`). |
 | `HORIZON_URL` | No | Horizon base URL for `/fee_stats` dynamic fee estimation on testnet (default `https://horizon-testnet.stellar.org`). Stats are cached for 5s; estimates are clamped to `MAX_TX_FEE_STROOPS`. |
 | `HORIZON_URL_PUBNET` | No | Same, for pubnet (default `https://horizon.stellar.org`). |
 | `FACILITATOR_API_KEYS` | No | Comma-separated API keys. Unset means open (correct for free testnet). |

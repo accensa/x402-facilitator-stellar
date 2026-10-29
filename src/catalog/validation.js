@@ -270,6 +270,8 @@ function validatePolicy(paymentPayload, paymentRequirements, result, assetDecima
     extensions: extracted.extensions,
     payTo: paymentRequirements.payTo,
   };
+  const pactwright = pactwrightListing(paymentRequirements);
+  if (pactwright) result.resource.pactwright = pactwright;
 
   if (result.resource.url) {
     try {
@@ -294,6 +296,27 @@ function validatePolicy(paymentPayload, paymentRequirements, result, assetDecima
  * directly; SDK declarations are adapted into the same Bazaar extension shape.
  * Seller-only guidance is returned as advisories and never changes admission.
  */
+/**
+ * The Pactwright terms a buyer compares before paying (docs/scheme_pact_stellar.md): `escrow`
+ * for the `pact` scheme, `exact-refund` for `exact` with a seller RefundVault. Only well-typed
+ * fields are kept; anything else is dropped rather than shown.
+ */
+export function pactwrightListing(paymentRequirements) {
+  const terms = paymentRequirements?.extra?.pactwright;
+  if (!terms || typeof terms !== 'object' || Array.isArray(terms)) return undefined;
+  const listing = { mode: paymentRequirements.scheme === 'pact' ? 'escrow' : 'exact-refund' };
+  if (typeof terms.verifier === 'string' && /^[0-9a-f]{64}$/i.test(terms.verifier)) {
+    listing.verifier = terms.verifier.toLowerCase();
+  }
+  if (terms.silence === 'refund' || terms.silence === 'pay') listing.silence = terms.silence;
+  if (Number.isInteger(terms.refundWindowLedgers) && terms.refundWindowLedgers >= 0) {
+    listing.refundWindowLedgers = terms.refundWindowLedgers;
+  }
+  if (typeof terms.float === 'string' && /^\d+(\.\d{1,7})?$/.test(terms.float))
+    listing.float = terms.float;
+  return listing;
+}
+
 export function validateDiscoveryPolicy(input, paymentRequirements = {}, assetDecimalsMap = null) {
   const result = createResult();
   if (!input || typeof input !== 'object') {

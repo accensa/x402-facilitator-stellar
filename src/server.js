@@ -112,7 +112,7 @@ const vaultDatabase =
 // silently falling back to per-process memory would double every limit at two
 // replicas and reset the fee ceiling at every deploy — the bug this fixes.
 
-const { facilitator, signers } = buildFacilitator(config);
+const { facilitator, signers, schemes } = buildFacilitator(config);
 
 // Store selection, in order of preference:
 //   1. RATE_LIMIT_STORE=crdt (#126): CRDT G-Counter store for multi-region
@@ -275,6 +275,7 @@ const app = await createApp(config, facilitator, rateLimiter, catalog, idempoten
   logger: createRequestLog({ level: config.logLevel }),
   metrics,
   signers,
+  pactSchemeFor: network => schemes[network]?.pactScheme ?? undefined,
   ipPseudonymizer,
   // When METRICS_PORT is set the metrics listener below owns /metrics; keep it
   // off the public listener so it cannot be scraped by untrusted callers.
