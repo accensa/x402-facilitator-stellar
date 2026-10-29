@@ -41,6 +41,16 @@
    - *Error: Trustline missing.* See [Trustlines](#trustlines).
    - *Error: Invalid signature.* Ensure the agent signs with the correct private key.
 
+## Escrow payments (`pact` scheme)
+
+To let buyers pay into escrow instead of paying you directly, offer the `pact` scheme next to
+`exact` on facilitators that configure a Pactwright `pact` contract (`/supported` lists it with
+`extra.pactContract`). Put the frozen condition and your silence policy in
+`extra.pactwright` (for example `{ "condition": {…}, "silence": "refund" }`); the facilitator
+checks that the buyer's `open` commits to exactly that. You are paid when a verifier's verdict
+allows it, by calling `settle`, which `POST /pact/submit` can sponsor. Full rules:
+[`scheme_pact_stellar.md`](scheme_pact_stellar.md).
+
 ## Trustlines
 
 On Stellar an account can only hold — and therefore only receive — an issued asset (USDC, any SEP-41 token) once it has authorized the issuer with a **trustline** (`changeTrust`). Native XLM needs no trustline.

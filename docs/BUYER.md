@@ -288,7 +288,16 @@ npm start   # requires the facilitator AND the http-seller example running
 
 ---
 
-## 6. Going further
+## 6. Escrow payments (`pact` scheme)
+
+When a seller offers `scheme: "pact"`, pay by signing a `pact.open` on the contract named in
+`extra.pactContract`, with the seller as `payTo`, the price as `cap`, and the hash of the
+condition in `extra.pactwright`. Sign only the auth entry, exactly as for `exact`; the
+facilitator pays the fee. Your money waits in escrow until a verifier's verdict, and comes back
+under the agreed silence policy if no verdict arrives. Rules and rejection codes:
+[`scheme_pact_stellar.md`](scheme_pact_stellar.md).
+
+## 7. Going further
 
 - **Spending controls in your own loop** — the script in §3 signs exactly the terms the
   server offered; never sign terms you did not read. Check `maxAmountRequired` against

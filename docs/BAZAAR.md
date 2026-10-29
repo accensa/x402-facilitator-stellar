@@ -174,6 +174,7 @@ The validation rules for resources submitted to the catalog are as follows:
 | `iconUrl` | Invalid or private IP | **Soft drop** (field removed) | Protects against SSRF tracking pixels and local probes. |
 | `description` | Contains HTML or oversized | **Truncated** (up to 200 chars) | Prevents script injection and limits storage impact. |
 | `tags` | Too many tags or oversized | **Filtered** (invalid tags dropped) | Prevents tag flooding and index bloat. |
+| `pactwright` | From `extra.pactwright`; any field of the wrong type | **Field dropped** (only `mode`, `verifier`, `silence`, `refundWindowLedgers`, `float` are kept) | Lets buyers compare Pactwright escrow / refund terms before paying ([`scheme_pact_stellar.md`](scheme_pact_stellar.md)) without storing arbitrary seller JSON. |
 
 **Catalog limits:**
 - **Rate Limit:** Catalog operations are limited per payer IP to 10 requests per minute (`catalog_rpm` in config).

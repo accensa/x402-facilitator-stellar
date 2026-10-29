@@ -5,6 +5,7 @@
  */
 import { x402Facilitator } from '@x402/core/facilitator';
 import { ExactStellarScheme } from '@x402/stellar/exact/facilitator';
+import { PactStellarScheme } from './pact-scheme.js';
 import { createEd25519Signer } from '@x402/stellar';
 import { TESTNET, PUBNET } from './config.js';
 import { signerMetrics } from './metrics.js';
@@ -106,7 +107,17 @@ export function buildFacilitator(config) {
         feeBumpSigner,
         selectSigner,
       });
-      return { scheme };
+      // The `pact` scheme is offered only where a pact contract is configured.
+      const pactScheme = netConfig.pactContractId
+        ? new PactStellarScheme(signersForScheme, {
+            pactContracts: { [network]: netConfig.pactContractId },
+            rpcConfig: netConfig.rpcUrl ? { url: netConfig.rpcUrl } : undefined,
+            maxTransactionFeeStroops: netConfig.pactMaxTransactionFeeStroops,
+            feeBumpSigner,
+            selectSigner,
+          })
+        : null;
+      return { scheme, pactScheme };
     };
 
     const initial = keyManager.snapshot();
@@ -122,9 +133,11 @@ export function buildFacilitator(config) {
         entry => entry.signer.address,
       );
       facilitator.register(network, next.scheme);
+      if (next.pactScheme) facilitator.register(network, next.pactScheme);
     };
     keyManager.start();
     facilitator.register(network, schemes[network].scheme);
+    if (schemes[network].pactScheme) facilitator.register(network, schemes[network].pactScheme);
   }
 
   return { facilitator, signers, feeBumpSigners, keyManagers, feeEstimators, schemes, assetCaches };

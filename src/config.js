@@ -105,6 +105,29 @@ function nonNegativeInt(value, fallback) {
   return Math.floor(n);
 }
 
+/**
+ * Optional Pactwright `pact` contract for the `pact` scheme (docs/scheme_pact_stellar.md).
+ * Unset means the scheme is not offered on that network.
+ */
+function parsePactContract(value, key) {
+  const raw = value?.trim();
+  if (!raw) return null;
+  if (!StrKey.isValidContract(raw)) {
+    throw new Error(`${key} must be a Soroban contract id (starts with C).`);
+  }
+  return raw;
+}
+
+/** `pact.open` pays storage rent, so it needs a higher fee ceiling than a transfer. */
+function parsePactFeeCeiling(value, key) {
+  return parsePositiveInt(value, {
+    name: key,
+    defaultValue: 250_000,
+    min: 100,
+    max: 10_000_000,
+  });
+}
+
 export function resolveConfig(env = process.env) {
   const testnetSecrets = parseSecrets(env, 'FACILITATOR_SECRETS', 'FACILITATOR_SECRET');
   const testnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET');
@@ -125,6 +148,11 @@ export function resolveConfig(env = process.env) {
       }),
       keyManagerUrl: env.KEY_MANAGER_URL || null,
       keyManagerPollIntervalMs: Number(env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0),
+      pactContractId: parsePactContract(env.PACT_CONTRACT_ID, 'PACT_CONTRACT_ID'),
+      pactMaxTransactionFeeStroops: parsePactFeeCeiling(
+        env.PACT_MAX_TX_FEE_STROOPS,
+        'PACT_MAX_TX_FEE_STROOPS',
+      ),
     },
   };
 
@@ -297,6 +325,11 @@ export function resolveConfig(env = process.env) {
         max: 10_000_000,
       }),
       keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
+      pactContractId: parsePactContract(env.PACT_CONTRACT_ID_PUBNET, 'PACT_CONTRACT_ID_PUBNET'),
+      pactMaxTransactionFeeStroops: parsePactFeeCeiling(
+        env.PACT_MAX_TX_FEE_STROOPS_PUBNET,
+        'PACT_MAX_TX_FEE_STROOPS_PUBNET',
+      ),
       keyManagerPollIntervalMs: Number(
         env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
       ),

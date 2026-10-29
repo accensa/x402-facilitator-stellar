@@ -15,6 +15,18 @@ pinned.
 
 ### Added
 
+- The `pact` scheme for Pactwright escrow payments (`src/pact-scheme.js`,
+  [`docs/scheme_pact_stellar.md`](docs/scheme_pact_stellar.md)): a buyer-signed
+  `pact.open` is verified (configured contract, `seller == payTo`, `cap == amount`,
+  frozen condition hash, silence policy, exactly one `buyer → pact` transfer, auth
+  tree, unused `pact_id`, seller trustline) and settled with a sponsored fee through
+  the existing `/verify` and `/settle`. `POST /pact/submit` sponsors the follow-up
+  calls (`record_verdict`, `settle`, `close_meter`, `release`, `extend_pact_ttl`) on
+  the configured contract only, under `/settle`'s API keys, rate limits and fee
+  budget. Opt in per network with `PACT_CONTRACT_ID` / `PACT_CONTRACT_ID_PUBNET`;
+  `PACT_MAX_TX_FEE_STROOPS` (default 250000) covers `open`'s storage rent. Catalog
+  listings carry a `pactwright` summary (mode, verifier, silence, refund window,
+  float). `exact` is unchanged.
 - Dynamic fee estimation from Horizon `/fee_stats`: p50/p90/p99 fee rates cached
   for 5s, a bid chosen from request priority and deadline, and a strict clamp to
   `MAX_TX_FEE_STROOPS`. Stale stats (or the protocol minimum) are used if Horizon
