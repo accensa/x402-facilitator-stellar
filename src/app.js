@@ -713,14 +713,9 @@ export async function createApp(
             !existingRecord.key_id ||
             !req.keyId ||
             existingRecord.key_id.toUpperCase() === req.keyId.toUpperCase();
-          // An Idempotency-Key is only a valid retry of the SAME request. A caller
-          // is free to pick any key string, so without this check, replaying a
-          // key against a request with a different payTo/asset/amount returned
-          // the ORIGINAL cached success response without ever validating the new
-          // claim: proven with a planted test (SECURITY: a settled record is
-          // replayed even when the new request claims a different amount and
-          // payTo, test/app.test.js) before this fix, where it passed. Fields that
-          // were never recorded on the existing record (null) are not compared,
+          // An Idempotency-Key is caller-chosen, so it is only a valid retry of
+          // the SAME request if the payment terms actually match. A field that
+          // was never recorded on the existing record (null) is not compared,
           // since there is nothing to contradict.
           const incoming = body.paymentRequirements ?? {};
           const termsMatch =

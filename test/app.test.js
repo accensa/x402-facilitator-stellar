@@ -1550,7 +1550,10 @@ describe('POST /settle idempotent replay from the settlement store', () => {
     };
     await settlementStore.save(originalTerms);
     const stored = { success: true, transaction: 'tx-original-1000-units', network: NETWORK };
-    await settlementStore.updateState('k1', 'settled', { tx_hash: 'tx-original-1000-units', response: stored });
+    await settlementStore.updateState('k1', 'settled', {
+      tx_hash: 'tx-original-1000-units',
+      response: stored,
+    });
 
     const mismatchedBody = {
       paymentPayload: VALID_BODY.paymentPayload,
@@ -1577,13 +1580,15 @@ describe('POST /settle idempotent replay from the settlement store', () => {
 
     // The original record was settled for 1000 units to one address. This request
     // claims 999999999 units to a different address, under the same client-chosen
-    // Idempotency-Key. Before the fix this assertion failed: the server returned
-    // the ORIGINAL success response (and settleCalls stayed 0) for a settlement
-    // that was never actually checked against these new terms.
+    // Idempotency-Key, and must be rejected rather than replay the original success.
     assert.equal(status, 409);
     assert.equal(json.success, false);
     assert.equal(json.errorReason, 'idempotency_key_reused_with_different_payment');
-    assert.equal(settleCalls, 0, 'mismatched terms are rejected outright, the chain is never consulted for this claim');
+    assert.equal(
+      settleCalls,
+      0,
+      'mismatched terms are rejected outright, the chain is never consulted',
+    );
   });
 });
 
