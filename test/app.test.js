@@ -1537,6 +1537,54 @@ describe('POST /settle idempotent replay from the settlement store', () => {
     assert.equal(settleCalls, 1);
     assert.equal(json.transaction, 'fresh-tx');
   });
+
+  test('SECURITY: reusing an Idempotency-Key with a different amount and payTo is rejected, not replayed', async () => {
+    const settlementStore = new MemorySettlementStore();
+    const originalTerms = {
+      idempotency_key: 'k1',
+      network: NETWORK,
+      payer: 'GPAYER',
+      pay_to: VALID_BODY.paymentRequirements.payTo,
+      asset: VALID_BODY.paymentRequirements.asset,
+      amount: VALID_BODY.paymentRequirements.maxAmountRequired,
+    };
+    await settlementStore.save(originalTerms);
+    const stored = { success: true, transaction: 'tx-original-1000-units', network: NETWORK };
+    await settlementStore.updateState('k1', 'settled', { tx_hash: 'tx-original-1000-units', response: stored });
+
+    const mismatchedBody = {
+      paymentPayload: VALID_BODY.paymentPayload,
+      paymentRequirements: {
+        ...VALID_BODY.paymentRequirements,
+        maxAmountRequired: '999999999',
+        payTo: 'GDIFFERENTATTACKERADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+      },
+    };
+
+    let settleCalls = 0;
+    const facilitator = stubFacilitator({
+      settle: async () => {
+        settleCalls += 1;
+        return { success: true, transaction: 'fresh-tx', network: NETWORK };
+      },
+    });
+    let json, status;
+    await withApp({ facilitator, extras: { settlementStore } }, async app => {
+      const res = await app.post('/settle', mismatchedBody, { 'idempotency-key': 'k1' });
+      status = res.status;
+      json = await res.json();
+    });
+
+    // The original record was settled for 1000 units to one address. This request
+    // claims 999999999 units to a different address, under the same client-chosen
+    // Idempotency-Key. Before the fix this assertion failed: the server returned
+    // the ORIGINAL success response (and settleCalls stayed 0) for a settlement
+    // that was never actually checked against these new terms.
+    assert.equal(status, 409);
+    assert.equal(json.success, false);
+    assert.equal(json.errorReason, 'idempotency_key_reused_with_different_payment');
+    assert.equal(settleCalls, 0, 'mismatched terms are rejected outright, the chain is never consulted for this claim');
+  });
 });
 
 /**
