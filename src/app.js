@@ -713,6 +713,25 @@ export async function createApp(
             !existingRecord.key_id ||
             !req.keyId ||
             existingRecord.key_id.toUpperCase() === req.keyId.toUpperCase();
+          // An Idempotency-Key is caller-chosen, so it is only a valid retry of
+          // the SAME request if the payment terms actually match. A field that
+          // was never recorded on the existing record (null) is not compared,
+          // since there is nothing to contradict.
+          const incoming = body.paymentRequirements ?? {};
+          const termsMatch =
+            (existingRecord.pay_to == null || existingRecord.pay_to === incoming.payTo) &&
+            (existingRecord.asset == null || existingRecord.asset === incoming.asset) &&
+            (existingRecord.amount == null || existingRecord.amount === incoming.maxAmountRequired);
+          if (ownedByThisCaller && !termsMatch) {
+            const limited = handleRateLimit(reply, checkSettle);
+            if (limited) return limited;
+            return reply.code(409).send({
+              success: false,
+              errorReason: 'idempotency_key_reused_with_different_payment',
+              errorMessage:
+                'this Idempotency-Key was already used to settle a payment with a different payTo, asset, or amount',
+            });
+          }
           if (ownedByThisCaller) {
             if (existingRecord.state === 'settled') {
               const limited = handleRateLimit(reply, checkSettle);
