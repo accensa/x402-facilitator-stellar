@@ -191,7 +191,18 @@ export async function tracedSchemeCall(op, network, fn, extraAttrs = {}) {
       if (result && result.transaction) {
         span.setAttribute('x402.transaction.id', result.transaction);
       }
-      span.setStatus({ code: SpanStatusCode.OK });
+      if (result && (result.success === false || result.isValid === false)) {
+        const reason = result.errorReason ?? result.invalidReason ?? 'unknown_error';
+        const message = result.errorMessage ?? result.invalidMessage ?? reason;
+        span.setAttribute('x402.error.reason', String(reason));
+        span.setAttribute('x402.error.message', String(message));
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: String(message),
+        });
+      } else {
+        span.setStatus({ code: SpanStatusCode.OK });
+      }
       return result;
     } catch (err) {
       span.setStatus({
