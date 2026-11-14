@@ -145,6 +145,13 @@ export class MemoryCatalogStore extends CatalogStore {
     // A changed payTo on an existing listing is flagged per policy.
     // For now, we will log a warning.
     if (existing && existing.payTo !== resource.payTo) {
+      const newPayToCount = this.payToCounts.get(resource.payTo) ?? 0;
+      if (newPayToCount >= this.maxResourcesPerPayTo) {
+        throw new CatalogError(
+          MAX_RESOURCES_PER_PAYTO_CODE,
+          `maximum resources per payTo (${this.maxResourcesPerPayTo}) exceeded`,
+        );
+      }
       console.warn(
         `[Catalog] Resource ${key} changed payTo from ${existing.payTo} to ${resource.payTo}`,
       );
@@ -174,6 +181,9 @@ export class MemoryCatalogStore extends CatalogStore {
 
     this.resources.set(key, entry);
     if (!existing) {
+      this._incrementPayToCount(resource.payTo);
+    } else if (existing.payTo !== resource.payTo) {
+      this._decrementPayToCount(existing.payTo);
       this._incrementPayToCount(resource.payTo);
     }
 
