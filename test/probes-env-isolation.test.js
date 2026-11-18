@@ -4,8 +4,12 @@
  * The probe shells out to the end-to-end payment script from an external runner.
  * It used to hand the child `process.env` verbatim, so FACILITATOR_SECRET and
  * ALICE_SECRET — funded signing keys — were visible to that process, its
- * captured stdout/stderr, and anything built from the probe report. The child now
- * receives an explicit allowlist (PATH, NODE_PATH, HOME) and nothing else.
+ * captured stdout/stderr, and anything built from the probe report. Every spawned
+ * command now gets an explicit baseline (PATH, NODE_PATH, HOME), and the
+ * documented synthetic command additionally gets its own declared credential
+ * channel — `ALICE_SECRET`, `FACILITATOR_URL`, `MERCHANT_ADDRESS`,
+ * `RESOURCE_PORT` — because `scripts/e2e.mjs` cannot pay without it. A
+ * config-supplied command override gets no credential at all.
  *
  * Every case runs the real runCommand path against a throwaway Node script in a
  * temp directory: no network, no funded account, no Docker.
@@ -15,9 +19,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCommand, runProbes } from '../monitoring/probes.mjs';
+import { childProcessEnv, runCommand, runProbes } from '../monitoring/probes.mjs';
 
 const ALLOWED = ['HOME', 'NODE_PATH', 'PATH'];
+// The declared synthetic-payment channel: exactly what scripts/e2e.mjs reads.
+const CHANNEL = ['ALICE_SECRET', 'FACILITATOR_URL', 'MERCHANT_ADDRESS', 'RESOURCE_PORT'];
 const SECRETS = {
   FACILITATOR_SECRET: 'S_TEST_FACILITATOR_SECRET_MUST_NOT_LEAK',
   ALICE_SECRET: 'S_TEST_ALICE_SECRET_MUST_NOT_LEAK',
@@ -44,7 +50,9 @@ writeFileSync(
 // The runner's own environment is shared with the child by design, so every
 // variable a test touches is snapshotted once and restored after each case.
 const saved = {};
-for (const name of [...ALLOWED, ...Object.keys(SECRETS)]) saved[name] = process.env[name];
+for (const name of [...ALLOWED, ...CHANNEL, ...Object.keys(SECRETS)]) {
+  saved[name] = process.env[name];
+}
 
 function restoreAll() {
   for (const name of Object.keys(saved)) {
@@ -73,7 +81,7 @@ const noFetch = async () => {
 
 /** Runs the uploaded command through runProbes -> the real runCommand. */
 function probeWith(command) {
-  return runProbes({ config: probeConfig(command), fetchImpl: noFetch, env: {} });
+  return runProbes({ config: probeConfig(command), fetchImpl: noFetch, env: process.env });
 }
 
 function childEnvironment() {
@@ -187,5 +195,83 @@ describe('runCommand: existing execution semantics are preserved', () => {
 
     assert.equal(result.ok, false);
     assert.notEqual(result.code, 0);
+  });
+});
+
+describe('synthetic payment credential channel', () => {
+  const SYNTHETIC = 'node scripts/e2e.mjs';
+
+  test('the documented e2e command receives its payer key and probe configuration', () => {
+    process.env.FACILITATOR_URL = 'https://facilitator.test';
+    process.env.MERCHANT_ADDRESS = 'GPROBE_MERCHANT_ADDRESS';
+    process.env.RESOURCE_PORT = '3499';
+
+    const env = childProcessEnv(SYNTHETIC, process.env);
+
+    assert.deepEqual(Object.keys(env).sort(), [...ALLOWED, ...CHANNEL].sort());
+    assert.equal(
+      env.ALICE_SECRET,
+      SECRETS.ALICE_SECRET,
+      'scripts/e2e.mjs exits 2 without the payer key, so the channel must carry it',
+    );
+    assert.equal(env.FACILITATOR_URL, 'https://facilitator.test');
+    assert.equal(env.MERCHANT_ADDRESS, 'GPROBE_MERCHANT_ADDRESS');
+    assert.equal(env.RESOURCE_PORT, '3499');
+    assert.equal(
+      env.FACILITATOR_SECRET,
+      undefined,
+      'the deployed facilitator key is never needed by the probe and must not enter the channel',
+    );
+  });
+
+  test('the channel is keyed to that one command: an override receives no credential', () => {
+    const env = childProcessEnv('node /tmp/custom-probe.mjs', process.env);
+
+    assert.deepEqual(
+      Object.keys(env).sort(),
+      ALLOWED,
+      'a config-supplied command must not inherit the synthetic payment channel',
+    );
+    assert.equal(env.ALICE_SECRET, undefined);
+    assert.equal(env.FACILITATOR_SECRET, undefined);
+  });
+
+  test('an absent credential is omitted rather than stringified', () => {
+    delete process.env.ALICE_SECRET;
+
+    const env = childProcessEnv(SYNTHETIC, process.env);
+
+    assert.equal('ALICE_SECRET' in env, false);
+    assert.equal(env.PATH, process.env.PATH, 'the execution baseline still applies');
+  });
+
+  test('runProbes runs the documented command by default and sources the channel from its env', async () => {
+    let seen;
+    const report = await runProbes({
+      config: {
+        endpoint: 'https://facilitator.test',
+        probe: {
+          healthz: false,
+          readyz: false,
+          supported: false,
+          syntheticPayment: { enabled: true },
+        },
+      },
+      fetchImpl: noFetch,
+      env: process.env,
+      runCommandImpl: async (command, _timeoutMs, sourceEnv) => {
+        seen = { command, sourceEnv };
+        return { ok: true, code: 0, latencyMs: 1, output: '' };
+      },
+    });
+
+    assert.equal(seen.command, SYNTHETIC, 'the default must be the documented e2e command');
+    assert.equal(
+      seen.sourceEnv,
+      process.env,
+      'the child channel must come from the probe env, not a hidden process.env read',
+    );
+    assert.equal(report.probes.syntheticPayment.ok, true);
+    assert.equal(report.status, 'operational');
   });
 });
