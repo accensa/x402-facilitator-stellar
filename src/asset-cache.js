@@ -200,13 +200,19 @@ export function createAssetDecimalsCache({
     const str = baseUnits.toString();
     const sign = str.startsWith('-') ? '-' : '';
     const clean = str.replace(/^-/, '');
+    // Signed zero formats as "0" (#755): never "-0" or "0.0".
+    if (/^0+$/.test(clean)) return '0';
+    // An asset with no fractional precision has no decimal point to insert.
+    if (decimals <= 0) return `${sign}${clean}`;
     if (clean.length <= decimals) {
-      const padded = clean.padStart(decimals + 1, '0');
-      return `${sign}0.${padded.slice(0, -decimals)}`;
+      // Sub-unit amount (#755): pad the digits to the asset's precision, then
+      // trim trailing zeros — 5 at 7 decimals is "0.0000005", not "0.0".
+      const fraction = clean.padStart(decimals, '0').replace(/0+$/, '');
+      return `${sign}0.${fraction || '0'}`;
     }
     const intPart = clean.slice(0, -decimals);
-    const fracPart = clean.slice(-decimals).replace(/0+$/, '') || '0';
-    return `${sign}${intPart}.${fracPart}`;
+    const fracPart = clean.slice(-decimals).replace(/0+$/, '');
+    return fracPart ? `${sign}${intPart}.${fracPart}` : `${sign}${intPart}`;
   }
 
   /**

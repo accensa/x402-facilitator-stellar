@@ -43,6 +43,23 @@ services:
         condition: service_healthy
       kafka:
         condition: service_started
+    # #753: without a healthcheck here `docker compose up --wait` could not tell
+    # when this service was able to serve traffic, so integration harnesses fell
+    # back to sleep loops. It targets /healthz — the liveness endpoint, which is
+    # always { ok: true } while the process runs — and never /readyz: readiness
+    # fails on a downstream Soroban RPC outage, and restarting the container
+    # cannot fix someone else's RPC. Same command and timings as the image's own
+    # HEALTHCHECK in the Dockerfile, so the two cannot drift apart.
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'wget --no-verbose --tries=1 --spider http://localhost:3402/healthz || exit 1',
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   # Single shared Redis for the Redis-backed rate limiter.
   redis:

@@ -84,11 +84,34 @@ async function timedGet(url, timeoutMs, fetchImpl = fetch) {
   }
 }
 
-function runCommand(cmd, timeoutMs) {
+// #754: the synthetic payment command is configuration-supplied, and the
+// monitor's own environment holds credentials (FACILITATOR_SECRET, ALICE_SECRET,
+// API tokens). Handing it `process.env` gave a config-selected binary every
+// secret the monitor holds, and whatever it printed was captured into
+// monitoring/out/status.json, which is published. The child therefore gets a
+// deliberately constructed environment containing only what a process needs to
+// find an executable and resolve modules — never a spread of `process.env`.
+const CHILD_ENV_ALLOWLIST = ['PATH', 'NODE_PATH', 'HOME'];
+
+/**
+ * Builds a spawned probe command's environment from an explicit allowlist.
+ * Variables that are not set are omitted rather than passed through, and
+ * nothing outside the allowlist can reach the child.
+ */
+export function childProcessEnv(source = process.env) {
+  const env = {};
+  for (const name of CHILD_ENV_ALLOWLIST) {
+    const value = source[name];
+    if (typeof value === 'string') env[name] = value;
+  }
+  return env;
+}
+
+export function runCommand(cmd, timeoutMs, sourceEnv = process.env) {
   return new Promise(resolve => {
     const started = nowMs();
     const [bin, ...args] = cmd.split(/\s+/);
-    const child = spawn(bin, args, { env: process.env });
+    const child = spawn(bin, args, { env: childProcessEnv(sourceEnv) });
     let out = '';
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (out += d));
