@@ -26,56 +26,66 @@ function fakeStore() {
 describe('reconciliation loop single-flight (#723)', () => {
   test('a slow sweep prevents overlapping execution', async () => {
     const store = fakeStore();
-    let rpcCalls = 0;
-    let concurrent = 0;
-    let maxConcurrent = 0;
+    let rpcInvocations = 0;
+    let releaseRpc;
+    const rpcStarted = new Promise(resolve => {
+      releaseRpc = resolve;
+    });
+    let rpcFinish;
+    const rpcDone = new Promise(resolve => {
+      rpcFinish = resolve;
+    });
+
     const rpcCall = async () => {
-      rpcCalls++;
-      concurrent++;
-      maxConcurrent = Math.max(maxConcurrent, concurrent);
-      await new Promise(resolve => setTimeout(resolve, 60));
-      concurrent--;
+      rpcInvocations++;
+      releaseRpc();
+      await rpcDone;
       return { result: { status: 'FAILED' } };
     };
 
-    const handle = startReconciliationLoop(store, {}, { intervalMs: 10, rpcCall });
-    // Let several interval ticks fire while the first sweep is still in flight.
-    await new Promise(resolve => setTimeout(resolve, 90));
-    await handle.stop();
+    const handle = startReconciliationLoop(store, {}, { intervalMs: 5, rpcCall });
+    // Wait for the first sweep's RPC to start, then let several ticks elapse
+    // while it is still in flight.
+    await rpcStarted;
+    await new Promise(resolve => setTimeout(resolve, 40));
 
-    assert.equal(maxConcurrent, 1, 'sweeps must never run concurrently');
-    assert.ok(rpcCalls >= 1, 'at least one sweep ran');
-    assert.ok(rpcCalls <= 4, `expected a handful of sweeps, got ${rpcCalls}`);
-    assert.equal(concurrent, 0, 'no sweep left in flight after stop()');
+    assert.equal(rpcInvocations, 1, 'overlapping ticks must not start a second sweep');
+
+    rpcFinish();
+    await handle.stop();
+    assert.equal(rpcInvocations, 1);
   });
 
   test('stop() awaits an in-flight sweep before resolving', async () => {
     const store = fakeStore();
-    let resolveRpc;
+    let releaseRpc;
     const rpcStarted = new Promise(resolve => {
-      resolveRpc = resolve;
+      releaseRpc = resolve;
+    });
+    let rpcFinish;
+    const rpcDone = new Promise(resolve => {
+      rpcFinish = resolve;
     });
     let finished = false;
+
     const rpcCall = async () => {
-      resolveRpc();
-      await new Promise(resolve => setTimeout(resolve, 40));
+      releaseRpc();
+      await rpcDone;
       finished = true;
       return { result: { status: 'FAILED' } };
     };
 
     const handle = startReconciliationLoop(store, {}, { intervalMs: 5, rpcCall });
-    // Wait for the first sweep's RPC to start.
     await rpcStarted;
 
-    const stopPromise = handle.stop();
-    // stop() must not resolve until the in-flight sweep finishes.
     let resolved = false;
-    stopPromise.then(() => {
+    const stopPromise = handle.stop().then(() => {
       resolved = true;
     });
     await new Promise(resolve => setTimeout(resolve, 10));
-    assert.equal(resolved, false, 'stop() waited for the active sweep');
+    assert.equal(resolved, false, 'stop() must wait for the active sweep');
 
+    rpcFinish();
     await stopPromise;
     assert.equal(resolved, true);
     assert.equal(finished, true, 'the active sweep completed before stop() resolved');
