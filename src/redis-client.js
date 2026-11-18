@@ -59,8 +59,13 @@ export function createRedisConnection({ client, redisUrl = null, onEvent = () =>
     onEvent({ type: 'degraded', message });
   };
   const emitRecovered = () => {
-    if (!degraded) return;
+    // A reconnect clears both flags: 'end' marks the connection closed, and
+    // leaving it set would keep isUsable()/getClient() false for the life of
+    // the process even though ioredis has a live connection again.
+    const wasUnavailable = degraded || ended;
     degraded = false;
+    ended = false;
+    if (!wasUnavailable) return;
     onEvent({ type: 'recovered', message: 'Redis reconnected' });
   };
 
