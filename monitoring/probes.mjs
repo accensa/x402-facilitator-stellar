@@ -58,8 +58,8 @@ function nowMs() {
   return Date.now();
 }
 
-async function timedGet(url, timeoutMs, fetchImpl = fetch) {
-  const started = nowMs();
+async function timedGet(url, timeoutMs, fetchImpl = fetch, now = nowMs) {
+  const started = now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -68,7 +68,7 @@ async function timedGet(url, timeoutMs, fetchImpl = fetch) {
     return {
       ok: res.ok,
       status: res.status,
-      latencyMs: nowMs() - started,
+      latencyMs: now() - started,
       body,
     };
   } catch (err) {
@@ -76,7 +76,7 @@ async function timedGet(url, timeoutMs, fetchImpl = fetch) {
     return {
       ok: false,
       status: 0,
-      latencyMs: nowMs() - started,
+      latencyMs: now() - started,
       error: err.name === 'AbortError' ? 'timeout' : err.message,
     };
   } finally {
@@ -163,12 +163,17 @@ async function probeSignerBalance(signers, horizonUrl, timeoutMs, fetchImpl = fe
  * Exported so the probe loop can be tested with an injected `fetchImpl` /
  * `runCommandImpl`: `npm test` runs offline, so a test must never reach the
  * network or spawn the end-to-end script.
+ *
+ * `now` is the clock seam for the HTTP probe latency, so a test can assert an
+ * exact `latencyMs` instead of sleeping for real and hoping the runner wakes
+ * the timer on time.
  */
 export async function runProbes({
   config,
   fetchImpl = fetch,
   runCommandImpl = runCommand,
   env = process.env,
+  now = nowMs,
 } = {}) {
   const endpoint = (env.FACILITATOR_URL || config.endpoint || 'http://localhost:3402').replace(
     /\/$/,
@@ -192,7 +197,7 @@ export async function runProbes({
   // 1-3: HTTP probes
   for (const name of HTTP_PROBES) {
     if (config.probe?.[name] === false) continue;
-    const r = await timedGet(`${endpoint}/${name}`, timeoutMs, fetchImpl);
+    const r = await timedGet(`${endpoint}/${name}`, timeoutMs, fetchImpl, now);
     const warnMs = config.thresholds?.latencyWarnMs?.[name];
     const failureLevel = PROBE_SEVERITY[name] ?? 'warn';
     let level = 'ok';

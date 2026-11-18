@@ -11,7 +11,10 @@
  *   any probe  slow but 2xx => warn, no incident
  *
  * Every case injects its own fetch: `npm test` runs offline, so nothing here
- * reaches the network or spawns the end-to-end payment script.
+ * reaches the network or spawns the end-to-end payment script. Latency is
+ * measured against an injected clock rather than real elapsed time, so a slow
+ * probe costs the fake clock its delay instead of asking a loaded runner to
+ * wake a 20ms timer on time.
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,22 +30,31 @@ function response(status) {
 
 /**
  * fetch stub: probe name -> { status, delayMs }, defaulting to 200. Records the
- * URLs it was asked for so a test can prove which probes ran.
+ * URLs it was asked for so a test can prove which probes ran. `delayMs`
+ * advances the injected clock, which is the response time `timedGet` then
+ * measures.
  */
-function stubFetch(routes = {}) {
+function stubFetch(routes = {}, clock) {
   const calls = [];
   const fetchImpl = async url => {
     calls.push(url);
     const name = new URL(url).pathname.replace(/^\//, '');
     const route = { status: OK, ...routes[name] };
-    // A real delay, because latency is measured with Date.now(): a threshold of
-    // 1ms and a 20ms response makes the warn path deterministic without fake
-    // timers.
-    if (route.delayMs) await new Promise(resolve => setTimeout(resolve, route.delayMs));
+    if (route.delayMs) clock.advance(route.delayMs);
     return response(route.status);
   };
   fetchImpl.calls = calls;
   return fetchImpl;
+}
+
+/**
+ * Monotonic fake clock. `timedGet` takes a start timestamp and subtracts it
+ * from an end timestamp, so advancing this clock is what a test does instead of
+ * sleeping: the measured latency is then exact (20, not "19 or 20").
+ */
+function fakeClock(start = 1_000_000) {
+  let ms = start;
+  return { now: () => ms, advance: delta => (ms += delta) };
 }
 
 function config(overrides = {}) {
@@ -55,8 +67,9 @@ function config(overrides = {}) {
 }
 
 async function probe(overrides = {}, env = {}) {
-  const fetchImpl = stubFetch(overrides.routes);
-  const report = await runProbes({ config: config(overrides), fetchImpl, env });
+  const clock = fakeClock();
+  const fetchImpl = stubFetch(overrides.routes, clock);
+  const report = await runProbes({ config: config(overrides), fetchImpl, env, now: clock.now });
   return { report, fetchImpl };
 }
 
@@ -114,7 +127,10 @@ describe('runProbes: HTTP probe severity', () => {
     // The request succeeded, so this is the latency path, not a failure path.
     assert.equal(report.probes.readyz.ok, true);
     assert.equal(report.probes.readyz.status, OK);
-    assert.ok(report.probes.readyz.latencyMs >= 20);
+    // Exact rather than `>= 20`: the stub cost 20ms of clock and the probe must
+    // report exactly that. The old real-timer version asserted a threshold
+    // equal to its own sleep, so a timer that fired a fraction early failed it.
+    assert.equal(report.probes.readyz.latencyMs, 20);
     assert.equal(report.probes.readyz.level, 'warn');
     assert.deepEqual(report.incidents, []);
     assert.equal(report.status, 'degraded');
