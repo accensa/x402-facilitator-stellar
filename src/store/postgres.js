@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { OutboxStore } from '../outbox/store.js';
 import { MemorySettlementStore } from './memory.js';
-import { eventTypeForState } from '../eventstore/events.js';
+import { SETTLEMENT_EVENT_TYPES, eventTypeForState } from '../eventstore/events.js';
 import { projectSettlement } from '../eventstore/projection.js';
 
 const PROJECTION_COLUMN_NAMES = [
@@ -87,6 +87,12 @@ export class PostgresSettlementStore extends MemorySettlementStore {
    * @param {object} [options.outbox] - OutboxStore sharing this pool (default:
    *   created lazily from the pool; the transactional outbox is how settlement
    *   notifications survive crashes, #123)
+   * @param {number} [options.shadowTtlMs=60000] - how long a locally written
+   *   settlement stays in the in-memory read-your-own-writes shadow (#725)
+   * @param {number} [options.shadowMaxEntries=10000] - burst cap on shadow
+   *   entries, independent of the TTL; 0 disables the cap (#725)
+   * @param {() => number} [options.now=Date.now] - injectable clock for the
+   *   shadow's TTL, so eviction is testable without sleeping
    */
   constructor(
     databaseUrl,
@@ -97,10 +103,25 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       replicaLagMs = 1000,
       warn = msg => console.warn(msg),
       outbox,
+      shadowTtlMs = 60_000,
+      shadowMaxEntries = 10_000,
+      now = () => Date.now(),
     } = {},
   ) {
     super();
     this.warn = warn;
+    this.shadowTtlMs = shadowTtlMs;
+    this.shadowMaxEntries = shadowMaxEntries;
+    this._now = now;
+    /**
+     * Timestamp of the last event appended to the inherited in-memory shadow,
+     * per idempotency key. Insertion order is write order: `_append` always
+     * deletes before setting, so eviction can walk oldest-first and stop at the
+     * first entry still inside the TTL window. See `_pruneShadow` (#725).
+     *
+     * @type {Map<string, number>}
+     */
+    this._shadowWrittenAt = new Map();
     this.pool = pool ?? null; // primary (writes + fallback reads)
     this.replicaPool = replicaPool ?? null; // read replica (reads)
     this.replicaUrl = replicaUrl ?? null; // read-replica connection string (#121)
@@ -161,6 +182,81 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       this.degraded = true;
       this.warn(`[SettlementStore] ${message} — settlement store degraded to process-local memory`);
     }
+  }
+
+  /**
+   * Bounds the in-memory shadow that backs read-your-own-writes (#725).
+   *
+   * Every successful write still mirrors its settlement into the inherited
+   * event map so `getConsistent` can answer without touching a (possibly
+   * lagging) replica. Left unbounded, that mirror accumulates every settlement
+   * this process has ever handled and grows until the heap runs out.
+   *
+   * Pruning runs on every write and enforces two bounds:
+   *
+   *   1. **TTL** — a stream whose last write is older than `shadowTtlMs` (the
+   *      read-your-own-writes window) is dropped. Entries are ordered by write
+   *      time, so this stops at the first live entry.
+   *   2. **Cap** — above `shadowMaxEntries`, the least recently written streams
+   *      are dropped. This is a burst guard, not the primary bound.
+   *
+   * Eviction never affects durable state: a shadow miss falls through to the
+   * replica/primary in `getConsistent`, which handles lag and genuine misses.
+   * In degraded mode the inherited map *is* the store, so nothing is pruned —
+   * active local claims stay readable for as long as the process is degraded.
+   */
+  _pruneShadow() {
+    if (this.degraded || !this.pool) return;
+
+    const now = this._now();
+    for (const [key, writtenAt] of this._shadowWrittenAt) {
+      if (now - writtenAt < this.shadowTtlMs) break;
+      this._shadowWrittenAt.delete(key);
+      this.events.delete(key);
+    }
+
+    let excess = this._shadowWrittenAt.size - this.shadowMaxEntries;
+    for (const key of this._shadowWrittenAt.keys()) {
+      if (this.shadowMaxEntries <= 0 || excess <= 0) break;
+      this._shadowWrittenAt.delete(key);
+      this.events.delete(key);
+      excess--;
+    }
+  }
+
+  /**
+   * Appends to the inherited event map and keeps that shadow bounded (#725).
+   *
+   * In the durable path a terminal event is only appended when its `Initiated`
+   * stream is still in the shadow. Appending to an evicted stream would project
+   * a partial aggregate — no network, scheme or key_id — and `getConsistent`
+   * would serve it as an own-write. Skipping it leaves the authoritative row in
+   * Postgres, where `getConsistent` reads it instead.
+   *
+   * Degraded mode is untouched: the inherited store is the only store, so every
+   * event is appended and retained.
+   */
+  _append(idempotencyKey, type, payload) {
+    // Tracked whenever we are not degraded, including the brief window before
+    // the lazily-imported pool exists, so those early entries become prunable
+    // once it arrives. Only a live pool lets us drop them: with no durable
+    // store, the inherited map is the store.
+    const track = !this.degraded;
+    const canPrune = track && Boolean(this.pool);
+    if (canPrune) this._pruneShadow();
+
+    if (canPrune && type !== SETTLEMENT_EVENT_TYPES.INITIATED && !this.events.has(idempotencyKey)) {
+      return null;
+    }
+
+    const event = super._append(idempotencyKey, type, payload);
+    if (track) {
+      // Delete-then-set keeps `_shadowWrittenAt` ordered by write recency.
+      this._shadowWrittenAt.delete(idempotencyKey);
+      this._shadowWrittenAt.set(idempotencyKey, this._now());
+      if (canPrune) this._pruneShadow();
+    }
+    return event;
   }
 
   async _ensureSchema() {

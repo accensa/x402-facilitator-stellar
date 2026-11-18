@@ -69,6 +69,12 @@ export function createMultiSignerEngine({
   /**
    * Opens a pending envelope for a transaction awaiting co-signatures.
    *
+   * Idempotent by `id`: repeating the call with the same `transactionXdr`
+   * returns the existing snapshot untouched, so a retry after a timeout keeps
+   * the co-signatures already gathered and the original deadline rather than
+   * discarding in-flight progress. Reusing an `id` for a different transaction
+   * is a conflict and throws.
+   *
    * @param {object} input
    * @param {string} input.id - caller-chosen envelope id (idempotency key)
    * @param {string} input.transactionXdr - unsigned Stellar transaction envelope (base64 XDR)
@@ -102,6 +108,16 @@ export function createMultiSignerEngine({
         `multi-signer threshold ${t} exceeds ${requiredSigners.length} required signers`,
       );
     }
+    const existing = pending.get(id);
+    if (existing) {
+      if (existing.transactionXdr !== transactionXdr) {
+        throw new Error(
+          `multi-signer envelope "${id}" conflict: transactionXdr does not match the existing envelope`,
+        );
+      }
+      return snapshot(existing);
+    }
+
     const createdAt = nowMs(now);
     const envelope = {
       id,
