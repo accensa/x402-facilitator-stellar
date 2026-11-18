@@ -12,8 +12,19 @@
  * memory fallback with a warning: rate limiting and cataloging keep working,
  * and settlement proceeds without cross-restart deduplication rather than
  * refusing to settle at all.
+ *
+ * Degradation is temporary (#729). A background probe retries the connection
+ * (and the next begin() after the interval does too), so a transient
+ * connection drop, query cancellation or failover does not downgrade the
+ * process to process-local dedupe for the rest of its lifetime. When Postgres
+ * answers again, records accumulated while degraded are written back and the
+ * durable path resumes with a warning.
  */
 import crypto from 'node:crypto';
+import { setInterval, clearInterval } from 'node:timers';
+
+/** How often a degraded store probes Postgres before restoring durable claims. */
+const DEFAULT_RECOVERY_INTERVAL_MS = 10_000;
 
 /** Process-lifetime store. The shape Postgres degrades into. */
 export class MemoryIdempotencyStore {
@@ -71,13 +82,27 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
    * @param {Function} [options.warn] - warning sink
    * @param {number} [options.lockTimeoutMs] - how long to wait out a concurrent
    *   claim before degrading
+   * @param {number} [options.recoveryIntervalMs] - how often to probe Postgres
+   *   while degraded before restoring durable claims (0 probes on next begin)
    */
-  constructor(databaseUrl, { pool, warn = msg => console.warn(msg), lockTimeoutMs = 5000 } = {}) {
+  constructor(
+    databaseUrl,
+    {
+      pool,
+      warn = msg => console.warn(msg),
+      lockTimeoutMs = 5000,
+      recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS,
+    } = {},
+  ) {
     super();
     this.warn = warn;
     this.pool = pool;
     this.degraded = false;
     this.lockTimeoutMs = lockTimeoutMs;
+    this.recoveryIntervalMs = recoveryIntervalMs;
+    this._recoveryTimer = null;
+    this._recovering = false;
+    this._nextProbeAt = 0;
     if (!this.pool) {
       import('pg')
         .then(({ default: pg }) => {
@@ -93,8 +118,97 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
   _degrade(message) {
     if (!this.degraded) {
       this.degraded = true;
-      this.warn(`[Idempotency] ${message} — idempotency is now process-local only`);
+      this._nextProbeAt = Date.now() + this.recoveryIntervalMs;
+      this.warn(
+        `[Idempotency] ${message} — idempotency is now process-local only; ` +
+          'probing Postgres to restore durable claims',
+      );
+      this._startRecoveryProbe();
     }
+  }
+
+  /**
+   * Restores the durable path once Postgres answers again (#729).
+   *
+   * A probe is a single `SELECT 1`. On success, records accumulated while
+   * degraded are written back first, so a claim made during the outage is not
+   * silently forgotten the moment the store looks healthy again. If either
+   * step fails the store stays degraded and the probe is retried after the
+   * interval; a pool error is not re-logged on every attempt.
+   */
+  async _recover() {
+    if (!this.degraded) {
+      this._stopRecoveryProbe();
+      return false;
+    }
+    if (!this.pool || this._recovering) return false;
+
+    this._recovering = true;
+    try {
+      await this.pool.query('SELECT 1');
+      await this._flushDegradedRecords();
+      this.degraded = false;
+      this._stopRecoveryProbe();
+      this.warn('[Idempotency] Postgres reachable again — durable idempotency resumed');
+      return true;
+    } catch {
+      this._nextProbeAt = Date.now() + this.recoveryIntervalMs;
+      return false;
+    } finally {
+      this._recovering = false;
+    }
+  }
+
+  /**
+   * Writes claims/responses made while degraded back to Postgres.
+   *
+   * Another replica may already hold the durable claim, so a completed
+   * response only fills a row that is still pending; it never overwrites a
+   * response another replica recorded. What this guarantees is that a claim
+   * this process handed out locally becomes visible to the rest of the fleet
+   * before the store reports itself healthy.
+   */
+  async _flushDegradedRecords() {
+    // Drain until empty: a begin()/complete() can add a record while this loop
+    // is awaiting Postgres, and a claim made during the outage must not be
+    // forgotten when the store flips back to healthy.
+    while (this.records.size > 0) {
+      for (const [key, record] of [...this.records]) {
+        if (record?.response) {
+          await this.pool.query(
+            'INSERT INTO idempotency_keys (key, status_code, response, completed_at) ' +
+              'VALUES ($1, $2, $3, now()) ON CONFLICT (key) DO UPDATE ' +
+              'SET status_code = EXCLUDED.status_code, response = EXCLUDED.response, ' +
+              'completed_at = EXCLUDED.completed_at ' +
+              'WHERE idempotency_keys.response IS NULL',
+            [key, record.statusCode, JSON.stringify(record.response)],
+          );
+        } else if (record?.pending) {
+          await this.pool.query(
+            'INSERT INTO idempotency_keys (key) VALUES ($1) ON CONFLICT (key) DO NOTHING',
+            [key],
+          );
+        }
+        // Only drop the entry we actually wrote; a concurrent complete() may
+        // have replaced it with a response that still needs backfilling.
+        if (this.records.get(key) === record) this.records.delete(key);
+      }
+    }
+  }
+
+  _startRecoveryProbe() {
+    if (this._recoveryTimer || this.recoveryIntervalMs <= 0) return;
+    this._recoveryTimer = setInterval(() => {
+      void this._recover();
+    }, this.recoveryIntervalMs);
+    // A probe must never be the reason a drained process stays alive.
+    this._recoveryTimer.unref?.();
+  }
+
+  _stopRecoveryProbe() {
+    if (!this._recoveryTimer) return;
+    clearInterval(this._recoveryTimer);
+    this._recoveryTimer = null;
   }
 
   /**
@@ -104,6 +218,11 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
    * response before falling back.
    */
   async begin(key) {
+    // While degraded, probe once per interval. This keeps recovery prompt
+    // under traffic without paying a connection timeout on every settlement.
+    if (this.degraded && this.pool && Date.now() >= this._nextProbeAt) {
+      await this._recover();
+    }
     if (this.degraded || !this.pool) return super.begin(key);
     const client = await this.pool.connect().catch(err => {
       this._degrade(`cannot connect: ${err.message}`);
