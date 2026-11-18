@@ -64,16 +64,21 @@ const HORIZON = process.env.HORIZON_URL ?? 'https://horizon-testnet.stellar.org'
 const USDC_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
 const EXPECTED_SAC = 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA';
 
-// One run spends $0.001 on the `/exact/stellar` route. This is 10x that, which
-// leaves room for a scenario that pays more than once without being so much
-// that the treasury drains on a schedule.
+// A run is not one payment. Each selected client/server combo replays the whole
+// `/exact/stellar` suite, and the suite is currently eleven paying scenarios
+// (tests #1-#11 across the combos the selection step picks), so today's burn is
+// $0.011 per run. At the old 0.01 the eleventh payment failed with "insufficient
+// balance for asset CBIELTK6…", which the job correctly reports as a conformance
+// failure — so the cushion has to exceed the scenario count, not the route price.
 //
-// The payer is a fresh keypair every run and is never swept, so whatever is sent
-// here is stranded once the run ends — this figure is the true per-run burn, not
-// a float. At 0.01 a single faucet pull of 20 USDC funds ~2,000 runs, which is
-// over five years of the daily cron. At the previous 1.0 it was 20 runs, or
-// under three weeks, and topping up needs a human at Circle's faucet.
-const PER_RUN_AMOUNT = '0.0100000';
+// 0.05 covers fifty payments. The payer is a fresh keypair every run and is never
+// swept, so whatever is sent here is stranded once the run ends — this figure is
+// the true per-run burn, not a float. A single faucet pull of 20 USDC funds ~400
+// runs, which is over a year of the daily cron; topping up needs a human at
+// Circle's faucet, so the cushion is not free, but a red nightly costs more time
+// than the extra cents of testnet tokens. Raise this again only if the upstream
+// suite grows past ~45 paying scenarios per run.
+const PER_RUN_AMOUNT = '0.0500000';
 const TRUSTLINE_LIMIT = '1000000';
 
 const usdc = new Asset('USDC', USDC_ISSUER);
