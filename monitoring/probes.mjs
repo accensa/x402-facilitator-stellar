@@ -84,11 +84,32 @@ async function timedGet(url, timeoutMs, fetchImpl = fetch) {
   }
 }
 
-function runCommand(cmd, timeoutMs) {
+/**
+ * Variables the synthetic payment command needs in order to run at all. Nothing
+ * else from the probe's environment is passed on (#754): FACILITATOR_SECRET and
+ * ALICE_SECRET are signing keys, runCommand captures the child's stdout and
+ * stderr, and the probe report is published to the public status page.
+ */
+const CHILD_ENV_ALLOWLIST = ['PATH', 'NODE_PATH', 'HOME'];
+
+/**
+ * Builds the child environment from an explicit allowlist. A variable that is
+ * missing or empty is absent from the result — never the string "undefined".
+ */
+function childEnv(sourceEnv = process.env) {
+  const env = {};
+  for (const name of CHILD_ENV_ALLOWLIST) {
+    const value = sourceEnv[name];
+    if (typeof value === 'string' && value.length > 0) env[name] = value;
+  }
+  return env;
+}
+
+export function runCommand(cmd, timeoutMs) {
   return new Promise(resolve => {
     const started = nowMs();
     const [bin, ...args] = cmd.split(/\s+/);
-    const child = spawn(bin, args, { env: process.env });
+    const child = spawn(bin, args, { env: childEnv() });
     let out = '';
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (out += d));
