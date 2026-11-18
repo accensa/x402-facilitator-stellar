@@ -43,10 +43,15 @@ describe('reconciliation loop single-flight (#723)', () => {
       return { result: { status: 'FAILED' } };
     };
 
+    // The loop's timer is unref()'d in production so it cannot keep a process
+    // alive on its own. Keep the event loop alive here so the unref'd timer is
+    // actually allowed to fire while we wait for the first sweep to start.
+    const keepAlive = globalThis.setInterval(() => {}, 5);
     const handle = startReconciliationLoop(store, {}, { intervalMs: 5, rpcCall });
-    // Wait for the first sweep's RPC to start, then let several ticks elapse
-    // while it is still in flight.
     await rpcStarted;
+    globalThis.clearInterval(keepAlive);
+
+    // Let several ticks elapse while the sweep is still in flight.
     await new Promise(resolve => setTimeout(resolve, 40));
 
     assert.equal(rpcInvocations, 1, 'overlapping ticks must not start a second sweep');
@@ -75,8 +80,10 @@ describe('reconciliation loop single-flight (#723)', () => {
       return { result: { status: 'FAILED' } };
     };
 
+    const keepAlive = globalThis.setInterval(() => {}, 5);
     const handle = startReconciliationLoop(store, {}, { intervalMs: 5, rpcCall });
     await rpcStarted;
+    globalThis.clearInterval(keepAlive);
 
     let resolved = false;
     const stopPromise = handle.stop().then(() => {
