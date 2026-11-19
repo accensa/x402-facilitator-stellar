@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Fail on merge-conflict markers in markdown
         # Exact git markers only (a bare setext `===` underline in some other
         # file must not trip this); node_modules/.git are never scanned.
@@ -48,7 +48,7 @@ jobs:
             echo 'Merge-conflict markers found in markdown; remove them before merge.'
             exit 1
           fi
-      - uses: gaurav-nelson/github-action-markdown-link-check@v1
+      - uses: gaurav-nelson/github-action-markdown-link-check@5c5dfc0ac2e225883c0e5f03a85311ec2830d368 # v1
         with:
           use-quiet-mode: 'yes'
           use-verbose-mode: 'no'
