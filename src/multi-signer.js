@@ -53,6 +53,15 @@ export function createMultiSignerEngine({
   if (!Number.isInteger(threshold) || threshold < 1) {
     throw new Error(`multi-signer threshold must be a positive integer, got "${threshold}"`);
   }
+  // Fail at construction rather than aborting every co-signer request at once:
+  // a zero, negative or non-numeric value fires the abort timer immediately (or
+  // not at all) and the engine would report every co-signer as failed with no
+  // hint that the configuration, not the network, was wrong (#713).
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1) {
+    throw new Error(
+      `multi-signer requestTimeoutMs must be a positive integer, got "${requestTimeoutMs}"`,
+    );
+  }
 
   /** envelopeId -> envelope record */
   const pending = new Map();
