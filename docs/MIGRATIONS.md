@@ -40,20 +40,65 @@ uses and tracks applied migrations in a `pgmigrations` table.
 node scripts/db-migrate.js up
 ```
 
-Or create the file manually in `migrations/` with a timestamp prefix:
+Or create the file manually in `migrations/` with a timestamp prefix. This is
+the full set of files in the tree today:
 
 ```
 migrations/
-  001_bazaar_catalog.js
+  001_bazaar_catalog.js               # node-pg-migrate (.js)
+  001_bazaar_catalog.sql              # legacy psql path (.sql)
   002_idempotency_keys.js
+  002_idempotency_keys.sql
+  002_rate_limit_buckets.sql
   003_rate_limit_buckets.js
+  003_settlement_store.sql
+  004_outbox_events.sql
   004_sample_expand_add_access_tier.js
+  004_settlement_events.sql
   005_sample_contract_drop_access_tier.js
-  20260826000000_your_change.js    # <- timestamp prefix for ordering
+  006_catalog_resources.js
+  007_dead_letters.js
+  20260826000000_your_change.js       # example only — pick your own UTC timestamp
 ```
 
 Each file exports `up(pgm)` and `down(pgm)` functions. The `pgm` parameter
 provides a builder API for safe DDL changes.
+
+### Naming, numbering and ordering
+
+Numbering is **not unique** and must not be read as a sequence of migration
+steps. The tree deliberately contains duplicate numeric prefixes, and mixes
+two formats:
+
+- **`.js` files are the node-pg-migrate set.** `npm run db:migrate`, `down`
+  and `status` operate on these only. `scripts/db-migrate.js` sorts them by
+  filename (lexicographic order), and node-pg-migrate records each stem — the
+  filename without `.js` — in the `pgmigrations` table.
+- **`.sql` files are the legacy psql set.** The runner never applies them and
+  `down` never rolls them back; they are applied through the documented
+  `psql` path in [DEPLOYMENT.md](DEPLOYMENT.md) and registered on an existing
+  database with `npm run db:seed-legacy`.
+- **The two sets are ordered separately.** Within each set, ordering is plain
+  lexicographic filename order, so `001_…` sorts before `002_…` and a
+  fixed-width numeric prefix is what matters — not uniqueness. Duplicate
+  prefixes across the sets (e.g. `002_idempotency_keys.js` and
+  `002_idempotency_keys.sql`) are different files, not two versions of one
+  step.
+- **`002_rate_limit_buckets.sql` and `003_rate_limit_buckets.js` describe the
+  same table.** The SQL file predates the node-pg-migrate conversion, which
+  landed as `003_…`. Use one path per database, never both: a fresh database
+  runs `npm run db:migrate` (the `.js` set), while a database provisioned from
+  the original `.sql` files applies those and then runs `db:seed-legacy` to
+  record them. The runner refuses `up` while any `.sql` file is untracked, so
+  it cannot half-apply the schema on its own.
+- **New migrations use a 14-digit timestamp prefix**, e.g.
+  `20260826000000_your_change.js`, so they sort after every existing file
+  regardless of the old short numbers. Use UTC and keep the width fixed; the
+  runner does not parse the prefix as a date, it only sorts the string.
+
+There is no timestamp-based ordering beyond that string sort: a `2026…` name
+sorts after `007_…` because `2` follows `0`, which is why a 14-digit prefix is
+the convention for anything added now.
 
 ## The Expand and Contract Pattern
 
