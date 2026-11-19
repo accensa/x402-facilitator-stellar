@@ -127,6 +127,17 @@ export function parseResourceUri(uri) {
 }
 
 /**
+ * Bounds on `limit` for `x402://catalog/search`.
+ *
+ * The tool surface advertises `max 100` (`src/mcp/cli.js`, `search_resources`),
+ * so the resource has to enforce the same ceiling. Defined once so the pattern
+ * hint, the enforced range and the rejection message cannot drift apart.
+ */
+const SEARCH_LIMIT_MIN = 1;
+const SEARCH_LIMIT_MAX = 100;
+const SEARCH_LIMIT_HINT = `expected a number between ${SEARCH_LIMIT_MIN} and ${SEARCH_LIMIT_MAX}`;
+
+/**
  * Reads one semantic resource.
  *
  * @param {string} uri - an `x402://` URI, with template parameters substituted
@@ -166,15 +177,28 @@ export async function readResource(uri, { fetchDiscovery } = {}) {
       required: true,
       maxLength: 256,
     });
+    // The regex is deliberately left as-is: non-numeric and oversized input
+    // must fail as malformed before the range below is consulted. It admits
+    // 0 and 999, which is what the range check rejects — and the raw value is
+    // never echoed back, only the bound.
     const limit = assertSafeText(params.get('limit'), {
       field: 'limit',
       maxLength: 4,
       pattern: /^\d{1,3}$/,
-      patternHint: 'expected a number between 1 and 100',
+      patternHint: SEARCH_LIMIT_HINT,
     });
+    const limitValue = limit === '' ? null : Number(limit);
+    if (limitValue !== null && (limitValue < SEARCH_LIMIT_MIN || limitValue > SEARCH_LIMIT_MAX)) {
+      throw new McpInputError(
+        `'limit' must be between ${SEARCH_LIMIT_MIN} and ${SEARCH_LIMIT_MAX}`,
+        {
+          field: 'limit',
+        },
+      );
+    }
     const data = await fetchDiscovery('/discovery/search', {
       query,
-      ...(limit ? { limit: Number(limit) } : {}),
+      ...(limitValue === null ? {} : { limit: limitValue }),
     });
     return {
       contents: [{ uri, mimeType: JSON_MIME, text: stringify(data) }],
