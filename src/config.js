@@ -318,10 +318,13 @@ export function resolveConfig(env = process.env) {
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
       horizonUrl: env.HORIZON_URL_PUBNET || 'https://horizon.stellar.org',
+      // Calibrated 2026-11-19 against live Horizon /fee_stats (docs/PUBNET_FEE_CALIBRATION.md).
+      // min: 5_056 stroops floor derived from p90 fee_charged (0% headroom applied).
+      // defaultValue: 50_000 stroops ceiling derived with ~9.89x headroom over p90 to absorb surges.
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS_PUBNET, {
         name: 'MAX_TX_FEE_STROOPS_PUBNET',
         defaultValue: 50_000,
-        min: 100,
+        min: 5_056,
         max: 10_000_000,
       }),
       keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,

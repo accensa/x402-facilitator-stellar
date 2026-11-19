@@ -341,8 +341,21 @@ test('resolveConfig: MAX_TX_FEE_STROOPS_PUBNET rejects non-numeric and out-of-ra
   assertRejectsAll(
     withPubnet(),
     'MAX_TX_FEE_STROOPS_PUBNET',
-    ['abc', '12.5', '-100', '0', '99', '10000001'],
-    /MAX_TX_FEE_STROOPS_PUBNET must be a finite integer between 100 and 10000000/,
+    ['abc', '12.5', '-100', '0', '5055', '10000001'],
+    /MAX_TX_FEE_STROOPS_PUBNET must be a finite integer between 5056 and 10000000/,
+  );
+});
+
+test('resolveConfig: MAX_TX_FEE_STROOPS_PUBNET accepts range boundary values', () => {
+  assert.strictEqual(
+    resolveConfig({ ...withPubnet(), MAX_TX_FEE_STROOPS_PUBNET: '5056' }).perNetwork[PUBNET]
+      .maxTransactionFeeStroops,
+    5056,
+  );
+  assert.strictEqual(
+    resolveConfig({ ...withPubnet(), MAX_TX_FEE_STROOPS_PUBNET: '10000000' }).perNetwork[PUBNET]
+      .maxTransactionFeeStroops,
+    10000000,
   );
 });
 
