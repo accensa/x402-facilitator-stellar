@@ -148,6 +148,23 @@ pinned.
 
 ### Fixed
 
+- A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`
+  records `claimedAt` on the claim, and a claim older than `pendingTimeoutMs`
+  (default 60s, configurable per store) is treated as abandoned and taken over
+  by the retry. Previously a process that died between `begin()` and
+  `complete()`/`fail()` answered 409 to every retry of that key for the rest of
+  its lifetime. Claims inside the window still conflict, and records without a
+  timestamp are treated as abandoned rather than blocking the key forever.
+- One throwing credential subscriber no longer fails a successful Vault fetch
+  (#712): `emit` invokes each listener in its own `try`/`catch`, warns with the
+  listener's error message (never the credentials), and continues, so the
+  remaining subscribers are still notified and `fetchOnce()` resolves with the
+  credentials it just fetched.
+- `createMultiSignerEngine` refuses an invalid `requestTimeoutMs` at
+  construction (#713): a zero, negative, fractional or non-numeric value now
+  throws `multi-signer requestTimeoutMs must be a positive integer` instead of
+  aborting every co-signer request and reporting all co-signers as failed with
+  no diagnostic. `DEFAULT_COSIGNER_TIMEOUT_MS` is unchanged.
 - `npm run env:check` now fails on the other direction of drift: a variable
   documented in `.env.example` that no code in `src/` reads. Reads that are
   computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
