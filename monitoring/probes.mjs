@@ -84,11 +84,63 @@ async function timedGet(url, timeoutMs, fetchImpl = fetch) {
   }
 }
 
-function runCommand(cmd, timeoutMs) {
+/**
+ * Variables a spawned probe command needs in order to run at all. Nothing else
+ * from the probe's environment is passed on (#754): runCommand captures the
+ * child's stdout and stderr, and the probe report is published to the status page.
+ */
+const CHILD_ENV_ALLOWLIST = ['PATH', 'NODE_PATH', 'HOME'];
+
+/**
+ * The one documented synthetic payment probe. Keep this in step with
+ * `monitoring/config.example.json` and the `external-monitor` workflow.
+ */
+const DEFAULT_SYNTHETIC_COMMAND = 'node scripts/e2e.mjs';
+
+/**
+ * The explicit channel by which the synthetic payment probe receives what it
+ * needs to sign (#754 review). `scripts/e2e.mjs` reads exactly these from its
+ * environment: `ALICE_SECRET` is the payer key that makes a real payment,
+ * `FACILITATOR_URL` is the endpoint under probe, and the rest is the e2e
+ * script's documented configuration. Names are listed here, never spread from
+ * `process.env`, and values are never logged or written to the report — the
+ * report keeps counters only. `FACILITATOR_SECRET` is deliberately absent: that
+ * is the deployed facilitator's signing key, and nothing in the probe path reads
+ * it.
+ */
+const SYNTHETIC_PAYMENT_ENV = [
+  'ALICE_SECRET',
+  'FACILITATOR_URL',
+  'MERCHANT_ADDRESS',
+  'RESOURCE_PORT',
+];
+
+/**
+ * Builds a child process environment from explicit allowlists: the execution
+ * baseline for every spawned command, plus the credential channel, and the
+ * channel is only ever attached to the documented synthetic payment command — a
+ * config-supplied command override can never receive the payer key. Variables
+ * that are missing or empty are absent from the result, never the string
+ * "undefined".
+ */
+export function childProcessEnv(command, sourceEnv = process.env) {
+  const allowlist =
+    command === DEFAULT_SYNTHETIC_COMMAND
+      ? [...CHILD_ENV_ALLOWLIST, ...SYNTHETIC_PAYMENT_ENV]
+      : CHILD_ENV_ALLOWLIST;
+  const env = {};
+  for (const name of allowlist) {
+    const value = sourceEnv[name];
+    if (typeof value === 'string' && value.length > 0) env[name] = value;
+  }
+  return env;
+}
+
+export function runCommand(cmd, timeoutMs, sourceEnv = process.env) {
   return new Promise(resolve => {
     const started = nowMs();
     const [bin, ...args] = cmd.split(/\s+/);
-    const child = spawn(bin, args, { env: process.env });
+    const child = spawn(bin, args, { env: childProcessEnv(cmd, sourceEnv) });
     let out = '';
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (out += d));
@@ -206,9 +258,12 @@ export async function runProbes({
 
   // 4: synthetic end-to-end payment (optional)
   if (syntheticEnabled) {
+    // The probe's own environment is the source for the child's explicit
+    // channel, so nothing is read from process.env behind the caller's back.
     const r = await runCommandImpl(
-      synthetic.command || 'node scripts/e2e.mjs',
+      synthetic.command || DEFAULT_SYNTHETIC_COMMAND,
       synthetic.timeoutMs ?? 60000,
+      env,
     );
     out.probes.syntheticPayment = {
       ok: r.ok,
