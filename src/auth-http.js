@@ -1,5 +1,4 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { verifyApiKey } from './auth.js';
 
 const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_JWKS_CACHE_ENTRIES = 10;
