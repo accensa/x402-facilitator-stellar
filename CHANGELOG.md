@@ -213,6 +213,19 @@ pinned.
   truncated description now reports `truncated: ["description"]` and leaves
   `reason`'s dropped-fields list alone.
 
+- A configured API key whose secret contains a dot is no longer misrouted into
+  JWT verification: a failed JWT check now falls back to the timing-safe API key
+  comparison before answering 401, so a dotted key authenticates while a genuine
+  JWT still verifies with its keyId and scopes (#658).
+- The CORS `Access-Control-Expose-Headers` list now includes `X-Request-Id`, so
+  a browser can read the request id the facilitator sets on every response,
+  after the existing rate-limit entries (#657).
+- `readPaymentBody` no longer defaults its route to `verify`: call sites pass the
+  route explicitly and values outside `verify`/`settle` are rejected with a
+  `TypeError`, so a failed settle returns the settle failure envelope instead of
+  the verify one (#656).
+
+
 ## [0.0.1] - 2026-08-11
 
 Initial conformance spike: a minimal x402 facilitator for Stellar, built on
