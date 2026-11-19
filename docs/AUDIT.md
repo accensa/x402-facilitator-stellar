@@ -50,8 +50,6 @@ records the 7-day request-log class, pending the automated enforcement tracked
 in #50.
 
 ## Proposed Scope
-
-## Proposed Scope
 The scope of the audit includes the HTTP transport, configuration, authentication, and operational concerns implemented in this repository (`x402-facilitator-stellar`).
 
 **Out of Scope (Upstream):** 
