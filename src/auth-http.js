@@ -128,13 +128,25 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
           req.jwtPayload = payload;
           return;
         } catch (err) {
-          audit('auth_failure', { actor: `ip:${req.ip}`, reason: err.message });
-          return reply.code(401).send({
+          const failure = {
             isValid: false,
             invalidReason: err.message,
             invalidMessage: 'unauthorized',
             reason: err.message,
-          });
+          };
+          if (apiKeys.length > 0) {
+            const keyResult = verifyApiKey(authHeader, apiKeys);
+            if (keyResult.valid) {
+              const keyId = keyResult.keyId;
+              if (req.span) req.span.keyId = keyId;
+              req.keyId = keyId.toUpperCase();
+              return;
+            }
+            failure.invalidReason = keyResult.reason;
+            failure.reason = keyResult.reason;
+          }
+          audit('auth_failure', { actor: `ip:${req.ip}`, reason: failure.reason });
+          return reply.code(401).send(failure);
         }
       }
 

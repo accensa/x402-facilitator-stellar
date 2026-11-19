@@ -16,6 +16,7 @@ export const EXPOSED_HEADERS = [
   'RateLimit-Reset',
   'Retry-After',
   'EXTENSION-RESPONSES',
+  'X-Request-Id',
 ].join(', ');
 
 /**
