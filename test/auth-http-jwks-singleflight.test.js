@@ -1,144 +1,81 @@
-/**
- * JWT JWKS single-flight test for issue #679.
- * Verifies that concurrent cold JWT requests each build a new JWKS set
- * and that only one fetch is produced per JWKS URI.
- */
-
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { createJwtVerifier } from '../src/auth-http.js';
 
-const TEST_JWKS_URI = 'https://example.com/.well-known/jwts';
+async function startJwksServer({ failRequests = 0 } = {}) {
+  const { publicKey, privateKey } = await generateKeyPair('EdDSA');
+  const publicJwk = await exportJWK(publicKey);
+  publicJwk.kid = 'test-key';
+  publicJwk.alg = 'EdDSA';
+  publicJwk.use = 'sig';
+
+  let requestCount = 0;
+  let remainingFailures = failRequests;
+  const server = Fastify();
+  server.get('/jwks', async (_req, reply) => {
+    requestCount++;
+    if (remainingFailures > 0) {
+      remainingFailures--;
+      return reply.code(503).send({ error: 'temporary JWKS failure' });
+    }
+    return reply.send({ keys: [publicJwk] });
+  });
+  await server.listen({ port: 0, host: '127.0.0.1' });
+  const address = server.server.address();
+
+  const token = await new SignJWT({ scope: 'read' })
+    .setProtectedHeader({ alg: 'EdDSA', kid: 'test-key' })
+    .setIssuer('test-issuer')
+    .setAudience('test-audience')
+    .setSubject('test-user')
+    .setExpirationTime('5m')
+    .sign(privateKey);
+
+  return {
+    server,
+    token,
+    uri: `http://127.0.0.1:${address.port}/jwks`,
+    getRequestCount: () => requestCount,
+  };
+}
 
 describe('JWKS single-flight', () => {
-  test('with a cold cache, 10 concurrent verifyToken calls produce exactly one fetch', async _t => {
-    let fetchCallCount = 0;
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (_input, _init) => {
-      fetchCallCount++;
-      // Return a minimal JWKS response
-      const body = JSON.stringify({
-        keys: [{ kty: 'OKP', crv: 'Ed25519', kid: '1', alg: 'EdDSA' }],
-      });
-      return new Response(body, { status: 200 });
-    };
-
+  test('a cold cache serves concurrent verifications with one JWKS request', async () => {
+    const jwks = await startJwksServer();
     try {
-      const fastify = Fastify();
-
-      const jwtVerifier = createJwtVerifier(TEST_JWKS_URI);
-
-      fastify.get('/verify', {
-        handler: async (req, reply) => {
-          const authHeader = req.headers.authorization;
-          if (!authHeader) {
-            return reply.code(401).send({ isValid: false });
-          }
-          try {
-            await jwtVerifier.verifyToken(authHeader.replace('Bearer ', ''));
-            reply.send({ valid: true });
-          } catch (err) {
-            reply.code(401).send({ isValid: false, reason: err.message });
-          }
-        },
-        onRequest: [],
+      const verifier = createJwtVerifier(jwks.uri, {
+        issuer: 'test-issuer',
+        audience: 'test-audience',
       });
 
-      await fastify.ready();
+      const payloads = await Promise.all(
+        Array.from({ length: 10 }, () => verifier.verifyToken(jwks.token)),
+      );
 
-      // Fire 10 concurrent requests with cold JWKS cache
-      fetchCallCount = 0;
-      const requests = Array(10)
-        .fill()
-        .map(_ =>
-          fastify.inject({
-            method: 'GET',
-            url: '/verify',
-            headers: {
-              Authorization: 'Bearer some-fake-jwt-token',
-            },
-          }),
-        );
-
-      const responses = await Promise.all(requests);
-
-      // Exactly one fetch should have been made
-      assert.strictEqual(fetchCallCount, 1, `Expected 1 fetch, got ${fetchCallCount}`);
-
-      // All requests should have been processed
-      for (const resp of responses) {
-        assert.ok(resp.statusCode === 200 || resp.statusCode === 401);
-      }
-
-      await fastify.close();
+      assert.equal(payloads.length, 10);
+      assert.equal(jwks.getRequestCount(), 1);
     } finally {
-      globalThis.fetch = originalFetch;
+      await jwks.server.close();
     }
   });
 
-  test('a failed construction leaves no permanently rejected promise: the next call retries', async _t => {
-    let fetchCallCount = 0;
-    const originalFetch = globalThis.fetch;
-    let shouldFail = true;
-    globalThis.fetch = async (_input, _init) => {
-      fetchCallCount++;
-      if (shouldFail) {
-        shouldFail = false;
-        throw new Error('JWKS server unreachable');
-      }
-      const body = JSON.stringify({ keys: [] });
-      return new Response(body, { status: 200 });
-    };
-
+  test('a failed JWKS request is cleared so the next call retries', async () => {
+    const jwks = await startJwksServer({ failRequests: 1 });
     try {
-      const fastify = Fastify();
-
-      const jwtVerifier = createJwtVerifier(TEST_JWKS_URI);
-
-      fastify.get('/verify', {
-        handler: async (req, reply) => {
-          const authHeader = req.headers.authorization;
-          if (!authHeader) {
-            return reply.code(401).send({ isValid: false });
-          }
-          try {
-            await jwtVerifier.verifyToken(authHeader.replace('Bearer ', ''));
-            reply.send({ valid: true });
-          } catch (err) {
-            reply.code(401).send({ isValid: false, reason: err.message });
-          }
-        },
-        onRequest: [],
+      const verifier = createJwtVerifier(jwks.uri, {
+        issuer: 'test-issuer',
+        audience: 'test-audience',
       });
 
-      await fastify.ready();
+      await assert.rejects(() => verifier.verifyToken(jwks.token));
+      const payload = await verifier.verifyToken(jwks.token);
 
-      // First call: should fail
-      const _firstResp = await fastify.inject({
-        method: 'GET',
-        url: '/verify',
-        headers: {
-          Authorization: 'Bearer some-fake-jwt-token',
-        },
-      });
-
-      // Second call: should retry and succeed (the in-flight entry was cleared on failure)
-      const secondResp = await fastify.inject({
-        method: 'GET',
-        url: '/verify',
-        headers: {
-          Authorization: 'Bearer some-fake-jwt-token',
-        },
-      });
-
-      // Should have made 2 fetches: 1 initial + 1 retry
-      assert.strictEqual(fetchCallCount, 2, `Expected 2 fetches (1 retry), got ${fetchCallCount}`);
-      assert.strictEqual(secondResp.statusCode, 200, 'Second call should succeed after retry');
-
-      await fastify.close();
+      assert.equal(payload.sub, 'test-user');
+      assert.equal(jwks.getRequestCount(), 2);
     } finally {
-      globalThis.fetch = originalFetch;
+      await jwks.server.close();
     }
   });
 });

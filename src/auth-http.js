@@ -1,12 +1,3 @@
-/**
- * JWT Bearer Token Authentication with JWKS verification (#419).
- *
- * Supports RS256 and EdDSA algorithms. Verifies JWT signature using a
- * JWKS endpoint, validates standard claims (iss, aud, exp, nbf, sub),
- * extracts scopes, and enforces least-privilege access.
- *
- * Tokens are cached in memory with TTL matching token expiration.
- */
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { verifyApiKey } from './auth.js';
 
@@ -40,54 +31,38 @@ class JwksCache {
 }
 
 const jwksCache = new JwksCache();
-/** Map of jwksUri => in-flight Promise<JwksSet> */
 const jwksInFlight = new Map();
 
 export function createJwtVerifier(jwksUri, options = {}) {
   const { issuer = null, audience = null, clockTolerance = 30, requiredScopes = [] } = options;
 
   async function verifyToken(token) {
-    // Single-flight: if a fetch is already in progress for this JWKS URI,
-    // await the existing promise instead of starting a new one.
-    if (jwksInFlight.has(jwksUri)) {
-      await jwksInFlight.get(jwksUri);
-      // After the in-flight fetch resolves, the JWKS is already stored in
-      // jwksCache by the original fetcher; just proceed to use it.
-    }
-
     let jwks = jwksCache.get(jwksUri);
-    if (!jwks) {
-      // Start single-flight fetch so a burst produces only one remote load.
-      const fetchPromise = (async () => {
-        const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
-          cacheMaxAge: JWKS_CACHE_TTL_MS,
-          cooldownDuration: JWKS_CACHE_TTL_MS,
-        });
-        jwksCache.set(jwksUri, jwksResult);
-        // Clean up the in-flight entry so a later retry is not blocked.
-        jwksInFlight.delete(jwksUri);
-        return jwksResult;
-      })();
 
-      jwksInFlight.set(jwksUri, fetchPromise);
+    if (!jwks) {
+      let fetchPromise = jwksInFlight.get(jwksUri);
+      if (!fetchPromise) {
+        fetchPromise = Promise.resolve().then(() => {
+          const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
+            cacheMaxAge: JWKS_CACHE_TTL_MS,
+            cooldownDuration: JWKS_CACHE_TTL_MS,
+          });
+          jwksCache.set(jwksUri, jwksResult);
+          return jwksResult;
+        });
+        jwksInFlight.set(jwksUri, fetchPromise);
+      }
 
       try {
-        await fetchPromise;
-      } catch (err) {
-        // If the construction failed, remove the entry so the next call retries.
-        jwksInFlight.delete(jwksUri);
-        throw err;
-      }
-
-      jwks = jwksCache.get(jwksUri);
-      if (!jwks) {
-        throw new Error('JWKS fetch did not populate cache');
+        jwks = await fetchPromise;
+      } finally {
+        if (jwksInFlight.get(jwksUri) === fetchPromise) {
+          jwksInFlight.delete(jwksUri);
+        }
       }
     }
 
-    const verifyOptions = {
-      clockTolerance,
-    };
+    const verifyOptions = { clockTolerance };
     if (issuer) verifyOptions.issuer = issuer;
     if (audience) verifyOptions.audience = audience;
 
@@ -110,127 +85,8 @@ export function createJwtVerifier(jwksUri, options = {}) {
         throw new Error(`missing_required_scope: ${required}`);
       }
     }
-
     return { payload, scopes };
   }
 
   return { verifyToken, verifyAndExtractScopes };
 }
-
-export function createAuthMiddlewareWithJwt({ config, audit }) {
-  const { apiKeys = [] } = config;
-
-  const jwtConfig = config.jwt ?? {};
-  let jwtVerifier = null;
-  if (jwtConfig.jwksUri) {
-    jwtVerifier = createJwtVerifier(jwtConfig.jwksUri, {
-      issuer: jwtConfig.issuer ?? null,
-      audience: jwtConfig.audience ?? null,
-      clockTolerance: jwtConfig.clockTolerance ?? 30,
-      requiredScopes: jwtConfig.requiredScopes ?? [],
-    });
-  }
-
-  async function requireApiKey(req, reply) {
-    if (apiKeys.length === 0 && !jwtVerifier) return;
-
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      audit('auth_failure', { actor: `ip:${req.ip}`, reason: 'missing_auth_header' });
-      return reply.code(401).send({
-        isValid: false,
-        invalidReason: 'missing_auth_header',
-        invalidMessage: 'unauthorized',
-        reason: 'missing_auth_header',
-      });
-    }
-
-    if (authHeader.startsWith('Bearer ')) {
-      const token = authHeader.substring(7);
-
-      if (jwtVerifier && token.includes('.')) {
-        try {
-          const { payload, scopes } = await jwtVerifier.verifyAndExtractScopes(token);
-
-          const keyId = payload.sub ?? payload.azp ?? 'jwt';
-          if (req.span) req.span.keyId = keyId;
-          req.keyId = keyId.toUpperCase();
-          req.scopes = scopes;
-          req.jwtPayload = payload;
-          return;
-        } catch (err) {
-          audit('auth_failure', { actor: `ip:${req.ip}`, reason: err.message });
-          return reply.code(401).send({
-            isValid: false,
-            invalidReason: err.message,
-            invalidMessage: 'unauthorized',
-            reason: err.message,
-          });
-        }
-      }
-
-      const result = verifyApiKey(authHeader, apiKeys);
-      if (!result.valid) {
-        audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
-        return reply.code(401).send({
-          isValid: false,
-          invalidReason: result.reason,
-          invalidMessage: 'unauthorized',
-          reason: result.reason,
-        });
-      }
-
-      if (req.span) req.span.keyId = result.keyId;
-      req.keyId = result.keyId.toUpperCase();
-      return;
-    }
-
-    const result = verifyApiKey(authHeader, apiKeys);
-    if (!result.valid) {
-      audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
-      return reply.code(401).send({
-        isValid: false,
-        invalidReason: result.reason,
-        invalidMessage: 'unauthorized',
-        reason: result.reason,
-      });
-    }
-
-    if (req.span) req.span.keyId = result.keyId;
-    req.keyId = result.keyId.toUpperCase();
-  }
-
-  async function requireApiKeyStrict(req, reply) {
-    if (apiKeys.length === 0 && !jwtVerifier) {
-      return reply.code(401).send({
-        isValid: false,
-        invalidReason: 'open_mode_usage_forbidden',
-        invalidMessage: 'unauthorized',
-      });
-    }
-    return requireApiKey(req, reply);
-  }
-
-  function requireScope(...scopes) {
-    return async (req, reply) => {
-      if (!req.scopes || !scopes.every(s => req.scopes.includes(s))) {
-        audit('auth_failure', {
-          actor: req.keyId ?? `ip:${req.ip}`,
-          reason: 'insufficient_scope',
-          required: scopes,
-          granted: req.scopes ?? [],
-        });
-        return reply.code(403).send({
-          isValid: false,
-          invalidReason: 'insufficient_scope',
-          invalidMessage: `Required scope(s): ${scopes.join(', ')}`,
-          reason: 'insufficient_scope',
-        });
-      }
-    };
-  }
-
-  return { requireApiKey, requireApiKeyStrict, requireScope };
-}
-
-export default { createJwtVerifier, createAuthMiddlewareWithJwt };
