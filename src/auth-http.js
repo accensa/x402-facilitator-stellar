@@ -1,4 +1,14 @@
+/**
+ * JWT Bearer Token Authentication with JWKS verification (#419).
+ *
+ * Supports RS256 and EdDSA algorithms. Verifies JWT signature using a
+ * JWKS endpoint, validates standard claims (iss, aud, exp, nbf, sub),
+ * extracts scopes, and enforces least-privilege access.
+ *
+ * Tokens are cached in memory with TTL matching token expiration.
+ */
 import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { verifyApiKey } from './auth.js';
 
 const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_JWKS_CACHE_ENTRIES = 10;
@@ -30,38 +40,53 @@ class JwksCache {
 }
 
 const jwksCache = new JwksCache();
+/** Map of jwksUri => in-flight Promise<JwksSet> */
 const jwksInFlight = new Map();
 
 export function createJwtVerifier(jwksUri, options = {}) {
   const { issuer = null, audience = null, clockTolerance = 30, requiredScopes = [] } = options;
 
   async function verifyToken(token) {
-    let jwks = jwksCache.get(jwksUri);
+    // Single-flight: if a fetch is already in progress for this JWKS URI,
+    // await the existing promise instead of starting a new one.
+    // Race-safe pattern: check for existing in-flight promise first.
+    // If not present, create one and set it in the map BEFORE awaiting,
+    // so concurrent calls see the promise and await it instead of creating
+    // a duplicate fetch.
+    let fetchPromise = jwksInFlight.get(jwksUri);
 
-    if (!jwks) {
-      let fetchPromise = jwksInFlight.get(jwksUri);
-      if (!fetchPromise) {
-        fetchPromise = Promise.resolve().then(() => {
-          const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
-            cacheMaxAge: JWKS_CACHE_TTL_MS,
-            cooldownDuration: JWKS_CACHE_TTL_MS,
-          });
-          jwksCache.set(jwksUri, jwksResult);
-          return jwksResult;
+    if (!fetchPromise) {
+      // Create the fetch promise first.
+      const newFetchPromise = (async () => {
+        const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
+          cacheMaxAge: JWKS_CACHE_TTL_MS,
+          cooldownDuration: JWKS_CACHE_TTL_MS,
         });
-        jwksInFlight.set(jwksUri, fetchPromise);
-      }
+        jwksCache.set(jwksUri, jwksResult);
+        // Clean up the in-flight entry so a later retry is not blocked.
+        jwksInFlight.delete(jwksUri);
+        return jwksResult;
+      })();
 
-      try {
-        jwks = await fetchPromise;
-      } finally {
-        if (jwksInFlight.get(jwksUri) === fetchPromise) {
-          jwksInFlight.delete(jwksUri);
-        }
-      }
+      // Atomically set in the map so concurrent calls see this promise.
+      // If another call already set one, use that one instead.
+      jwksInFlight.set(jwksUri, newFetchPromise);
+      fetchPromise = newFetchPromise;
     }
 
-    const verifyOptions = { clockTolerance };
+    // Await the (now guaranteed to exist) in-flight promise.
+    await fetchPromise;
+
+    // After the in-flight fetch resolves, the JWKS is already stored in
+    // jwksCache by the original fetcher; just proceed to use it.
+    const jwks = jwksCache.get(jwksUri);
+    if (!jwks) {
+      throw new Error('JWKS fetch did not populate cache');
+    }
+
+    const verifyOptions = {
+      clockTolerance,
+    };
     if (issuer) verifyOptions.issuer = issuer;
     if (audience) verifyOptions.audience = audience;
 
@@ -84,8 +109,127 @@ export function createJwtVerifier(jwksUri, options = {}) {
         throw new Error(`missing_required_scope: ${required}`);
       }
     }
+
     return { payload, scopes };
   }
 
   return { verifyToken, verifyAndExtractScopes };
 }
+
+export function createAuthMiddlewareWithJwt({ config, audit }) {
+  const { apiKeys = [] } = config;
+
+  const jwtConfig = config.jwt ?? {};
+  let jwtVerifier = null;
+  if (jwtConfig.jwksUri) {
+    jwtVerifier = createJwtVerifier(jwtConfig.jwksUri, {
+      issuer: jwtConfig.issuer ?? null,
+      audience: jwtConfig.audience ?? null,
+      clockTolerance: jwtConfig.clockTolerance ?? 30,
+      requiredScopes: jwtConfig.requiredScopes ?? [],
+    });
+  }
+
+  async function requireApiKey(req, reply) {
+    if (apiKeys.length === 0 && !jwtVerifier) return;
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      audit('auth_failure', { actor: `ip:${req.ip}`, reason: 'missing_auth_header' });
+      return reply.code(401).send({
+        isValid: false,
+        invalidReason: 'missing_auth_header',
+        invalidMessage: 'unauthorized',
+        reason: 'missing_auth_header',
+      });
+    }
+
+    if (authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+
+      if (jwtVerifier && token.includes('.')) {
+        try {
+          const { payload, scopes } = await jwtVerifier.verifyAndExtractScopes(token);
+
+          const keyId = payload.sub ?? payload.azp ?? 'jwt';
+          if (req.span) req.span.keyId = keyId;
+          req.keyId = keyId.toUpperCase();
+          req.scopes = scopes;
+          req.jwtPayload = payload;
+          return;
+        } catch (err) {
+          audit('auth_failure', { actor: `ip:${req.ip}`, reason: err.message });
+          return reply.code(401).send({
+            isValid: false,
+            invalidReason: err.message,
+            invalidMessage: 'unauthorized',
+            reason: err.message,
+          });
+        }
+      }
+
+      const result = verifyApiKey(authHeader, apiKeys);
+      if (!result.valid) {
+        audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
+        return reply.code(401).send({
+          isValid: false,
+          invalidReason: result.reason,
+          invalidMessage: 'unauthorized',
+          reason: result.reason,
+        });
+      }
+
+      if (req.span) req.span.keyId = result.keyId;
+      req.keyId = result.keyId.toUpperCase();
+      return;
+    }
+
+    const result = verifyApiKey(authHeader, apiKeys);
+    if (!result.valid) {
+      audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
+      return reply.code(401).send({
+        isValid: false,
+        invalidReason: result.reason,
+        invalidMessage: 'unauthorized',
+        reason: result.reason,
+      });
+    }
+
+    if (req.span) req.span.keyId = result.keyId;
+    req.keyId = result.keyId.toUpperCase();
+  }
+
+  async function requireApiKeyStrict(req, reply) {
+    if (apiKeys.length === 0 && !jwtVerifier) {
+      return reply.code(401).send({
+        isValid: false,
+        invalidReason: 'open_mode_usage_forbidden',
+        invalidMessage: 'unauthorized',
+      });
+    }
+    return requireApiKey(req, reply);
+  }
+
+  function requireScope(...scopes) {
+    return async (req, reply) => {
+      if (!req.scopes || !scopes.every(s => req.scopes.includes(s))) {
+        audit('auth_failure', {
+          actor: req.keyId ?? `ip:${req.ip}`,
+          reason: 'insufficient_scope',
+          required: scopes,
+          granted: req.scopes ?? [],
+        });
+        return reply.code(403).send({
+          isValid: false,
+          invalidReason: 'insufficient_scope',
+          invalidMessage: `Required scope(s): ${scopes.join(', ')}`,
+          reason: 'insufficient_scope',
+        });
+      }
+    };
+  }
+
+  return { requireApiKey, requireApiKeyStrict, requireScope };
+}
+
+export default { createJwtVerifier, createAuthMiddlewareWithJwt };

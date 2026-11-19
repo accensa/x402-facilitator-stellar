@@ -64,7 +64,7 @@ export function createCorsHook(corsConfig = {}) {
         granted = allowlisted ? origin : false;
       }
 
-      const existingVary = reply.getHeader('Vary');
+      const existingVary = reply.getHeader ? reply.getHeader('Vary') : undefined;
       const varyTokens = [];
       const seen = new Set();
 
@@ -73,8 +73,9 @@ export function createCorsHook(corsConfig = {}) {
         for (const entry of entries) {
           for (const token of String(entry).split(',')) {
             const normalized = token.trim();
+            if (!normalized) continue;
             const key = normalized.toLowerCase();
-            if (normalized && !seen.has(key)) {
+            if (!seen.has(key)) {
               seen.add(key);
               varyTokens.push(normalized);
             }
@@ -82,7 +83,7 @@ export function createCorsHook(corsConfig = {}) {
         }
       };
 
-      addTokens(existingVary);
+      if (existingVary) addTokens(existingVary);
       addTokens('Origin');
       if (req.headers['accept-encoding']) {
         addTokens('Accept-Encoding');
