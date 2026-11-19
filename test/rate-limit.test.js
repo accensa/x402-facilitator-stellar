@@ -362,6 +362,7 @@ test('getUsage reports every counter alongside the configured limits', async t =
     settle_rpd: 1,
     fee_spd: 250,
     catalog_rpm: 1,
+    catalog_read_rpm: 0,
     limits: {
       verify_rpm: DEFAULT_LIMITS.verifyRpm,
       settle_rpm: DEFAULT_LIMITS.settleRpm,
@@ -369,6 +370,7 @@ test('getUsage reports every counter alongside the configured limits', async t =
       settle_rpd: DEFAULT_LIMITS.settleRpd,
       fee_spd: DEFAULT_LIMITS.feeSpd,
       catalog_rpm: 7,
+      catalog_read_rpm: 60,
     },
   });
 });

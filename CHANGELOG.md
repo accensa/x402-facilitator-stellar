@@ -51,6 +51,12 @@ pinned.
   concurrently with isolated failures, responses are matched by id, and batches
   over 25 requests are refused. This replaces the previous blanket `-32600`
   rejection of arrays (#428).
+- Seller documentation stating the amount rules the discovery SDK enforces
+  (`docs/SELLER.md`): `pricing.amount` is a decimal numeric string or a BigInt
+  stroop count, JavaScript numbers are rejected before precision is lost, and
+  fractions longer than the 7-decimal `STELLAR_DECIMALS` are truncated rather
+  than rounded (#704).
+
 - Optional mTLS client-certificate authentication for outbound webhooks. A
   delivery carrying `mtls.ref` is sent with a client certificate resolved from a
   ref, over a pooled per-credential agent, and still carries the existing HMAC
@@ -258,6 +264,12 @@ pinned.
   The field is dropped and the rest of the listing still lands
   (`partially landed`). A bare `&` — "Weather & tides" — is not markup and is
   unaffected.
+- The dead-letter queue operator purge now rejects an unknown `status` before it
+  reaches the database, instead of issuing a `DELETE` whose `WHERE` clause could
+  never match and silently reporting zero purged rows (#706).
+- `GET /usage` now reports zero counters — and retains every counter field,
+  including `catalog_read_rpm` — when the shared rate-limit store throws, instead
+  of dropping the fields from the JSON payload (#705).
 - Truncated fields are reported in a new `truncated` list on the
   `EXTENSION-RESPONSES` envelope and the `POST /discovery/resources` response,
   separate from `softDrops` (#219). Previously a description shortened to 200
