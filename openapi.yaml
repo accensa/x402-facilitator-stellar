@@ -592,8 +592,6 @@ paths:
           description: |
             The client's `If-None-Match` validator still matches — the page is
             unchanged, and the response carries no body (#200).
-        '429':
-          $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/InternalError'
 
