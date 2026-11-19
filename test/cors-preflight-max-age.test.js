@@ -1,7 +1,8 @@
 /**
  * Preflight Max-Age security test for issue #678.
- * Verifies that OPTIONS /verify returns short max-age (300s) and
- * OPTIONS /supported returns longer max-age (600s), with config overrides.
+ * Verifies that the authenticated route class caches its preflight for 300s
+ * and the public class for 600s, and that configured overrides reach the
+ * header while invalid values fall back to the class default.
  */
 
 import { test, describe } from 'node:test';
@@ -24,9 +25,9 @@ describe('Preflight Max-Age', () => {
     );
     assert.strictEqual(result, 999, 'override of public max-age should be 999');
 
-    // no override, authenticated should use default 60
+    // no override, authenticated should use default 300
     result = resolvePreflightMaxAge({}, 'authenticated');
-    assert.strictEqual(result, 60, 'default authenticated max-age should be 60');
+    assert.strictEqual(result, 300, 'default authenticated max-age should be 300');
 
     // no override, public should use default 600
     result = resolvePreflightMaxAge({}, 'public');
@@ -39,28 +40,28 @@ describe('Preflight Max-Age', () => {
       { preflightMaxAgeSeconds: { authenticated: -1, public: 600 } },
       'authenticated',
     );
-    assert.strictEqual(result, 60, 'negative value should fall back to default');
+    assert.strictEqual(result, 300, 'negative value should fall back to default');
 
     // Invalid: zero
     result = resolvePreflightMaxAge(
       { preflightMaxAgeSeconds: { authenticated: 0, public: 600 } },
       'authenticated',
     );
-    assert.strictEqual(result, 60, 'zero value should fall back to default');
+    assert.strictEqual(result, 300, 'zero value should fall back to default');
 
     // Invalid: NaN
     result = resolvePreflightMaxAge(
       { preflightMaxAgeSeconds: { authenticated: NaN, public: 600 } },
       'authenticated',
     );
-    assert.strictEqual(result, 60, 'NaN value should fall back to default');
+    assert.strictEqual(result, 300, 'NaN value should fall back to default');
 
     // Invalid: string that's not a number
     result = resolvePreflightMaxAge(
       { preflightMaxAgeSeconds: { authenticated: 'abc', public: 600 } },
       'authenticated',
     );
-    assert.strictEqual(result, 60, 'string value should fall back to default');
+    assert.strictEqual(result, 300, 'string value should fall back to default');
 
     // Valid: should use the override
     result = resolvePreflightMaxAge(

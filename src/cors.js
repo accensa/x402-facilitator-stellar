@@ -8,6 +8,8 @@
  *     never default open: origins must be explicitly allowlisted in CORS_ALLOWED_ORIGINS.
  */
 
+// Headers a browser client must be able to read but which are not
+// CORS-safelisted response headers.
 export const EXPOSED_HEADERS = [
   'RateLimit-Limit',
   'RateLimit-Remaining',
@@ -16,6 +18,28 @@ export const EXPOSED_HEADERS = [
   'EXTENSION-RESPONSES',
 ].join(', ');
 
+/**
+ * Compiles the configured allowlist into anchored origin patterns (#414).
+ *
+ * A `CORS_ALLOWED_ORIGINS` entry is a merchant domain *pattern*, not a
+ * literal: `https://.*\.merchant\.example` admits a merchant's whole
+ * subdomain tree, while an exact origin such as `https://shop.example.com`
+ * remains valid configuration — it is simply a pattern that matches only
+ * itself. Entries are anchored to the whole string, so a pattern can never be
+ * satisfied by an attacker hostname that merely *contains* the merchant's
+ * (`seller.example.com` must not match `seller.example.com.evil.net`). An
+ * entry's `.` is the regex wildcard it always was: write `seller\.example\.com`
+ * when the host must match literally.
+ *
+ * Patterns are compiled once, here, at hook construction rather than on every
+ * request. They come from operator configuration, never from a caller; an
+ * entry that is not a valid regular expression throws now — at boot, naming
+ * the entry — instead of misbehaving on the first cross-origin request.
+ *
+ * @param {string[]} entries - configured origins / merchant domain patterns
+ * @returns {RegExp[]} the compiled patterns, each anchored at both ends
+ * @throws {Error} when an entry is not a valid regular expression
+ */
 function compileOriginPatterns(entries) {
   return entries.map(entry => {
     try {
@@ -28,6 +52,19 @@ function compileOriginPatterns(entries) {
   });
 }
 
+/**
+ * Reports whether an `Origin` header value matches the compiled allowlist (#414).
+ *
+ * The full origin is tested first. Then each dot-aligned suffix of the
+ * origin's hostname is tested, because a merchant normally configures a
+ * domain (`shop.example.com`) without a scheme it never wrote. Splitting on
+ * label boundaries is what makes `example.com` match `shop.example.com` while
+ * still refusing `badexample.com`.
+ *
+ * @param {RegExp[]} patterns - compiled by compileOriginPatterns()
+ * @param {string} [origin] - the request's Origin header, absent when nothing sent one
+ * @returns {boolean}
+ */
 function originMatches(patterns, origin) {
   if (!origin) return false;
   if (patterns.some(pattern => pattern.test(origin))) return true;
@@ -36,6 +73,8 @@ function originMatches(patterns, origin) {
   try {
     hostname = new URL(origin).hostname;
   } catch {
+    // Not a URL an Origin header can legitimately hold ("null", a mangled
+    // value): there is no hostname to match patterns against.
     return false;
   }
 
@@ -47,10 +86,53 @@ function originMatches(patterns, origin) {
   return false;
 }
 
+/**
+ * Appends a token to a reply's `Vary` header rather than replacing it (#677).
+ *
+ * `reply.header()` overwrites that name's value, while `@fastify/compress`
+ * appends its own `Vary: Accept-Encoding` after this hook runs. Writing
+ * `'Origin'` alone therefore erased the compression token, and a shared cache
+ * could key a compressed cross-origin response without `Origin` — handing one
+ * origin the representation built for another.
+ *
+ * `getHeader` returns a string or an array, and an array entry may itself hold
+ * a comma-separated list, so every value is split into tokens. Tokens are
+ * deduplicated case-insensitively while the first spelling and the token order
+ * are preserved.
+ *
+ * @param {import('fastify').FastifyReply} reply
+ * @param {string} token - the token this hook requires in Vary, e.g. 'Origin'
+ */
+function appendVary(reply, token) {
+  const existing = reply.getHeader('Vary');
+  const values = existing === undefined ? [] : Array.isArray(existing) ? existing : [existing];
+
+  const seen = new Set();
+  const tokens = [];
+  for (const value of [...values, token]) {
+    for (const part of String(value).split(',')) {
+      const trimmed = part.trim();
+      if (!trimmed || seen.has(trimmed.toLowerCase())) continue;
+      seen.add(trimmed.toLowerCase());
+      tokens.push(trimmed);
+    }
+  }
+
+  reply.header('Vary', tokens.join(', '));
+}
+
+/**
+ * Creates a Fastify `onRequest` hook enforcing route-class CORS policies.
+ *
+ * @param {object} [corsConfig={}]
+ * @param {string[]} [corsConfig.allowedOrigins=[]] - merchant domain patterns,
+ *   compiled once by compileOriginPatterns() and matched against each
+ *   request's Origin, which is then reflected verbatim when it matches (#414)
+ * @returns {(policy: 'public' | 'authenticated') => (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => Promise<void>}
+ */
 export function createCorsHook(corsConfig = {}) {
   const allowedOrigins = corsConfig.allowedOrigins ?? [];
   const patterns = compileOriginPatterns(allowedOrigins);
-
   return function cors(policy) {
     return async (req, reply) => {
       reply.header('Access-Control-Expose-Headers', EXPOSED_HEADERS);
@@ -61,37 +143,20 @@ export function createCorsHook(corsConfig = {}) {
       if (policy === 'public') {
         granted = allowlisted ? origin : allowedOrigins.length === 0 ? '*' : false;
       } else {
+        // Never default-open anything authenticated.
         granted = allowlisted ? origin : false;
       }
 
-      const existingVary = reply.getHeader ? reply.getHeader('Vary') : undefined;
-      const varyTokens = [];
-      const seen = new Set();
-
-      const addTokens = values => {
-        const entries = Array.isArray(values) ? values : [values];
-        for (const entry of entries) {
-          for (const token of String(entry).split(',')) {
-            const normalized = token.trim();
-            if (!normalized) continue;
-            const key = normalized.toLowerCase();
-            if (!seen.has(key)) {
-              seen.add(key);
-              varyTokens.push(normalized);
-            }
-          }
-        }
-      };
-
-      if (existingVary) addTokens(existingVary);
-      addTokens('Origin');
-      if (req.headers['accept-encoding']) {
-        addTokens('Accept-Encoding');
-      }
-      reply.header('Vary', varyTokens.join(', '));
+      // The response varies with Origin even when no grant is issued.
+      appendVary(reply, 'Origin');
 
       if (granted) {
         reply.header('Access-Control-Allow-Origin', granted);
+        // A concrete reflection — never the wildcard — is the case where a
+        // browser may attach credentials: `*` plus
+        // Access-Control-Allow-Credentials is refused by the spec, so the
+        // grant that admits a merchant's own origin is also the grant that
+        // may carry its credentials (#414).
         if (granted !== '*') {
           reply.header('Access-Control-Allow-Credentials', 'true');
         }
@@ -100,13 +165,43 @@ export function createCorsHook(corsConfig = {}) {
   };
 }
 
+/**
+ * Request headers a browser must be allowed to send on an x402 payment call
+ * (#414). `Authorization` carries the caller's credential, `Content-Type` every
+ * JSON POST, and `X-402-Payment` the payment header a client retries with —
+ * nothing else is needed by an x402 caller, so a preflight advertises exactly
+ * this list and no wider surface.
+ */
 const ALLOWED_REQUEST_HEADERS = 'Authorization, Content-Type, X-402-Payment';
 
+/**
+ * Default max-age seconds for preflight responses, per route class (#678).
+ *
+ * A browser caches the whole preflight answer — including the
+ * `Access-Control-Allow-Origin` grant — for this window, so it is also the
+ * delay before an allowlist change reaches a browser that already holds one.
+ * Authenticated routes get the short window because they carry a credential;
+ * public reads get the longer one that keeps discovery cheap.
+ */
 const DEFAULT_PREFLIGHT_MAX_AGE = {
-  authenticated: 60,
+  authenticated: 300,
   public: 600,
 };
 
+/**
+ * Resolves the preflight max-age for a route class (#678).
+ *
+ * An operator may override either class through
+ * `corsConfig.preflightMaxAgeSeconds`. Only a finite, positive number is
+ * honoured: zero, a negative number, `NaN` or a non-number falls back to the
+ * class default, so a misconfiguration can never emit `Access-Control-Max-Age:
+ * NaN` or a header a browser would treat as unbounded.
+ *
+ * @param {object} [corsConfig={}]
+ * @param {{authenticated?: number, public?: number}} [corsConfig.preflightMaxAgeSeconds]
+ * @param {'public' | 'authenticated'} policy
+ * @returns {number} seconds a browser may cache this preflight answer
+ */
 export function resolvePreflightMaxAge(corsConfig = {}, policy) {
   const overrides = corsConfig.preflightMaxAgeSeconds;
   if (overrides && typeof overrides === 'object') {
@@ -122,6 +217,17 @@ export function resolvePreflightMaxAge(corsConfig = {}, policy) {
   return DEFAULT_PREFLIGHT_MAX_AGE[policy] ?? DEFAULT_PREFLIGHT_MAX_AGE.public;
 }
 
+/**
+ * Creates an OPTIONS preflight route handler for a given route class policy.
+ *
+ * @param {object} [corsConfig={}]
+ * @param {string[]} [corsConfig.allowedOrigins=[]]
+ * @returns {(policy: 'public' | 'authenticated', methods?: string) =>
+ *   (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => Promise<void>}
+ *   `methods` overrides the class default (`GET, OPTIONS` / `POST, OPTIONS`)
+ *   for a route that serves a different verb set — `DELETE /discovery/resource`
+ *   (#221), or the `GET /admin/dlq` routes, which had been advertising POST.
+ */
 export function createPreflightHandler(corsConfig = {}) {
   const cors = createCorsHook(corsConfig);
   return function preflight(policy, methods) {

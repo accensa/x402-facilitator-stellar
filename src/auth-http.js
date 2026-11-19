@@ -47,41 +47,39 @@ export function createJwtVerifier(jwksUri, options = {}) {
   const { issuer = null, audience = null, clockTolerance = 30, requiredScopes = [] } = options;
 
   async function verifyToken(token) {
-    // Single-flight: if a fetch is already in progress for this JWKS URI,
-    // await the existing promise instead of starting a new one.
-    // Race-safe pattern: check for existing in-flight promise first.
-    // If not present, create one and set it in the map BEFORE awaiting,
-    // so concurrent calls see the promise and await it instead of creating
-    // a duplicate fetch.
-    let fetchPromise = jwksInFlight.get(jwksUri);
-
-    if (!fetchPromise) {
-      // Create the fetch promise first.
-      const newFetchPromise = (async () => {
-        const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
-          cacheMaxAge: JWKS_CACHE_TTL_MS,
-          cooldownDuration: JWKS_CACHE_TTL_MS,
-        });
-        jwksCache.set(jwksUri, jwksResult);
-        // Clean up the in-flight entry so a later retry is not blocked.
-        jwksInFlight.delete(jwksUri);
-        return jwksResult;
-      })();
-
-      // Atomically set in the map so concurrent calls see this promise.
-      // If another call already set one, use that one instead.
-      jwksInFlight.set(jwksUri, newFetchPromise);
-      fetchPromise = newFetchPromise;
-    }
-
-    // Await the (now guaranteed to exist) in-flight promise.
-    await fetchPromise;
-
-    // After the in-flight fetch resolves, the JWKS is already stored in
-    // jwksCache by the original fetcher; just proceed to use it.
-    const jwks = jwksCache.get(jwksUri);
+    let jwks = jwksCache.get(jwksUri);
     if (!jwks) {
-      throw new Error('JWKS fetch did not populate cache');
+      // Single-flight: a burst that misses the TTL shares one construction
+      // per JWKS URI instead of building one remote set per request (#679).
+      let construction = jwksInFlight.get(jwksUri);
+      if (!construction) {
+        construction = (async () => {
+          const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
+            cacheMaxAge: JWKS_CACHE_TTL_MS,
+            cooldownDuration: JWKS_CACHE_TTL_MS,
+          });
+          jwksCache.set(jwksUri, jwksResult);
+          return jwksResult;
+        })();
+        // Register before awaiting, so every concurrent caller sees this
+        // attempt instead of starting its own.
+        jwksInFlight.set(jwksUri, construction);
+
+        // Settle-time cleanup: a rejection must not be cached, so a call after
+        // a failed construction retries instead of awaiting a dead promise.
+        construction
+          .finally(() => {
+            if (jwksInFlight.get(jwksUri) === construction) jwksInFlight.delete(jwksUri);
+          })
+          .catch(() => {});
+      }
+
+      // Use the resolver this attempt built: a second cache lookup could miss
+      // it if other cold URIs evicted the entry before this continuation ran.
+      jwks = await construction;
+      if (!jwks) {
+        throw new Error('JWKS fetch did not populate cache');
+      }
     }
 
     const verifyOptions = {

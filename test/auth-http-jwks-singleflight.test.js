@@ -61,6 +61,16 @@ describe('JWKS single-flight', () => {
     }
   });
 
+  test('a rejected construction is cleared so the next call retries', async () => {
+    const verifier = createJwtVerifier('not-a-valid-uri');
+
+    // `new URL()` throws while the attempt is in flight. The entry must be
+    // cleared when it settles, so the retry makes a fresh attempt instead of
+    // awaiting the promise that already rejected.
+    await assert.rejects(() => verifier.verifyToken('a.b.c'), /Invalid URL/);
+    await assert.rejects(() => verifier.verifyToken('a.b.c'), /Invalid URL/);
+  });
+
   test('a failed JWKS request is cleared so the next call retries', async () => {
     const jwks = await startJwksServer({ failRequests: 1 });
     try {
