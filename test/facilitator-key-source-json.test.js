@@ -93,13 +93,17 @@ test('application/json with a charset parameter is still accepted (#659)', async
 });
 
 test('the shape-error wording is unchanged (#659)', async () => {
-  const handler = async () =>
-    reply({
-      status: 200,
-      contentType: 'application/json; charset=utf-8',
-      body: JSON.stringify({ wrong: [] }),
+  // A non-object body takes the "missing" branch; an object without a keys
+  // array takes the "must be an array" branch. Both strings predate this change.
+  const cases = [
+    [JSON.stringify([]), /missing "keys" field/],
+    [JSON.stringify({ wrong: [] }), /"keys" must be an array/],
+  ];
+  for (const [payload, expected] of cases) {
+    const handler = async () =>
+      reply({ status: 200, contentType: 'application/json; charset=utf-8', body: payload });
+    await withFetch(handler, async () => {
+      await assert.rejects(() => loadRemoteKeys(URL_UNDER_TEST, 2000), expected);
     });
-  await withFetch(handler, async () => {
-    await assert.rejects(() => loadRemoteKeys(URL_UNDER_TEST, 2000), /missing "keys" field/);
-  });
+  }
 });

@@ -44,10 +44,7 @@ test('the derived HMAC key is pinned to its documented construction (#661)', () 
   assert.equal(key.toString('hex'), DERIVED_KEY_HEX);
   assert.equal(
     key.toString('hex'),
-    crypto
-      .createHash('sha256')
-      .update(`x402:ip-pseudonym:v1:${SIGNER_SECRET}`)
-      .digest('hex'),
+    crypto.createHash('sha256').update(`x402:ip-pseudonym:v1:${SIGNER_SECRET}`).digest('hex'),
     'the domain-separated label must not change',
   );
   // Stability across calls is what lets replicas agree on a bucket.
