@@ -191,7 +191,22 @@ export async function tracedSchemeCall(op, network, fn, extraAttrs = {}) {
       if (result && result.transaction) {
         span.setAttribute('x402.transaction.id', result.transaction);
       }
-      span.setStatus({ code: SpanStatusCode.OK });
+      // Scheme operations can fail through a resolved result instead of a throw:
+      // a failed settlement reports `success: false`, a failed verification
+      // `isValid: false`. Treating those as OK hides every rejection from the
+      // trace, so the span status follows the result, not just the call.
+      const failed = result != null && (result.success === false || result.isValid === false);
+      if (failed) {
+        const reason = result.errorReason ?? result.invalidReason;
+        const message = result.errorMessage ?? result.invalidMessage ?? reason;
+        span.setStatus(
+          reason ? { code: SpanStatusCode.ERROR, message: reason } : { code: SpanStatusCode.ERROR },
+        );
+        if (reason != null) span.setAttribute('x402.error.reason', reason);
+        if (message != null) span.setAttribute('x402.error.message', message);
+      } else {
+        span.setStatus({ code: SpanStatusCode.OK });
+      }
       return result;
     } catch (err) {
       span.setStatus({

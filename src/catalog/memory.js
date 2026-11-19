@@ -141,10 +141,25 @@ export class MemoryCatalogStore extends CatalogStore {
       }
     }
 
+    // An existing listing that moves to a new payee consumes that payee's
+    // quota and releases the old one's, so the new payee's cap is checked
+    // before anything is mutated — a refused move must leave both counters,
+    // the resource and the catalog version untouched.
+    const payToChanged = existing != null && existing.payTo !== resource.payTo;
+    if (payToChanged) {
+      const newPayToCount = this.payToCounts.get(resource.payTo) ?? 0;
+      if (newPayToCount >= this.maxResourcesPerPayTo) {
+        throw new CatalogError(
+          MAX_RESOURCES_PER_PAYTO_CODE,
+          `maximum resources per payTo (${this.maxResourcesPerPayTo}) exceeded`,
+        );
+      }
+    }
+
     const now = new Date();
     // A changed payTo on an existing listing is flagged per policy.
     // For now, we will log a warning.
-    if (existing && existing.payTo !== resource.payTo) {
+    if (payToChanged) {
       console.warn(
         `[Catalog] Resource ${key} changed payTo from ${existing.payTo} to ${resource.payTo}`,
       );
@@ -174,6 +189,9 @@ export class MemoryCatalogStore extends CatalogStore {
 
     this.resources.set(key, entry);
     if (!existing) {
+      this._incrementPayToCount(resource.payTo);
+    } else if (payToChanged) {
+      this._decrementPayToCount(existing.payTo);
       this._incrementPayToCount(resource.payTo);
     }
 

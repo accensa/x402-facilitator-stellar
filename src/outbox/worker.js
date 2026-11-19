@@ -85,7 +85,7 @@ export async function pollOutboxOnce({
         }
       }
       log(
-        `[Outbox] publish failed for event ${row.event_id} (${maxAttempts - row.attempts} attempts left): ${err.message}`,
+        `[Outbox] publish failed for event ${row.event_id} (${Math.max(0, maxAttempts - (row.attempts + 1))} attempts left): ${err.message}`,
       );
     }
   }
