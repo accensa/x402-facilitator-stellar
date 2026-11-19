@@ -126,3 +126,39 @@ Notes:
 - `Authorization` is not a CORS-safelisted request header, so every browser call to `/verify` or `/settle` triggers a preflight (`OPTIONS`). The preflight is answered with `Authorization` and `Content-Type` in `Access-Control-Allow-Headers`; without a grant the browser blocks the actual request.
 - `RateLimit-*`, `Retry-After` and `EXTENSION-RESPONSES` are named in `Access-Control-Expose-Headers`, so rate-limit state and the Bazaar cataloguing outcome are readable from browser JavaScript.
 - `/healthz`, `/readyz` and `/metrics` carry no CORS configuration at all: they are operator endpoints, not browser surfaces.
+
+## Preflight caching and revocation (#678)
+
+A browser caches the entire preflight answer — including the
+`Access-Control-Allow-Origin` grant — for the seconds named in
+`Access-Control-Max-Age`. That window is also the delay before a
+`CORS_ALLOWED_ORIGINS` change reaches a browser that already holds an answer:
+the server stops granting a removed origin on its next request, but the browser
+keeps using the cached grant until it expires. The window is therefore chosen
+per route class rather than as one constant:
+
+| Route class | `Access-Control-Max-Age` | Worst-case revocation delay |
+| --- | --- | --- |
+| Authenticated (`POST /verify`, `POST /settle`, `GET /usage`, …) | `300` | 5 minutes |
+| Public reads (`GET /supported`, discovery reads) | `600` | 10 minutes |
+
+Both values used to be a single `86400` (24 hours) written regardless of route
+class, so revoking a compromised origin could keep serving it for up to a day.
+The 204 response and the other preflight headers (`Access-Control-Allow-Methods`,
+`Access-Control-Allow-Headers`) are unchanged.
+
+There is no environment variable for the windows; an operator embedding the app
+can override either class through the config object, and a per-policy value
+beats the default:
+
+```js
+cors: {
+  allowedOrigins: ['https://dashboard.example.com'],
+  preflightMaxAgeSeconds: { authenticated: 60, public: 600 },
+}
+```
+
+Only a finite number greater than zero is honoured. `0`, a negative number,
+`NaN` and non-numbers are ignored in favour of the class default, so a
+misconfiguration can never emit `Access-Control-Max-Age: NaN` or silently make
+the grant unbounded.

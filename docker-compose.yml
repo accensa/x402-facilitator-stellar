@@ -41,6 +41,22 @@ services:
         condition: service_healthy
       kafka:
         condition: service_started
+    # Liveness, not readiness (#753): /healthz answers "is the process up?" with
+    # no dependency checks, so an unhealthy container means a dead process worth
+    # restarting. /readyz deliberately stays out of this — a replica that cannot
+    # settle should be pulled from traffic, not restarted in a loop.
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'wget --no-verbose --tries=1 --spider http://localhost:3402/healthz || exit 1',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      # The process boots behind seven dependencies (two Postgres nodes, Redis,
+      # Kafka); give it one grace window rather than burning the retry budget.
+      start_period: 10s
 
   # Single shared Redis for the Redis-backed rate limiter.
   redis:

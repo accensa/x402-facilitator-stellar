@@ -62,7 +62,7 @@ function executeInWorker(handler, params, options) {
             
             const result = await handlerFn(handlerParams);
             const serialized = JSON.stringify(result);
-            if (serialized.length > maxPayloadSize) {
+            if (serialized && serialized.length > maxPayloadSize) {
               throw new Error('payload_too_large');
             }
             return result;
@@ -154,7 +154,7 @@ async function executeDirectly(handler, params, options) {
   const execPromise = (async () => {
     const result = await handler(params);
     const serialized = JSON.stringify(result);
-    if (serialized.length > maxPayloadSize) {
+    if (serialized && serialized.length > maxPayloadSize) {
       throw new Error('payload_too_large');
     }
     return result;

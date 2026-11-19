@@ -26,10 +26,31 @@ import { setInterval, clearInterval } from 'node:timers';
 /** How often a degraded store probes Postgres before restoring durable claims. */
 const DEFAULT_RECOVERY_INTERVAL_MS = 10_000;
 
+/**
+ * How long an in-flight claim may stay pending before it is treated as
+ * abandoned (#711). A process that dies between begin() and complete()/fail()
+ * never records an outcome, so without an upper bound the key would answer 409
+ * to every retry for the lifetime of the process. The default matches the
+ * facilitator's request timeout window (REQUEST_TIMEOUT_MS, 30s) with headroom
+ * for a settle that is still genuinely running.
+ */
+export const DEFAULT_PENDING_CLAIM_TIMEOUT_MS = 60_000;
+
 /** Process-lifetime store. The shape Postgres degrades into. */
 export class MemoryIdempotencyStore {
-  constructor() {
-    this.records = new Map(); // key -> { statusCode, response }
+  /**
+   * @param {object} [options]
+   * @param {number} [options.pendingTimeoutMs] - age at which a pending claim
+   *   is assumed abandoned and may be taken over
+   * @param {Function} [options.now] - clock seam (() => ms)
+   */
+  constructor({
+    pendingTimeoutMs = DEFAULT_PENDING_CLAIM_TIMEOUT_MS,
+    now = () => Date.now(),
+  } = {}) {
+    this.records = new Map(); // key -> { pending, claimedAt } | { statusCode, response }
+    this.pendingTimeoutMs = pendingTimeoutMs;
+    this.now = now;
   }
 
   /** Stable per-request key: client header when present, body hash otherwise. */
@@ -54,13 +75,23 @@ export class MemoryIdempotencyStore {
    *
    * A claim left behind by a pre-submission failure is released with fail(),
    * so a retry can try again instead of queueing behind a dead claim forever.
+   * A claim whose owner crashed is taken over once it is older than
+   * `pendingTimeoutMs` (#711), so a dead claim cannot block retries for good.
    */
   async begin(key) {
     const existing = this.records.get(key);
     if (existing?.response) return { key, replayed: true, ...existing };
-    if (existing?.pending) return { key, conflict: true };
-    this.records.set(key, { pending: true });
+    if (existing?.pending && !this._claimExpired(existing)) return { key, conflict: true };
+    this.records.set(key, { pending: true, claimedAt: this.now() });
     return { key, replayed: false };
+  }
+
+  /** True when a pending claim has outlived the takeover window. */
+  _claimExpired(claim) {
+    // A claim recorded without a timestamp cannot be shown to be live, so it is
+    // treated as abandoned rather than blocking the key forever.
+    if (!Number.isFinite(claim.claimedAt)) return true;
+    return this.now() - claim.claimedAt > this.pendingTimeoutMs;
   }
 
   async complete(key, statusCode, response) {
@@ -84,6 +115,9 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
    *   claim before degrading
    * @param {number} [options.recoveryIntervalMs] - how often to probe Postgres
    *   while degraded before restoring durable claims (0 probes on next begin)
+   * @param {number} [options.pendingTimeoutMs] - passed to the in-memory
+   *   fallback this store degrades into (#711)
+   * @param {Function} [options.now] - clock seam for the in-memory fallback
    */
   constructor(
     databaseUrl,
@@ -92,9 +126,11 @@ export class PostgresIdempotencyStore extends MemoryIdempotencyStore {
       warn = msg => console.warn(msg),
       lockTimeoutMs = 5000,
       recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS,
+      pendingTimeoutMs = DEFAULT_PENDING_CLAIM_TIMEOUT_MS,
+      now,
     } = {},
   ) {
-    super();
+    super({ pendingTimeoutMs, ...(now ? { now } : {}) });
     this.warn = warn;
     this.pool = pool;
     this.degraded = false;

@@ -292,6 +292,139 @@ To run multiple instances behind a load balancer:
 
 The docker-compose file ships the backing services and wires the URLs.
 
+## Multi-Region Deployment (#126)
+
+`docker-compose.multi-region.yml` is the local fixture for the cross-region failover
+path: two facilitator instances — one per region — on one shared Postgres, with a
+separate Redis and Redlock node set per region. Use it instead of `docker-compose.yml`
+when you are changing or verifying anything regional: `REGION`/`REGIONS`, the CRDT
+rate-limit store, or the `failover` block that `/readyz` reports. It is the same image
+as `docker-compose.yml` with a regional environment around it, and it is a test
+topology, not a production one.
+
+```bash
+docker compose -f docker-compose.multi-region.yml up --build
+curl -s http://localhost:3402/readyz | jq .failover   # us-east-1
+curl -s http://localhost:3403/readyz | jq .failover   # eu-west-1
+```
+
+### Regional failover topology
+
+| Service | Region | Host port | Role |
+| --- | --- | --- | --- |
+| `facilitator-us-east-1` | `us-east-1` | `3402` | facilitator, priority 1 |
+| `facilitator-eu-west-1` | `eu-west-1` | `3403` (container `3402`) | facilitator, priority 2 |
+| `db` | shared | `5432` | `postgres:16-alpine`, the stand-in for CockroachDB; volume `postgres_multi_region` |
+| `redis-us-east` | `us-east-1` | `6379` | that region's `REDIS_URL` |
+| `redis-node-us-east-1/2/3` | `us-east-1` | `6381`–`6383` | that region's `REDIS_NODES` |
+| `redis-eu-west` | `eu-west-1` | `6389` | that region's `REDIS_URL` |
+| `redis-node-eu-west-1/2/3` | `eu-west-1` | `6391`–`6393` | that region's `REDIS_NODES` |
+
+How the file defines failover:
+
+- **Regions and precedence.** Each facilitator sets `REGION` to its own identifier and
+  `REGIONS=us-east-1:1,eu-west-1:2` to the ordered list of regions; the lower priority
+  number is the preferred region.
+- **Shared state.** Both instances point at the same `db`
+  (`postgres://postgres:postgres@db:5432/x402_facilitator`) and set
+  `RATE_LIMIT_STORE=crdt`, so rate-limit counters live in the CRDT G-Counter store whose
+  rows in that shared database are what lets the regions converge after a partition. The
+  file's header calls the shared Postgres a local stand-in for CockroachDB.
+- **Per-region edge state.** Each region has its own Redis (`REDIS_URL`) and its own
+  three Redlock masters (`REDIS_NODES`), so locking quorum does not span regions.
+- **Health.** Both services use the image's `/healthz` as their container healthcheck
+  (`wget --spider`, every 5s, 5 retries) and wait on `db` plus their own four Redis
+  services reporting `service_healthy` before starting. `/readyz` carries the `failover`
+  object described below whenever `REGION` is set.
+- **No router.** The file defines no load balancer, DNS or ingress: the two ports are
+  published side by side, so which region answers a request is whichever port you call.
+  Routing on failure is the orchestrator's job, not this file's.
+
+### Multi-region environment variables
+
+| Variable | Value in the file | Set where | Purpose |
+| --- | --- | --- | --- |
+| `FACILITATOR_SECRET` | `${FACILITATOR_SECRET}` | your shell | The testnet signer. Both regions use this one key. |
+| `DATABASE_URL` | `postgres://postgres:postgres@db:5432/x402_facilitator` | file, both services | The shared database — idempotency, settlement store, CRDT rate-limit rows. |
+| `RATE_LIMIT_STORE` | `crdt` | file, both services | Selects the CRDT G-Counter rate-limit store; needs `DATABASE_URL`. |
+| `REGION` | `us-east-1` / `eu-west-1` | file, per service | This instance's region. Setting it is what enables the failover checker and adds `failover` to `/readyz`. |
+| `REGIONS` | `us-east-1:1,eu-west-1:2` | file, both services | All regions and their priorities (`region:priority`). No health URLs are given. |
+| `REDIS_URL` | `redis://redis-us-east:6379` / `redis://redis-eu-west:6379` | file, per service | That region's shared rate-limit/cache Redis. |
+| `REDIS_NODES` | `redis-node-us-east-1:6379,…` / `redis-node-eu-west-1:6379,…` | file, per service | Three independent masters per region for distributed locking. |
+| `PORT` | `3402` | file, both services | The listener inside both containers; only the host-side binding differs (`3402` vs `3403`). |
+| `AUDIT_LOG_FILE` | `${AUDIT_LOG_FILE:-}` | your shell, optional | Passed through to both services, empty by default. `.env.example` records that the file sink is not currently read (#554), so it has no effect today. |
+
+Everything else in the file is fixed for the fixture: the `db` service sets
+`POSTGRES_USER=postgres`, `POSTGRES_PASSWORD=postgres` and
+`POSTGRES_DB=x402_facilitator`, and no other application variable is passed to either
+facilitator. These are local test credentials — do not reuse this file's database
+settings anywhere reachable.
+
+What `/readyz` reports when `REGION` is set:
+
+```bash
+curl -s http://localhost:3402/readyz | jq .failover
+# { "region": "us-east-1", "localStatus": "healthy", "failoverActive": false,
+#   "preferredRegion": "us-east-1",
+#   "remoteRegions": { "eu-west-1": { "priority": 2 } } }
+```
+
+`localStatus` and `failoverActive` describe **that instance's own** region; the peer is
+listed under `remoteRegions`, and `preferredRegion` names the region traffic should go to
+(the local one while it is healthy, otherwise the highest-priority other region).
+
+### Simulating a regional failure
+
+```bash
+# 1. Both regions healthy: each reports itself as its own preferred region.
+curl -s http://localhost:3402/readyz | jq .failover
+curl -s http://localhost:3403/readyz | jq .failover
+
+# 2. Take us-east-1 down.
+docker compose -f docker-compose.multi-region.yml stop facilitator-us-east-1
+
+# 3. The surviving region still serves — it is a separate process with its own port.
+curl -s http://localhost:3403/readyz | jq .failover
+curl -s http://localhost:3403/supported | jq '.kinds | length'
+
+# 4. Bring it back; both ports answer again.
+docker compose -f docker-compose.multi-region.yml start facilitator-us-east-1
+curl -s http://localhost:3402/readyz | jq .failover
+```
+
+The file's header comment expects step 3 to show `failoverActive: true` on `eu-west-1`.
+Read that field as the local region's view, not a statement about its peer: it is true
+when *this* instance has reported itself `degraded` or `recovering`, and nothing in
+`src/server.js` feeds the checker local health reports today (see the caveats below), so
+the honest assertion in this fixture is that the survivor keeps serving on its own port.
+
+### Operational notes and caveats
+
+- **Host ports collide with the single-region file.** `3402`, `6379` and `6381`–`6383`
+  are published by both files; stop `docker-compose.yml` before bringing this one up.
+- **The database is published to the host here.** `db` maps `5432:5432`, unlike
+  `docker-compose.yml`, which deliberately keeps Postgres on the compose network only.
+  That is convenient for poking at the CRDT table and wrong for anything shared.
+- **Both facilitators share one signer.** `FACILITATOR_SECRET` is the same variable for
+  both services, so this fixture does not exercise per-region signer pools.
+- **The database is a single container.** A regional database failure cannot be
+  simulated here — stopping `db` takes both regions down with it. That is what the
+  header means by "standing in for CockroachDB": the file provides the shared-store
+  shape, not multi-region durability.
+- **Remote health probing is not configured.** `REGIONS=us-east-1:1,eu-west-1:2` carries
+  priority only; remote entries therefore show up under `remoteRegions` with their
+  priority and no probe result.
+- **No traffic routing.** Nothing in the file moves a caller from a failed region to a
+  live one; the two published ports are independent, so a client (or the load balancer
+  you put in front) has to decide.
+- **`failoverActive` is wired but never reported.** `src/failover-health.js` computes it
+  from local health reports, and `src/server.js` starts the checker — but
+  `reportLocalHealth()` is only called by the tests, so in this fixture the field stays
+  `false` and `localStatus` stays `healthy`. Verify the topology through the two ports and
+  `remoteRegions` instead of relying on the boolean.
+- **Reset the fixture** with `docker compose -f docker-compose.multi-region.yml down -v`
+    (the `-v` drops the `postgres_multi_region` volume and the CRDT rows with it).
+
 ## Secret Handling
 
 The `FACILITATOR_SECRET` and `FACILITATOR_SECRET_PUBNET` are highly privileged keys. 

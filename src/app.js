@@ -1428,7 +1428,16 @@ export async function createApp(
   app.setErrorHandler((err, req, reply) => {
     console.error(`[Error] ${err?.type ?? err?.code ?? err?.name ?? 'Error'}: ${err?.message}`);
 
-    let status = err?.statusCode && Number.isInteger(err.statusCode) ? err.statusCode : 500;
+    // A thrown error's `statusCode` is only a hint, never a fact (#660).
+    // Propagation used to trust any integer, so a claim of 200 produced an
+    // error body under HTTP 200 and a claim of 999 or 42 produced a status no
+    // HTTP client accepts. Honour a client-visible 4xx/5xx only; anything else
+    // (200, 999, 42, a non-integer) falls back to 500. The transport errors
+    // below still override this, since their codes are ours, not a thrower's.
+    const claimedStatus = err?.statusCode;
+    const statusInRange =
+      Number.isInteger(claimedStatus) && claimedStatus >= 400 && claimedStatus <= 599;
+    let status = statusInRange ? claimedStatus : 500;
     let code = 'internal_error';
 
     if (err?.code === 'FST_ERR_CTP_INVALID_JSON_BODY' || err?.code === 'FST_ERR_CTP_INVALID_JSON') {

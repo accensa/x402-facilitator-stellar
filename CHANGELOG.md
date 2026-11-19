@@ -51,6 +51,12 @@ pinned.
   concurrently with isolated failures, responses are matched by id, and batches
   over 25 requests are refused. This replaces the previous blanket `-32600`
   rejection of arrays (#428).
+- Seller documentation stating the amount rules the discovery SDK enforces
+  (`docs/SELLER.md`): `pricing.amount` is a decimal numeric string or a BigInt
+  stroop count, JavaScript numbers are rejected before precision is lost, and
+  fractions longer than the 7-decimal `STELLAR_DECIMALS` are truncated rather
+  than rounded (#704).
+
 - Optional mTLS client-certificate authentication for outbound webhooks. A
   delivery carrying `mtls.ref` is sent with a client certificate resolved from a
   ref, over a pooled per-credential agent, and still carries the existing HMAC
@@ -148,6 +154,23 @@ pinned.
 
 ### Fixed
 
+- A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`
+  records `claimedAt` on the claim, and a claim older than `pendingTimeoutMs`
+  (default 60s, configurable per store) is treated as abandoned and taken over
+  by the retry. Previously a process that died between `begin()` and
+  `complete()`/`fail()` answered 409 to every retry of that key for the rest of
+  its lifetime. Claims inside the window still conflict, and records without a
+  timestamp are treated as abandoned rather than blocking the key forever.
+- One throwing credential subscriber no longer fails a successful Vault fetch
+  (#712): `emit` invokes each listener in its own `try`/`catch`, warns with the
+  listener's error message (never the credentials), and continues, so the
+  remaining subscribers are still notified and `fetchOnce()` resolves with the
+  credentials it just fetched.
+- `createMultiSignerEngine` refuses an invalid `requestTimeoutMs` at
+  construction (#713): a zero, negative, fractional or non-numeric value now
+  throws `multi-signer requestTimeoutMs must be a positive integer` instead of
+  aborting every co-signer request and reporting all co-signers as failed with
+  no diagnostic. `DEFAULT_COSIGNER_TIMEOUT_MS` is unchanged.
 - `npm run env:check` now fails on the other direction of drift: a variable
   documented in `.env.example` that no code in `src/` reads. Reads that are
   computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
@@ -241,6 +264,12 @@ pinned.
   The field is dropped and the rest of the listing still lands
   (`partially landed`). A bare `&` — "Weather & tides" — is not markup and is
   unaffected.
+- The dead-letter queue operator purge now rejects an unknown `status` before it
+  reaches the database, instead of issuing a `DELETE` whose `WHERE` clause could
+  never match and silently reporting zero purged rows (#706).
+- `GET /usage` now reports zero counters — and retains every counter field,
+  including `catalog_read_rpm` — when the shared rate-limit store throws, instead
+  of dropping the fields from the JSON payload (#705).
 - Truncated fields are reported in a new `truncated` list on the
   `EXTENSION-RESPONSES` envelope and the `POST /discovery/resources` response,
   separate from `softDrops` (#219). Previously a description shortened to 200
@@ -248,6 +277,19 @@ pinned.
   as "this field was dropped" — it was not, and no such field exists. A
   truncated description now reports `truncated: ["description"]` and leaves
   `reason`'s dropped-fields list alone.
+
+- A configured API key whose secret contains a dot is no longer misrouted into
+  JWT verification: a failed JWT check now falls back to the timing-safe API key
+  comparison before answering 401, so a dotted key authenticates while a genuine
+  JWT still verifies with its keyId and scopes (#658).
+- The CORS `Access-Control-Expose-Headers` list now includes `X-Request-Id`, so
+  a browser can read the request id the facilitator sets on every response,
+  after the existing rate-limit entries (#657).
+- `readPaymentBody` no longer defaults its route to `verify`: call sites pass the
+  route explicitly and values outside `verify`/`settle` are rejected with a
+  `TypeError`, so a failed settle returns the settle failure envelope instead of
+  the verify one (#656).
+
 
 ## [0.0.1] - 2026-08-11
 

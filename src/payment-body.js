@@ -31,10 +31,16 @@ export const PAYMENT_BODY_SCHEMA = {
  * @param {import('fastify').FastifyRequest} req
  * @param {import('fastify').FastifyReply} reply
  * @param {object} config
- * @param {'verify'|'settle'} [route='verify']
+ * @param {'verify'|'settle'} route
  * @returns {{ paymentPayload: object, paymentRequirements: object } | null}
  */
-export function readPaymentBody(req, reply, config, route = 'verify') {
+export function readPaymentBody(req, reply, config, route) {
+  if (route !== 'verify' && route !== 'settle') {
+    throw new TypeError(
+      `readPaymentBody: route must be 'verify' or 'settle', received ${JSON.stringify(route)}`,
+    );
+  }
+
   let result;
   if (req.validationError) {
     const detail = Array.isArray(req.validationError.validation)
@@ -53,13 +59,17 @@ export function readPaymentBody(req, reply, config, route = 'verify') {
 
   if (!result.valid) {
     if (route === 'settle') {
-      reply.code(400).send({
+      const net = req.body?.paymentRequirements?.network;
+      const body = {
         success: false,
         errorReason: result.reason,
         errorMessage: result.message,
         transaction: '',
-        network: req.body?.paymentRequirements?.network,
-      });
+      };
+      if (typeof net === 'string' && net.length <= 64) {
+        body.network = net;
+      }
+      reply.code(400).send(body);
     } else {
       reply.code(400).send({
         isValid: false,

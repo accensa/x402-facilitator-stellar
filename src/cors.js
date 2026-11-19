@@ -16,6 +16,7 @@ export const EXPOSED_HEADERS = [
   'RateLimit-Reset',
   'Retry-After',
   'EXTENSION-RESPONSES',
+  'X-Request-Id',
 ].join(', ');
 
 /**
@@ -87,6 +88,41 @@ function originMatches(patterns, origin) {
 }
 
 /**
+ * Appends a token to a reply's `Vary` header rather than replacing it (#677).
+ *
+ * `reply.header()` overwrites that name's value, while `@fastify/compress`
+ * appends its own `Vary: Accept-Encoding` after this hook runs. Writing
+ * `'Origin'` alone therefore erased the compression token, and a shared cache
+ * could key a compressed cross-origin response without `Origin` — handing one
+ * origin the representation built for another.
+ *
+ * `getHeader` returns a string or an array, and an array entry may itself hold
+ * a comma-separated list, so every value is split into tokens. Tokens are
+ * deduplicated case-insensitively while the first spelling and the token order
+ * are preserved.
+ *
+ * @param {import('fastify').FastifyReply} reply
+ * @param {string} token - the token this hook requires in Vary, e.g. 'Origin'
+ */
+function appendVary(reply, token) {
+  const existing = reply.getHeader('Vary');
+  const values = existing === undefined ? [] : Array.isArray(existing) ? existing : [existing];
+
+  const seen = new Set();
+  const tokens = [];
+  for (const value of [...values, token]) {
+    for (const part of String(value).split(',')) {
+      const trimmed = part.trim();
+      if (!trimmed || seen.has(trimmed.toLowerCase())) continue;
+      seen.add(trimmed.toLowerCase());
+      tokens.push(trimmed);
+    }
+  }
+
+  reply.header('Vary', tokens.join(', '));
+}
+
+/**
  * Creates a Fastify `onRequest` hook enforcing route-class CORS policies.
  *
  * @param {object} [corsConfig={}]
@@ -112,7 +148,8 @@ export function createCorsHook(corsConfig = {}) {
         granted = allowlisted ? origin : false;
       }
 
-      reply.header('Vary', 'Origin');
+      // The response varies with Origin even when no grant is issued.
+      appendVary(reply, 'Origin');
 
       if (granted) {
         reply.header('Access-Control-Allow-Origin', granted);
@@ -139,10 +176,47 @@ export function createCorsHook(corsConfig = {}) {
 const ALLOWED_REQUEST_HEADERS = 'Authorization, Content-Type, X-402-Payment';
 
 /**
- * How long a browser may cache a preflight answer (#414): 24 hours, replacing
- * the 600s that made every payment route re-preflight itself ten times a day.
+ * Default max-age seconds for preflight responses, per route class (#678).
+ *
+ * A browser caches the whole preflight answer — including the
+ * `Access-Control-Allow-Origin` grant — for this window, so it is also the
+ * delay before an allowlist change reaches a browser that already holds one.
+ * Authenticated routes get the short window because they carry a credential;
+ * public reads get the longer one that keeps discovery cheap.
  */
-const PREFLIGHT_MAX_AGE = '86400';
+const DEFAULT_PREFLIGHT_MAX_AGE = {
+  authenticated: 300,
+  public: 600,
+};
+
+/**
+ * Resolves the preflight max-age for a route class (#678).
+ *
+ * An operator may override either class through
+ * `corsConfig.preflightMaxAgeSeconds`. Only a finite, positive number is
+ * honoured: zero, a negative number, `NaN` or a non-number falls back to the
+ * class default, so a misconfiguration can never emit `Access-Control-Max-Age:
+ * NaN` or a header a browser would treat as unbounded.
+ *
+ * @param {object} [corsConfig={}]
+ * @param {{authenticated?: number, public?: number}} [corsConfig.preflightMaxAgeSeconds]
+ * @param {'public' | 'authenticated'} policy
+ * @returns {number} seconds a browser may cache this preflight answer
+ */
+export function resolvePreflightMaxAge(corsConfig = {}, policy) {
+  const overrides = corsConfig.preflightMaxAgeSeconds;
+  if (overrides && typeof overrides === 'object') {
+    const policySpecific = overrides[policy];
+    if (
+      typeof policySpecific === 'number' &&
+      Number.isFinite(policySpecific) &&
+      policySpecific > 0
+    ) {
+      return policySpecific;
+    }
+  }
+  return DEFAULT_PREFLIGHT_MAX_AGE[policy] ?? DEFAULT_PREFLIGHT_MAX_AGE.public;
+}
 
 /**
  * Creates an OPTIONS preflight route handler for a given route class policy.
@@ -159,11 +233,12 @@ export function createPreflightHandler(corsConfig = {}) {
   const cors = createCorsHook(corsConfig);
   return function preflight(policy, methods) {
     const allowMethods = methods ?? (policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS');
+    const maxAge = resolvePreflightMaxAge(corsConfig, policy);
     return async (req, reply) => {
       await cors(policy)(req, reply);
       reply.header('Access-Control-Allow-Methods', allowMethods);
       reply.header('Access-Control-Allow-Headers', ALLOWED_REQUEST_HEADERS);
-      reply.header('Access-Control-Max-Age', PREFLIGHT_MAX_AGE);
+      reply.header('Access-Control-Max-Age', String(maxAge));
       return reply.code(204).send();
     };
   };

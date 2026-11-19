@@ -14,8 +14,13 @@ Copy [`config.example.json`](config.example.json) to `monitoring/config.json`
 - `probe.signerBalance.signers[]` — facilitator signer **addresses** per network
   with `warnFloorStroops` and `signalFloorStroops` (alert before the pool runs dry).
 - `probe.syntheticPayment` — set `enabled: true` (or `SYNTHETIC_PAYMENT=true` in
-  the workflow) to run a real `/verify`+`/settle` on testnet. Needs
-  `FACILITATOR_SECRET` and `ALICE_SECRET` (see `scripts/e2e.mjs`).
+  the workflow) to run a real `/verify`+`/settle` on testnet through
+  `scripts/e2e.mjs`. That one documented command is spawned with an explicit
+  environment — `ALICE_SECRET` (the payer key), `FACILITATOR_URL`,
+  `MERCHANT_ADDRESS` and `RESOURCE_PORT` — and nothing else from the monitor's
+  environment; a config-supplied `command` override receives no credential at
+  all. `FACILITATOR_SECRET` is not needed here: it belongs to the facilitator
+  under test, not to the probe.
 
 ## Run locally
 
