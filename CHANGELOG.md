@@ -148,6 +148,10 @@ pinned.
 
 ### Fixed
 
+- Explicit rejection of sub-stroop discovery amounts that truncate to zero stroops in `src/sdk/index.js` (`toStroops`): non-zero fractional values below 1 stroop (10^-7 XLM) now throw a descriptive validation error instead of silently publishing free endpoints (`amount: "0"`), while preserving explicit zero prices ('0', '0.0') and valid BigInt inputs (#697).
+- Allowlist validation for MCP tool arguments in `src/mcp/cli.js`: `search_resources` and `get_resource` validate input arguments against strict per-tool schemas (`SEARCH_RESOURCES_ALLOWLIST`, `GET_RESOURCE_ALLOWLIST`) and reject unexpected keys and disallowed array values with `McpInputError` (`isToolError: true`) before requests reach `fetchDiscovery` (#696).
+- MCP resource serialization is bounded by an explicit payload byte budget (`MAX_PAYLOAD_BYTES` = 64 KiB) and recursion depth limiter (`MAX_DEPTH` = 10) in `src/mcp/resources.js`. Pretty-printing overhead is dropped in favor of compact JSON on the stdio transport, and an explicit truncation indicator (`_truncated: true` and `[truncated]`) is cleanly embedded when the byte budget is exceeded, preventing stdio buffer stalls and call-stack exhaustion (#695).
+
 - `npm run env:check` now fails on the other direction of drift: a variable
   documented in `.env.example` that no code in `src/` reads. Reads that are
   computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
