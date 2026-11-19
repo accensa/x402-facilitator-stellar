@@ -130,7 +130,7 @@ export class PostgresStore {
       [bucketId, nowSec],
     );
     if (rows.length === 0) return undefined;
-    return { count: Number(rows[0].count), resetAt: Number(rows[0].resetAt) };
+    return { count: Number(rows[0].count), resetAt: Number(rows[0].reset_at ?? rows[0].resetAt) };
   }
 
   /**
@@ -152,7 +152,7 @@ export class PostgresStore {
        RETURNING count, reset_at`,
       [bucketId, amount, resetAtSec, nowSec],
     );
-    return { count: Number(rows[0].count), resetAt: Number(rows[0].resetAt) };
+    return { count: Number(rows[0].count), resetAt: Number(rows[0].reset_at ?? rows[0].resetAt) };
   }
 
   /** Expired windows are dead weight; called opportunistically by the limiter. */
