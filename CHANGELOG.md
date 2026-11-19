@@ -148,6 +148,9 @@ pinned.
 
 ### Fixed
 
+- In `docs/AUDIT.md`, removed accidental duplicate `## Proposed Scope` heading, restoring valid markdown hierarchy and unambiguous anchor targets (#775).
+- In `eval/runner.js`, corrected nDCG@K calculation by truncating sorted ideal relevance scores to top-K (`actualScores.length`) so perfect top-K rankings against larger judgment sets yield nDCG = 1.0 without artificial IDCG denominator inflation (#774).
+
 - `npm run env:check` now fails on the other direction of drift: a variable
   documented in `.env.example` that no code in `src/` reads. Reads that are
   computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
