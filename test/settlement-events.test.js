@@ -16,7 +16,11 @@ import assert from 'node:assert/strict';
 import { Keypair } from '@stellar/stellar-sdk';
 import { MemorySettlementStore } from '../src/store/memory.js';
 import { PostgresSettlementStore } from '../src/store/postgres.js';
-import { createSettlementEvent, eventTypeForState } from '../src/eventstore/events.js';
+import {
+  createSettlementEvent,
+  eventTypeForState,
+  SETTLEMENT_EVENT_TYPES,
+} from '../src/eventstore/events.js';
 import { projectSettlement } from '../src/eventstore/projection.js';
 import { createApp } from '../src/app.js';
 import { resolveConfig } from '../src/config.js';
@@ -626,10 +630,10 @@ describe('Settlement event envelope validation', () => {
     }
   });
 
-  test('state mappings cover terminal states and reject submitted', () => {
+  test('state mappings cover every state, including submitted', () => {
+    assert.equal(eventTypeForState('submitted'), SETTLEMENT_EVENT_TYPES.INITIATED);
     assert.equal(eventTypeForState('settled'), 'SettlementSettled');
     assert.equal(eventTypeForState('failed'), 'SettlementFailed');
     assert.equal(eventTypeForState('unknown'), 'SettlementOutcomeUnknown');
-    assert.throws(() => eventTypeForState('submitted'), /submitted/);
   });
 });
