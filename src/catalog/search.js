@@ -59,8 +59,25 @@ const _SCOPED_DEFAULTS = Object.freeze({ type: '', payTo: '', scheme: '', networ
 /** Pagination params that select a different slice, kept separate for clarity. */
 const _PAGE_PARAMS = ['limit', 'offset', 'cursor'];
 
+/**
+ * Unicode NFC normalisation at a boundary (#686).
+ *
+ * `café` can be spelled as one precomposed code point or as `cafe` + a
+ * combining acute; both are the same question but different byte strings, so
+ * an unnormalised key or token makes the caller's keyboard decide whether the
+ * cache hits and whether the ranking matches. NFC only: NFKC would fold
+ * compatibility characters and stripping diacritics would conflate `café` with
+ * `cafe`, which are different queries.
+ *
+ * Non-strings pass through unchanged so callers keep their existing fallbacks.
+ */
+function normalizeNfc(value) {
+  return typeof value === 'string' ? value.normalize('NFC') : value;
+}
+
 export function searchCacheKey(params = {}) {
-  const query = typeof params.query === 'string' ? params.query.trim().toLowerCase() : '';
+  const query =
+    typeof params.query === 'string' ? normalizeNfc(params.query).trim().toLowerCase() : '';
   const extensions = Array.isArray(params.extensions)
     ? [...params.extensions].map(String).sort()
     : [];
@@ -90,29 +107,35 @@ export function _scopedSearchParams() {
 export function scoreResource(resource, query) {
   if (!query || !query.trim()) return 0;
 
-  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const tokens = normalizeNfc(query).toLowerCase().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return 0;
 
   let score = 0;
 
-  const serviceName = (resource.serviceName || '').toLowerCase();
-  const description = (resource.description || '').toLowerCase();
+  // Each indexed field is normalised too: a decomposed catalogue value must
+  // match a composed query, and vice versa (#686).
+  const serviceName = normalizeNfc(resource.serviceName || '').toLowerCase();
+  const description = normalizeNfc(resource.description || '').toLowerCase();
+  const tags =
+    resource.tags && Array.isArray(resource.tags)
+      ? resource.tags.map(t => normalizeNfc(t).toLowerCase())
+      : [];
 
   // Extract parameter descriptions from extensions
   const extDocs = [];
   if (resource.extensions && typeof resource.extensions === 'object') {
     // Deep search for "description" keys or just JSON stringify
-    const extStr = JSON.stringify(resource.extensions).toLowerCase();
+    const extStr = normalizeNfc(JSON.stringify(resource.extensions)).toLowerCase();
     extDocs.push(extStr);
   }
 
   for (const token of tokens) {
     if (serviceName.includes(token)) score += 10;
 
-    if (resource.tags && Array.isArray(resource.tags)) {
-      if (resource.tags.some(t => t.toLowerCase() === token)) {
+    if (tags.length > 0) {
+      if (tags.includes(token)) {
         score += 8;
-      } else if (resource.tags.some(t => t.toLowerCase().includes(token))) {
+      } else if (tags.some(t => t.includes(token))) {
         score += 4;
       }
     }
