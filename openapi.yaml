@@ -307,8 +307,9 @@ paths:
           description: |
             The transport rejected the request body itself. Note the
             response shape differs from `/verify`'s 400: `/settle` always
-            carries `transaction` and `network`, even in a transport-level
-            rejection.
+            carries `transaction`, and echoes `network` only when the caller
+            supplied a string of at most 64 characters (omitted otherwise),
+            even in a transport-level rejection.
           content:
             application/json:
               schema:
@@ -320,7 +321,6 @@ paths:
                     errorReason: invalid_request
                     errorMessage: 'paymentPayload must be an object'
                     transaction: ''
-                    network: null
         '401':
           $ref: '#/components/responses/Unauthorized'
         '429':

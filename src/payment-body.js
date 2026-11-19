@@ -59,13 +59,17 @@ export function readPaymentBody(req, reply, config, route) {
 
   if (!result.valid) {
     if (route === 'settle') {
-      reply.code(400).send({
+      const net = req.body?.paymentRequirements?.network;
+      const body = {
         success: false,
         errorReason: result.reason,
         errorMessage: result.message,
         transaction: '',
-        network: req.body?.paymentRequirements?.network,
-      });
+      };
+      if (typeof net === 'string' && net.length <= 64) {
+        body.network = net;
+      }
+      reply.code(400).send(body);
     } else {
       reply.code(400).send({
         isValid: false,
