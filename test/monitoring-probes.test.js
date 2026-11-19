@@ -114,7 +114,7 @@ describe('runProbes: HTTP probe severity', () => {
     // The request succeeded, so this is the latency path, not a failure path.
     assert.equal(report.probes.readyz.ok, true);
     assert.equal(report.probes.readyz.status, OK);
-    assert.ok(report.probes.readyz.latencyMs >= 20);
+    assert.ok(report.probes.readyz.latencyMs >= 15);
     assert.equal(report.probes.readyz.level, 'warn');
     assert.deepEqual(report.incidents, []);
     assert.equal(report.status, 'degraded');

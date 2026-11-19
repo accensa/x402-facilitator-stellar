@@ -141,7 +141,7 @@ if (config.rateLimitStore === 'crdt' && config.databaseUrl) {
     maxSize: 10000,
     pool: vaultDatabase?.pool,
   });
-  rateLimitStore.ready?.catch(err => {
+  Promise.resolve(rateLimitStore.ready).catch(err => {
     console.error(`[RateLimit] shared store failed to initialise: ${err.message}`);
   });
   rateLimiter = new RateLimiter(config.rateLimits, rateLimitStore);
@@ -429,11 +429,9 @@ async function shutdown(signal) {
       await vaultDatabase?.stop();
       await app.close();
 
-      await otel?.shutdown().catch(() => {});
+      await Promise.resolve(otel?.shutdown()).catch(() => {});
 
-      await new Promise(resolve =>
-        metricsServerRef ? metricsServerRef.close(resolve) : resolve(),
-      );
+      await Promise.resolve(metricsServerRef?.close).then(resolve => resolve());
 
       await webhooks.stop().catch(() => {});
       await distributedLock?.quit().catch(() => {});
@@ -445,12 +443,12 @@ async function shutdown(signal) {
       // live connection, so leaving it open outlives the drain and holds the
       // event loop; optional because the subscriber only exists when the cache
       // is enabled.
-      await catalog.searchCache?.stop?.().catch(() => {});
+      await Promise.resolve(catalog.searchCache?.stop?.()).catch(() => {});
 
-      await rateLimiter?.close?.().catch(() => {});
+      await Promise.resolve(rateLimiter?.close?.()).catch(() => {});
       // Flush the AUDIT_LOG_FILE sink (#587) so a record written immediately
       // before a graceful stop is not lost in the stream buffer.
-      await app.auditLogger?.close?.();
+      await Promise.resolve(app.auditLogger?.close?.()).catch(() => {});
 
       horizon.restore();
     } catch (err) {
