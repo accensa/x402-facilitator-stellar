@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { McpServer } from './server.js';
+import { McpInputError } from './sanitize.js';
 import { x402Client, x402HTTPClient } from '@x402/core/client';
 import { ExactStellarScheme as ExactStellarClient } from '@x402/stellar/exact/client';
 import { createEd25519Signer } from '@x402/stellar';
@@ -152,12 +153,49 @@ export function assertCanSpend(amountStroops) {
 }
 
 // ---------------------------------------------------------------------------
+// Tool Argument Validation & Allowlists (#696)
+// ---------------------------------------------------------------------------
+export const SEARCH_RESOURCES_ALLOWLIST = new Set([
+  'query',
+  'limit',
+  'type',
+  'extensions',
+  'payTo',
+  'scheme',
+  'network',
+]);
+
+export const GET_RESOURCE_ALLOWLIST = new Set(['url', 'toolName']);
+
+export function validateToolArgs(toolName, args, allowlist, { arrayAllowedKeys = new Set() } = {}) {
+  if (args === undefined || args === null) {
+    return {};
+  }
+  if (typeof args !== 'object' || Array.isArray(args)) {
+    throw new McpInputError(`Arguments for tool "${toolName}" must be an object.`);
+  }
+  for (const [key, value] of Object.entries(args)) {
+    if (!allowlist.has(key)) {
+      throw new McpInputError(
+        `Unexpected argument "${key}" for tool "${toolName}". Allowed arguments: ${Array.from(allowlist).join(', ')}.`,
+      );
+    }
+    if (Array.isArray(value) && !arrayAllowedKeys.has(key)) {
+      throw new McpInputError(
+        `Disallowed array value for argument "${key}" in tool "${toolName}".`,
+      );
+    }
+  }
+  return args;
+}
+
+// ---------------------------------------------------------------------------
 // MCP Server Initialization
 // ---------------------------------------------------------------------------
 // `fetchDiscovery` is what backs the semantic resources (#391): an
 // `x402://catalog/...` URI is resolved into a live facilitator catalog query.
 // Prompts are served without it, so the two capabilities are independent.
-const server = new McpServer({
+export const server = new McpServer({
   name: 'x402-facilitator-stellar-mcp',
   version: '0.0.1',
   fetchDiscovery,
@@ -184,6 +222,9 @@ server.tool(
     },
   },
   async args => {
+    validateToolArgs('search_resources', args, SEARCH_RESOURCES_ALLOWLIST, {
+      arrayAllowedKeys: new Set(['extensions']),
+    });
     return await fetchDiscovery('/discovery/search', args);
   },
 );
@@ -204,6 +245,10 @@ server.tool(
     required: ['url'],
   },
   async args => {
+    validateToolArgs('get_resource', args, GET_RESOURCE_ALLOWLIST);
+    if (!args || typeof args.url !== 'string' || !args.url.trim()) {
+      throw new McpInputError('url is required and must be a string for get_resource.');
+    }
     const res = await fetchDiscovery('/discovery/resources', {
       url: args.url,
       toolName: args.toolName,
