@@ -40,18 +40,49 @@ class JwksCache {
 }
 
 const jwksCache = new JwksCache();
+/** Map of jwksUri => in-flight Promise<JwksSet> */
+const jwksInFlight = new Map();
 
 export function createJwtVerifier(jwksUri, options = {}) {
   const { issuer = null, audience = null, clockTolerance = 30, requiredScopes = [] } = options;
 
   async function verifyToken(token) {
+    // Single-flight: if a fetch is already in progress for this JWKS URI,
+    // await the existing promise instead of starting a new one.
+    if (jwksInFlight.has(jwksUri)) {
+      await jwksInFlight.get(jwksUri);
+      // After the in-flight fetch resolves, the JWKS is already stored in
+      // jwksCache by the original fetcher; just proceed to use it.
+    }
+
     let jwks = jwksCache.get(jwksUri);
     if (!jwks) {
-      jwks = createRemoteJWKSet(new URL(jwksUri), {
-        cacheMaxAge: JWKS_CACHE_TTL_MS,
-        cooldownDuration: JWKS_CACHE_TTL_MS,
-      });
-      jwksCache.set(jwksUri, jwks);
+      // Start single-flight fetch so a burst produces only one remote load.
+      const fetchPromise = (async () => {
+        const jwksResult = createRemoteJWKSet(new URL(jwksUri), {
+          cacheMaxAge: JWKS_CACHE_TTL_MS,
+          cooldownDuration: JWKS_CACHE_TTL_MS,
+        });
+        jwksCache.set(jwksUri, jwksResult);
+        // Clean up the in-flight entry so a later retry is not blocked.
+        jwksInFlight.delete(jwksUri);
+        return jwksResult;
+      })();
+
+      jwksInFlight.set(jwksUri, fetchPromise);
+
+      try {
+        await fetchPromise;
+      } catch (err) {
+        // If the construction failed, remove the entry so the next call retries.
+        jwksInFlight.delete(jwksUri);
+        throw err;
+      }
+
+      jwks = jwksCache.get(jwksUri);
+      if (!jwks) {
+        throw new Error('JWKS fetch did not populate cache');
+      }
     }
 
     const verifyOptions = {

@@ -112,7 +112,19 @@ export function createCorsHook(corsConfig = {}) {
         granted = allowlisted ? origin : false;
       }
 
-      reply.header('Vary', 'Origin');
+      // Append 'Origin' to existing Vary header if present, deduplicating
+      // case-insensitively and preserving token order.
+      const existingVary = reply.getHeader('Vary');
+      const varyTokens = new Set();
+      if (existingVary) {
+        const tokens = Array.isArray(existingVary) ? existingVary : existingVary.split(',');
+        for (const token of tokens) {
+          varyTokens.add(token.trim());
+        }
+      }
+      varyTokens.add('Origin');
+      const normalizedVary = Array.from(varyTokens).join(', ');
+      reply.header('Vary', normalizedVary);
 
       if (granted) {
         reply.header('Access-Control-Allow-Origin', granted);
@@ -139,10 +151,27 @@ export function createCorsHook(corsConfig = {}) {
 const ALLOWED_REQUEST_HEADERS = 'Authorization, Content-Type, X-402-Payment';
 
 /**
- * How long a browser may cache a preflight answer (#414): 24 hours, replacing
- * the 600s that made every payment route re-preflight itself ten times a day.
+ * Default max-age seconds for preflight responses, per policy class.
+ *   - Authenticated routes: 60s  (revocation takes effect quickly)
+ *   - Public routes: 600s  (longer cache for discovery reads)
+ * An operator may override these per-policy via `corsConfig.preflightMaxAgeSeconds`.
+ * Invalid values are clamped to a safe finite number; NaN is never emitted.
  */
-const PREFLIGHT_MAX_AGE = '86400';
+const DEFAULT_PREFLIGHT_MAX_AGE = {
+  authenticated: 60,
+  public: 600,
+};
+
+export function resolvePreflightMaxAge(corsConfig, policy) {
+  const overrides = corsConfig.preflightMaxAgeSeconds;
+  if (overrides && typeof overrides === 'object') {
+    const policySpecific = overrides[policy];
+    if (typeof policySpecific === 'number' && isFinite(policySpecific) && policySpecific > 0) {
+      return policySpecific;
+    }
+  }
+  return DEFAULT_PREFLIGHT_MAX_AGE[policy] ?? DEFAULT_PREFLIGHT_MAX_AGE.public;
+}
 
 /**
  * Creates an OPTIONS preflight route handler for a given route class policy.
@@ -159,11 +188,12 @@ export function createPreflightHandler(corsConfig = {}) {
   const cors = createCorsHook(corsConfig);
   return function preflight(policy, methods) {
     const allowMethods = methods ?? (policy === 'public' ? 'GET, OPTIONS' : 'POST, OPTIONS');
+    const maxAge = resolvePreflightMaxAge(corsConfig, policy);
     return async (req, reply) => {
       await cors(policy)(req, reply);
       reply.header('Access-Control-Allow-Methods', allowMethods);
       reply.header('Access-Control-Allow-Headers', ALLOWED_REQUEST_HEADERS);
-      reply.header('Access-Control-Max-Age', PREFLIGHT_MAX_AGE);
+      reply.header('Access-Control-Max-Age', String(maxAge));
       return reply.code(204).send();
     };
   };
