@@ -78,7 +78,8 @@ describe('CORS Vary merge', () => {
       '/test',
       {
         onRequest: [
-          async (_req, reply) => reply.header('Vary', ['Accept-Language', 'Origin, Accept-Encoding']),
+          async (_req, reply) =>
+            reply.header('Vary', ['Accept-Language', 'Origin, Accept-Encoding']),
           corsHook,
         ],
       },
