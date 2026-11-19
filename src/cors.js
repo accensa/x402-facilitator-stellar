@@ -114,6 +114,8 @@ export function createCorsHook(corsConfig = {}) {
 
       // Append 'Origin' to existing Vary header if present, deduplicating
       // case-insensitively and preserving token order.
+      // Also add 'Accept-Encoding' when the request includes it,
+      // so browsers cache compressed responses correctly with CORS.
       const existingVary = reply.getHeader('Vary');
       const varyTokens = new Set();
       if (existingVary) {
@@ -123,6 +125,11 @@ export function createCorsHook(corsConfig = {}) {
         }
       }
       varyTokens.add('Origin');
+      // Add Accept-Encoding if the request has an Accept-Encoding header,
+      // which is needed for proper caching of compressed CORS responses.
+      if (req.headers['accept-encoding']) {
+        varyTokens.add('Accept-Encoding');
+      }
       const normalizedVary = Array.from(varyTokens).join(', ');
       reply.header('Vary', normalizedVary);
 
