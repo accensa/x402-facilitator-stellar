@@ -154,6 +154,8 @@ pinned.
 
 ### Fixed
 
+- In `docs/AUDIT.md`, removed accidental duplicate `## Proposed Scope` heading, restoring valid markdown hierarchy and unambiguous anchor targets (#775).
+- In `eval/runner.js`, corrected nDCG@K calculation by truncating sorted ideal relevance scores to top-K (`actualScores.length`) so perfect top-K rankings against larger judgment sets yield nDCG = 1.0 without artificial IDCG denominator inflation (#774).
 - A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`
   records `claimedAt` on the claim, and a claim older than `pendingTimeoutMs`
   (default 60s, configurable per store) is treated as abandoned and taken over

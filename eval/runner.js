@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
 import { MemoryCatalogStore } from '../src/catalog/memory.js';
 
 // Calculate DCG for a list of relevance scores
-function dcg(scores) {
+export function dcg(scores) {
   return scores.reduce((sum, score, i) => sum + score / Math.log2(i + 2), 0);
 }
 
@@ -24,13 +25,19 @@ function rerankScore(query, document) {
 }
 
 // Calculate nDCG for a list of actual relevance scores vs ideal relevance scores
-function ndcg(actualScores, idealScores) {
-  const idcg = dcg(idealScores.sort((a, b) => b - a));
-  if (idcg === 0) return actualScores.length === 0 ? 1 : 0;
+export function ndcg(actualScores, idealScores) {
+  const sortedIdeal = [...idealScores].sort((a, b) => b - a);
+  const fullIdcg = dcg(sortedIdeal);
+  if (fullIdcg === 0) return actualScores.length === 0 ? 1 : 0;
+  if (actualScores.length === 0) return 0;
+
+  const topIdeal = sortedIdeal.slice(0, actualScores.length);
+  const idcg = dcg(topIdeal);
+  if (idcg === 0) return 0;
   return dcg(actualScores) / idcg;
 }
 
-async function runEval() {
+export async function runEval() {
   const catalogPath = new URL('./fixtures/catalog.json', import.meta.url);
   const queriesPath = new URL('./judgements/queries.json', import.meta.url);
 
@@ -212,7 +219,9 @@ async function runEval() {
   }
 }
 
-runEval().catch(err => {
-  console.error('Eval failed:', err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runEval().catch(err => {
+    console.error('Eval failed:', err);
+    process.exit(1);
+  });
+}
