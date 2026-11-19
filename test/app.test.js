@@ -1069,7 +1069,8 @@ describe('CORS preflight', () => {
       assert.equal(res.status, 204);
       assert.equal(res.headers.get('access-control-allow-origin'), '*');
       assert.equal(res.headers.get('access-control-allow-methods'), 'GET, OPTIONS');
-      assert.equal(res.headers.get('access-control-max-age'), '86400');
+      // Public reads keep the longer window; authenticated routes get 300s.
+      assert.equal(res.headers.get('access-control-max-age'), '600');
     });
   });
 
