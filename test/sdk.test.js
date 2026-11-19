@@ -44,8 +44,9 @@ test('toStroops truncates beyond 7 decimals rather than rounding', () => {
   // Stellar's asset precision is 7 decimals; the 8th digit is dropped, not
   // rounded — rounding would invent stroops that never existed.
   assert.equal(toStroops('1.12345678'), '11234567');
-  assert.equal(toStroops('0.00000001'), '0');
+  assert.equal(toStroops('0.10000001'), '1000000');
   assert.equal(toStroops('9.99999999'), '99999999');
+  assert.throws(() => toStroops('0.00000001'), /cannot be represented in stroops/);
 });
 
 test('toStroops rejects non-numeric input with a structured message, not a SyntaxError', () => {
