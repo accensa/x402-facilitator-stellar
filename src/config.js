@@ -122,6 +122,86 @@ function parseOptionalSecret(env, key) {
 }
 
 /**
+ * Hosts a remote key source may live on, from KEY_MANAGER_ALLOWED_HOSTS (#675).
+ *
+ * Comma-separated hostnames, compared case-insensitively on a dot boundary:
+ * `example.com` covers `example.com` and `vault.example.com`, never
+ * `evil-example.com`. Unset means any host is accepted, which is the pre-#675
+ * behaviour; the https rule below still applies.
+ */
+function parseKeyManagerAllowedHosts(value) {
+  return (value ?? '')
+    .split(',')
+    .map(host => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function keyManagerHostAllowed(hostname, allowedHosts) {
+  if (allowedHosts.length === 0) return true;
+  const host = hostname.toLowerCase();
+  return allowedHosts.some(entry => host === entry || host.endsWith(`.${entry}`));
+}
+
+/**
+ * Validate a remote key-source URL at boot (#675).
+ *
+ * The value at KEY_MANAGER_URL decides which keys sign settlements, so a
+ * mistyped or plaintext URL is a money question, not a convenience one. It is
+ * checked here rather than at the first fetch so a bad configuration costs a
+ * restart instead of a silently different signer set.
+ *
+ * Rules: absolute http(s) only, no embedded userinfo (it would be sent on
+ * every poll and land in logs), https unless the instance is a development or
+ * test one, and an optional host allowlist. The error names the variable and
+ * the host, never the full URL — that is the string that can carry a
+ * credential.
+ *
+ * Returns null for an unset or blank value, matching the "no key manager"
+ * configuration.
+ */
+function parseKeyManagerUrl(value, name, { nodeEnv, allowedHosts }) {
+  const raw = value?.trim();
+  if (!raw) return null;
+
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(
+      `${name} must be an absolute URL, e.g. https://vault.example.com/v1/x402/signers.`,
+    );
+  }
+
+  if (url.username || url.password) {
+    throw new Error(
+      `${name} must not embed credentials (userinfo); host "${url.host}" was given with one.`,
+    );
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(
+      `${name} must use http or https, got "${url.protocol.replace(':', '')}" for host "${url.host}".`,
+    );
+  }
+
+  if (url.protocol === 'http:' && nodeEnv !== 'test' && nodeEnv !== 'development') {
+    throw new Error(
+      `${name} must use https when NODE_ENV=${nodeEnv}; got "${url.protocol}//${url.host}". ` +
+        'Use http only for a development or test instance.',
+    );
+  }
+
+  if (!keyManagerHostAllowed(url.hostname, allowedHosts)) {
+    throw new Error(
+      `${name} host "${url.hostname}" is not listed in KEY_MANAGER_ALLOWED_HOSTS. ` +
+        'Add the host there, or remove it from the URL.',
+    );
+  }
+
+  return raw;
+}
+
+/**
  * Non-negative integer from an env var: 0 is allowed and meaningful for the
  * discovery cache, where `max-age=0` disables client-side caching (#200).
  *
@@ -162,6 +242,11 @@ export function resolveConfig(env = process.env) {
   const testnetSecrets = parseSecrets(env, 'FACILITATOR_SECRETS', 'FACILITATOR_SECRET');
   const testnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET');
 
+  // Read once, before the per-network blocks, so the key-source validator can
+  // apply the same https rule and allowlist to both networks (#675).
+  const nodeEnv = env.NODE_ENV ?? 'development';
+  const keyManagerAllowedHosts = parseKeyManagerAllowedHosts(env.KEY_MANAGER_ALLOWED_HOSTS);
+
   const networks = [TESTNET];
   const perNetwork = {
     [TESTNET]: {
@@ -176,7 +261,10 @@ export function resolveConfig(env = process.env) {
         min: 100,
         max: 10_000_000,
       }),
-      keyManagerUrl: env.KEY_MANAGER_URL || null,
+      keyManagerUrl: parseKeyManagerUrl(env.KEY_MANAGER_URL, 'KEY_MANAGER_URL', {
+        nodeEnv,
+        allowedHosts: keyManagerAllowedHosts,
+      }),
       keyManagerPollIntervalMs: Number(env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0),
       pactContractId: parsePactContract(env.PACT_CONTRACT_ID, 'PACT_CONTRACT_ID'),
       pactMaxTransactionFeeStroops: parsePactFeeCeiling(
@@ -357,7 +445,11 @@ export function resolveConfig(env = process.env) {
         min: 5_056,
         max: 10_000_000,
       }),
-      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
+      keyManagerUrl: parseKeyManagerUrl(
+        env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL,
+        env.KEY_MANAGER_URL_PUBNET == null ? 'KEY_MANAGER_URL' : 'KEY_MANAGER_URL_PUBNET',
+        { nodeEnv, allowedHosts: keyManagerAllowedHosts },
+      ),
       pactContractId: parsePactContract(env.PACT_CONTRACT_ID_PUBNET, 'PACT_CONTRACT_ID_PUBNET'),
       pactMaxTransactionFeeStroops: parsePactFeeCeiling(
         env.PACT_MAX_TX_FEE_STROOPS_PUBNET,
@@ -473,7 +565,7 @@ export function resolveConfig(env = process.env) {
      * here to decide whether a local .env file is loaded and whether HSTS is
      * sent. Never gate error-detail behaviour on it — see app.js.
      */
-    nodeEnv: env.NODE_ENV ?? 'development',
+    nodeEnv,
     cors: { allowedOrigins: corsAllowedOrigins },
     networks,
     perNetwork,
