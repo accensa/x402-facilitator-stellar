@@ -13,8 +13,12 @@ export class FacilitatorError extends Error {
   /** @type {Record<string, unknown> | null} optional structured context */
   context = null;
 
-  constructor(message, { code = 'facilitator_error', context = null } = {}) {
-    super(message);
+  constructor(message, { code = 'facilitator_error', context = null, cause } = {}) {
+    if (cause !== undefined) {
+      super(message, { cause });
+    } else {
+      super(message);
+    }
     this.name = this.constructor.name;
     this.code = code;
     this.context = context;
@@ -22,32 +26,32 @@ export class FacilitatorError extends Error {
 }
 
 export class InvalidRequestError extends FacilitatorError {
-  constructor(message, context = null) {
-    super(message, { code: 'invalid_request', context });
+  constructor(message, context = null, cause) {
+    super(message, { code: 'invalid_request', context, cause });
   }
 }
 
 export class NotFoundError extends FacilitatorError {
-  constructor(message, context = null) {
-    super(message, { code: 'not_found', context });
+  constructor(message, context = null, cause) {
+    super(message, { code: 'not_found', context, cause });
   }
 }
 
 export class UnauthorizedError extends FacilitatorError {
-  constructor(message, context = null) {
-    super(message, { code: 'invalid_api_key', context });
+  constructor(message, context = null, cause) {
+    super(message, { code: 'invalid_api_key', context, cause });
   }
 }
 
 export class RateLimitError extends FacilitatorError {
-  constructor(message, context = null) {
-    super(message, { code: 'rate_limited', context });
+  constructor(message, context = null, cause) {
+    super(message, { code: 'rate_limited', context, cause });
   }
 }
 
 export class ServiceUnavailableError extends FacilitatorError {
-  constructor(message, context = null) {
-    super(message, { code: 'settlement_store_unavailable', context });
+  constructor(message, context = null, cause) {
+    super(message, { code: 'settlement_store_unavailable', context, cause });
   }
 }
 
