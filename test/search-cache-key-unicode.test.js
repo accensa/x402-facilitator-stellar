@@ -52,18 +52,19 @@ test('#686: NFC only — different queries stay different keys', () => {
 });
 
 test('#686: composed and decomposed catalogue values score identically', () => {
-  const now = new Date();
+  // No `last_seen_at`: scoreResource applies a recency decay from Date.now(),
+  // so two calls that straddle a millisecond boundary return nearly equal —
+  // but not strictly equal — floats. This test is about normalisation, not
+  // decay, so the fixtures leave the time term out and the scores are exact.
   const composed = {
     serviceName: `Weather ${COMPOSED}`,
     description: 'precomposed café',
     tags: [COMPOSED],
-    last_seen_at: now,
   };
   const decomposed = {
     serviceName: `Weather ${DECOMPOSED}`,
     description: 'precomposed café',
     tags: [DECOMPOSED],
-    last_seen_at: now,
   };
 
   for (const query of [COMPOSED, DECOMPOSED]) {
