@@ -1417,6 +1417,10 @@ export async function createApp(
     preflight('authenticated', 'GET, OPTIONS'),
   );
 
+  app.options('/*', { onRequest: cors('public') }, (_req, reply) => {
+    reply.code(404).send({ error: 'not_found', reason: 'route_not_found' });
+  });
+
   // ---------------------------------------------------------------------------
   // 404 and Error Handlers
   // ---------------------------------------------------------------------------
