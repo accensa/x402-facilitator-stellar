@@ -151,6 +151,21 @@ pinned.
   claim in `docs/PRIVACY.md` true for shared stores (Redis,
   `RATE_LIMIT_STORE=postgres`, the CRDT store) that previously persisted the raw
   address. `IP_HASH_SECRET` overrides the derived HMAC key (#204).
+- **Behaviour change:** `KEY_MANAGER_URL` and `KEY_MANAGER_URL_PUBNET` are
+  validated at boot (#675). The URL must be absolute http(s), must not embed
+  userinfo, and must be https unless `NODE_ENV` is `development` or `test`; the
+  optional `KEY_MANAGER_ALLOWED_HOSTS` allowlist restricts which hosts it may
+  name (dot-boundary matching, so `example.com` never accepts
+  `evil-example.com`). A deployment whose key-source URL fails these rules will
+  not start until it is corrected; unset behaviour is unchanged. Errors name the
+  variable and host, never the full URL.
+- **Behaviour change:** the payment body schema now bounds the fields the
+  transport owns (#676): `paymentRequirements.scheme` is at most 32 characters,
+  `network` at most 64, `paymentPayload` at most 16 properties and
+  `paymentRequirements` at most 32, and unknown top-level keys are rejected
+  with the existing 400 shape. Unknown keys inside `paymentRequirements` and
+  inside `paymentPayload.payload` are still accepted — those are the scheme's
+  contract. A client sending an unknown top-level field will now see a 400.
 
 ### Fixed
 
