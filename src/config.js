@@ -37,16 +37,44 @@ function vaultUrlHasUserinfo(url) {
  * facilitator with a testnet-shaped config is losing real money.
  */
 /**
- * Parse a positive integer from an env var, with a default and optional bounds
- * check. Rejects NaN, negatives, and values above max. (#175)
+ * Parses one integer-valued env var, with a default and bounds.
+ *
+ * Every numeric setting follows the same policy (#674), and it is the same one
+ * the secrets above use: a typo is a boot error, an absent variable takes the
+ * default. Before this, `RATE_LIMIT_VERIFY_RPM=60O` stopped the process while
+ * `DISCOVERY_CACHE_MAX_AGE_SECONDS=60O` silently served a 60-second cache —
+ * two opposite answers to the same mistake. A value must now be plain decimal
+ * digits, so `Number()`'s coercions no longer let `60O`, `1e2`, `12.5`, `-1`
+ * or a lone space through. The message names the variable, the raw value and
+ * the accepted range, because a boot error is only actionable if it says which
+ * setting is wrong and what was read. (#175, #200, #674)
+ *
+ * `emptyIsDefault` preserves the `''`-means-unset convention an `.env` file
+ * produces for a variable declared but left blank: that value takes the
+ * default. Whitespace is *not* an unset value — it is a typo — and is refused,
+ * so `" 60 "` and `"60 s"` both stop the boot rather than being trimmed into
+ * something that looks intentional.
  */
-function parsePositiveInt(value, { name, defaultValue, min = 1, max = Number.MAX_SAFE_INTEGER }) {
+function parseBoundedInt(
+  value,
+  { name, defaultValue, min = 0, max = Number.MAX_SAFE_INTEGER, emptyIsDefault = false },
+) {
   const raw = value ?? String(defaultValue);
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < min || n > max) {
+  if (emptyIsDefault && raw === '') return defaultValue;
+  const n = /^\d+$/.test(String(raw)) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
     throw new Error(`${name} must be a finite integer between ${min} and ${max}, got "${raw}".`);
   }
   return n;
+}
+
+/**
+ * Positive integer from an env var: 1 or more, bounded by `max` (#175).
+ * Shares {@link parseBoundedInt}'s policy: a typo is a boot error, an absent
+ * variable takes the default.
+ */
+function parsePositiveInt(value, options) {
+  return parseBoundedInt(value, { min: 1, ...options });
 }
 
 function parseSecrets(env, pluralKey, singularKey) {
@@ -94,15 +122,97 @@ function parseOptionalSecret(env, key) {
 }
 
 /**
- * Non-negative integer from an env var, falling back to `fallback` when unset,
- * unparsable, or negative (#200). Garbage config must not poison a
- * Cache-Control header — it falls back to the documented default instead.
+ * Hosts a remote key source may live on, from KEY_MANAGER_ALLOWED_HOSTS (#675).
+ *
+ * Comma-separated hostnames, compared case-insensitively on a dot boundary:
+ * `example.com` covers `example.com` and `vault.example.com`, never
+ * `evil-example.com`. Unset means any host is accepted, which is the pre-#675
+ * behaviour; the https rule below still applies.
  */
-function nonNegativeInt(value, fallback) {
-  if (value === undefined || value === null || value === '') return fallback;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return fallback;
-  return Math.floor(n);
+function parseKeyManagerAllowedHosts(value) {
+  return (value ?? '')
+    .split(',')
+    .map(host => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function keyManagerHostAllowed(hostname, allowedHosts) {
+  if (allowedHosts.length === 0) return true;
+  const host = hostname.toLowerCase();
+  return allowedHosts.some(entry => host === entry || host.endsWith(`.${entry}`));
+}
+
+/**
+ * Validate a remote key-source URL at boot (#675).
+ *
+ * The value at KEY_MANAGER_URL decides which keys sign settlements, so a
+ * mistyped or plaintext URL is a money question, not a convenience one. It is
+ * checked here rather than at the first fetch so a bad configuration costs a
+ * restart instead of a silently different signer set.
+ *
+ * Rules: absolute http(s) only, no embedded userinfo (it would be sent on
+ * every poll and land in logs), https unless the instance is a development or
+ * test one, and an optional host allowlist. The error names the variable and
+ * the host, never the full URL — that is the string that can carry a
+ * credential.
+ *
+ * Returns null for an unset or blank value, matching the "no key manager"
+ * configuration.
+ */
+function parseKeyManagerUrl(value, name, { nodeEnv, allowedHosts }) {
+  const raw = value?.trim();
+  if (!raw) return null;
+
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(
+      `${name} must be an absolute URL, e.g. https://vault.example.com/v1/x402/signers.`,
+    );
+  }
+
+  if (url.username || url.password) {
+    throw new Error(
+      `${name} must not embed credentials (userinfo); host "${url.host}" was given with one.`,
+    );
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(
+      `${name} must use http or https, got "${url.protocol.replace(':', '')}" for host "${url.host}".`,
+    );
+  }
+
+  if (url.protocol === 'http:' && nodeEnv !== 'test' && nodeEnv !== 'development') {
+    throw new Error(
+      `${name} must use https when NODE_ENV=${nodeEnv}; got "${url.protocol}//${url.host}". ` +
+        'Use http only for a development or test instance.',
+    );
+  }
+
+  if (!keyManagerHostAllowed(url.hostname, allowedHosts)) {
+    throw new Error(
+      `${name} host "${url.hostname}" is not listed in KEY_MANAGER_ALLOWED_HOSTS. ` +
+        'Add the host there, or remove it from the URL.',
+    );
+  }
+
+  return raw;
+}
+
+/**
+ * Non-negative integer from an env var: 0 is allowed and meaningful for the
+ * discovery cache, where `max-age=0` disables client-side caching (#200).
+ *
+ * Same policy as {@link parsePositiveInt} (#674): absent or blank takes the
+ * default, garbage is a boot error. This used to swallow a typo and fall back
+ * to the default so it could not poison a Cache-Control header, but that made
+ * `DISCOVERY_CACHE_MAX_AGE_SECONDS=60O` look like an intentional 60 seconds —
+ * a wrong header is cheaper to catch at boot than after a week of stale pages.
+ */
+function nonNegativeInt(value, { name, defaultValue, max = Number.MAX_SAFE_INTEGER }) {
+  return parseBoundedInt(value, { name, defaultValue, min: 0, max, emptyIsDefault: true });
 }
 
 /**
@@ -132,6 +242,11 @@ export function resolveConfig(env = process.env) {
   const testnetSecrets = parseSecrets(env, 'FACILITATOR_SECRETS', 'FACILITATOR_SECRET');
   const testnetFeeBumpSecret = parseOptionalSecret(env, 'FEE_BUMP_SECRET');
 
+  // Read once, before the per-network blocks, so the key-source validator can
+  // apply the same https rule and allowlist to both networks (#675).
+  const nodeEnv = env.NODE_ENV ?? 'development';
+  const keyManagerAllowedHosts = parseKeyManagerAllowedHosts(env.KEY_MANAGER_ALLOWED_HOSTS);
+
   const networks = [TESTNET];
   const perNetwork = {
     [TESTNET]: {
@@ -146,7 +261,10 @@ export function resolveConfig(env = process.env) {
         min: 100,
         max: 10_000_000,
       }),
-      keyManagerUrl: env.KEY_MANAGER_URL || null,
+      keyManagerUrl: parseKeyManagerUrl(env.KEY_MANAGER_URL, 'KEY_MANAGER_URL', {
+        nodeEnv,
+        allowedHosts: keyManagerAllowedHosts,
+      }),
       keyManagerPollIntervalMs: Number(env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0),
       pactContractId: parsePactContract(env.PACT_CONTRACT_ID, 'PACT_CONTRACT_ID'),
       pactMaxTransactionFeeStroops: parsePactFeeCeiling(
@@ -318,13 +436,20 @@ export function resolveConfig(env = process.env) {
       feeBumpSecret: pubnetFeeBumpSecret,
       rpcUrl: env.STELLAR_RPC_URL_PUBNET,
       horizonUrl: env.HORIZON_URL_PUBNET || 'https://horizon.stellar.org',
+      // Calibrated 2026-11-19 against live Horizon /fee_stats (docs/PUBNET_FEE_CALIBRATION.md).
+      // min: 5_056 stroops floor derived from p90 fee_charged (0% headroom applied).
+      // defaultValue: 50_000 stroops ceiling derived with ~9.89x headroom over p90 to absorb surges.
       maxTransactionFeeStroops: parsePositiveInt(env.MAX_TX_FEE_STROOPS_PUBNET, {
         name: 'MAX_TX_FEE_STROOPS_PUBNET',
         defaultValue: 50_000,
-        min: 100,
+        min: 5_056,
         max: 10_000_000,
       }),
-      keyManagerUrl: env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL ?? null,
+      keyManagerUrl: parseKeyManagerUrl(
+        env.KEY_MANAGER_URL_PUBNET ?? env.KEY_MANAGER_URL,
+        env.KEY_MANAGER_URL_PUBNET == null ? 'KEY_MANAGER_URL' : 'KEY_MANAGER_URL_PUBNET',
+        { nodeEnv, allowedHosts: keyManagerAllowedHosts },
+      ),
       pactContractId: parsePactContract(env.PACT_CONTRACT_ID_PUBNET, 'PACT_CONTRACT_ID_PUBNET'),
       pactMaxTransactionFeeStroops: parsePactFeeCeiling(
         env.PACT_MAX_TX_FEE_STROOPS_PUBNET,
@@ -440,7 +565,7 @@ export function resolveConfig(env = process.env) {
      * here to decide whether a local .env file is loaded and whether HSTS is
      * sent. Never gate error-detail behaviour on it — see app.js.
      */
-    nodeEnv: env.NODE_ENV ?? 'development',
+    nodeEnv,
     cors: { allowedOrigins: corsAllowedOrigins },
     networks,
     perNetwork,
@@ -653,12 +778,19 @@ export function resolveConfig(env = process.env) {
      * one running a static demo. Defaults: 60s max-age, 300s
      * stale-while-revalidate. max-age=0 disables client-side caching entirely
      * (the ETag/304 revalidation still works — it just requires a round trip).
-     * Garbage or negative values fall back to the defaults rather than
-     * poisoning the Cache-Control header.
+     * A typo (or a negative value) stops the process at boot naming the
+     * variable and the raw value; an absent or blank variable takes the
+     * default (#674).
      */
     discoveryCache: {
-      maxAgeSeconds: nonNegativeInt(env.DISCOVERY_CACHE_MAX_AGE_SECONDS, 60),
-      staleWhileRevalidateSeconds: nonNegativeInt(env.DISCOVERY_CACHE_STALE_SECONDS, 300),
+      maxAgeSeconds: nonNegativeInt(env.DISCOVERY_CACHE_MAX_AGE_SECONDS, {
+        name: 'DISCOVERY_CACHE_MAX_AGE_SECONDS',
+        defaultValue: 60,
+      }),
+      staleWhileRevalidateSeconds: nonNegativeInt(env.DISCOVERY_CACHE_STALE_SECONDS, {
+        name: 'DISCOVERY_CACHE_STALE_SECONDS',
+        defaultValue: 300,
+      }),
     },
 
     shutdownGraceMs: Number(env.SHUTDOWN_GRACE_MS ?? 15_000),

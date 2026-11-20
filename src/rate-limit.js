@@ -373,7 +373,7 @@ export class RateLimiter {
   async getUsage(keyId) {
     const ownerId = keyId; // IP usage is not exposed via GET /usage, only key usage
     const limits = this._getKeyConfig(keyId);
-    const getCount = async (type, windowSec, fallback) => {
+    const getCount = async (type, windowSec, fallback = 0) => {
       const now = Math.floor(Date.now() / 1000);
       try {
         const bucket = await this.store.get(this._getBucketId(ownerId, type, windowSec), now);
@@ -391,6 +391,7 @@ export class RateLimiter {
       settle_rpd: await getCount('settle', 86400),
       fee_spd: await getCount('fee', 86400),
       catalog_rpm: await getCount('catalog', 60),
+      catalog_read_rpm: await getCount('catalog_read', 60),
       limits: {
         verify_rpm: limits.verifyRpm,
         settle_rpm: limits.settleRpm,
@@ -398,6 +399,7 @@ export class RateLimiter {
         settle_rpd: limits.settleRpd,
         fee_spd: limits.feeSpd,
         catalog_rpm: limits.catalogRpm,
+        catalog_read_rpm: limits.catalogReadRpm ?? 60,
       },
     };
   }

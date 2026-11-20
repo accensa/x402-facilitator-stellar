@@ -323,7 +323,9 @@ describe('CORS: merchant domain patterns (#414)', () => {
         res.headers.get('access-control-allow-origin'),
         'https://shop.merchant.example.com',
       );
-      assert.equal(res.headers.get('access-control-max-age'), '86400');
+      // Authenticated routes cache briefly so an allowlist change takes effect
+      // in minutes rather than the 24 hours the single constant allowed (#678).
+      assert.equal(res.headers.get('access-control-max-age'), '300');
 
       const allowHeaders = (res.headers.get('access-control-allow-headers') ?? '')
         .split(', ')

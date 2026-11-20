@@ -53,9 +53,35 @@ export function createMultiSignerEngine({
   if (!Number.isInteger(threshold) || threshold < 1) {
     throw new Error(`multi-signer threshold must be a positive integer, got "${threshold}"`);
   }
+  // Fail at construction rather than aborting every co-signer request at once:
+  // a zero, negative or non-numeric value fires the abort timer immediately (or
+  // not at all) and the engine would report every co-signer as failed with no
+  // hint that the configuration, not the network, was wrong (#713).
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1) {
+    throw new Error(
+      `multi-signer requestTimeoutMs must be a positive integer, got "${requestTimeoutMs}"`,
+    );
+  }
 
   /** envelopeId -> envelope record */
   const pending = new Map();
+
+  /**
+   * envelopeId -> true once `purgeExpired()` evicted it (#765). The record
+   * itself is gone; this only lets a later reference to an evicted envelope
+   * keep reporting the expiry instead of the "unknown envelope" error, and it
+   * is cleared if the id is reused by a new `createEnvelope()`.
+   */
+  const evicted = new Set();
+
+  function lookupEnvelope(envelopeId) {
+    const envelope = pending.get(envelopeId);
+    if (envelope) return envelope;
+    if (evicted.has(envelopeId)) {
+      throw new Error(`multi-signer envelope "${envelopeId}" expired`);
+    }
+    throw new Error(`unknown multi-signer envelope "${envelopeId}"`);
+  }
 
   function assertLive(envelope) {
     if (envelope.status === 'expired' || nowMs(now) > envelope.expiresAt) {
@@ -68,6 +94,12 @@ export function createMultiSignerEngine({
 
   /**
    * Opens a pending envelope for a transaction awaiting co-signatures.
+   *
+   * Idempotent by `id`: repeating the call with the same `transactionXdr`
+   * returns the existing snapshot untouched, so a retry after a timeout keeps
+   * the co-signatures already gathered and the original deadline rather than
+   * discarding in-flight progress. Reusing an `id` for a different transaction
+   * is a conflict and throws.
    *
    * @param {object} input
    * @param {string} input.id - caller-chosen envelope id (idempotency key)
@@ -102,6 +134,16 @@ export function createMultiSignerEngine({
         `multi-signer threshold ${t} exceeds ${requiredSigners.length} required signers`,
       );
     }
+    const existing = pending.get(id);
+    if (existing) {
+      if (existing.transactionXdr !== transactionXdr) {
+        throw new Error(
+          `multi-signer envelope "${id}" conflict: transactionXdr does not match the existing envelope`,
+        );
+      }
+      return snapshot(existing);
+    }
+
     const createdAt = nowMs(now);
     const envelope = {
       id,
@@ -114,6 +156,7 @@ export function createMultiSignerEngine({
       status: 'pending',
     };
     pending.set(id, envelope);
+    evicted.delete(id);
     return snapshot(envelope);
   }
 
@@ -150,8 +193,7 @@ export function createMultiSignerEngine({
    * the threshold; unknown signers are refused when an allow-list is set.
    */
   function addSignature(envelopeId, { signer, signature }) {
-    const envelope = pending.get(envelopeId);
-    if (!envelope) throw new Error(`unknown multi-signer envelope "${envelopeId}"`);
+    const envelope = lookupEnvelope(envelopeId);
     assertLive(envelope);
     if (!signer || typeof signer !== 'string') throw new Error('signature requires a signer id');
     if (!signature || typeof signature !== 'string')
@@ -188,8 +230,7 @@ export function createMultiSignerEngine({
    * @param {string[]} [overrides.endpoints]
    */
   async function requestSignatures(envelopeId, { endpoints = coSignerEndpoints } = {}) {
-    const envelope = pending.get(envelopeId);
-    if (!envelope) throw new Error(`unknown multi-signer envelope "${envelopeId}"`);
+    const envelope = lookupEnvelope(envelopeId);
     assertLive(envelope);
     if (!fetchImpl) throw new Error('no fetch implementation available for co-signer requests');
 
@@ -236,8 +277,7 @@ export function createMultiSignerEngine({
    * the network. Throws while the threshold is unmet or the deadline passed.
    */
   function assembleEnvelope(envelopeId) {
-    const envelope = pending.get(envelopeId);
-    if (!envelope) throw new Error(`unknown multi-signer envelope "${envelopeId}"`);
+    const envelope = lookupEnvelope(envelopeId);
     assertLive(envelope);
     if (envelope.signatures.size < envelope.threshold) {
       throw new Error(
@@ -256,13 +296,21 @@ export function createMultiSignerEngine({
     };
   }
 
-  /** Marks every past-deadline pending envelope expired; returns how many flipped. */
+  /**
+   * Evicts every past-deadline pending envelope from `pending`; returns how many
+   * records were physically removed (#765). Completed envelopes are left in
+   * place — there is no retention window for them, so none is invented here.
+   */
   function purgeExpired() {
     const t = nowMs(now);
     let purged = 0;
-    for (const envelope of pending.values()) {
+    // Iterate a snapshot so deleting from `pending` inside the loop is
+    // unambiguous and cannot skip a neighbouring entry.
+    for (const envelope of [...pending.values()]) {
       if (envelope.status === 'pending' && t > envelope.expiresAt) {
         envelope.status = 'expired';
+        evicted.add(envelope.id);
+        pending.delete(envelope.id);
         purged += 1;
       }
     }

@@ -194,19 +194,30 @@ export function createAssetDecimalsCache({
 
   /**
    * Converts base units to human-readable amount for the asset.
+   *
+   * Exact decimal-string arithmetic throughout: no Number() or float rounding,
+   * so an 18-decimal asset keeps every digit of a large integer amount.
    */
   function fromBaseUnits(baseUnits, assetDecimals) {
     const decimals = typeof assetDecimals === 'number' ? assetDecimals : 7;
     const str = baseUnits.toString();
     const sign = str.startsWith('-') ? '-' : '';
     const clean = str.replace(/^-/, '');
+    // A 0-decimal asset has no fractional part to slice; `slice(0, -0)` would
+    // return '' and render as ".5", so whole units are formatted directly.
+    if (decimals <= 0) return /^0+$/.test(clean) ? '0' : `${sign}${clean}`;
     if (clean.length <= decimals) {
-      const padded = clean.padStart(decimals + 1, '0');
-      return `${sign}0.${padded.slice(0, -decimals)}`;
+      // Every base unit is a fraction of one unit: pad to exactly `decimals`
+      // digits, then drop the meaningless trailing zeros (#755). 5 stroops is
+      // 0.0000005, not the old 0.0.
+      const fraction = clean.padStart(decimals, '0').replace(/0+$/, '');
+      return fraction === '' ? '0' : `${sign}0.${fraction}`;
     }
     const intPart = clean.slice(0, -decimals);
-    const fracPart = clean.slice(-decimals).replace(/0+$/, '') || '0';
-    return `${sign}${intPart}.${fracPart}`;
+    const fracPart = clean.slice(-decimals).replace(/0+$/, '');
+    // Trailing zeros are trimmed from both branches, so an exact whole amount is
+    // "1", not "1.0" — and never a negative zero.
+    return fracPart === '' ? `${sign}${intPart}` : `${sign}${intPart}.${fracPart}`;
   }
 
   /**

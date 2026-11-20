@@ -11,8 +11,12 @@ name: external-monitor
 #   FACILITATOR_URL        public endpoint to probe (e.g. https://facilitator.example.com)
 #   MONITORING_CONFIG      optional path to a JSON config committed/secret for the env
 #   ALERT_WEBHOOK_URL      where to post the alert (Slack/PagerDuty/Discord webhook)
-# For synthetic-payment probing also set SYNTHETIC_PAYMENT=true and the e2e
-# secrets (FACILITATOR_SECRET, ALICE_SECRET) — see scripts/e2e.mjs.
+# For synthetic-payment probing also set SYNTHETIC_PAYMENT=true and ALICE_SECRET
+# (the payer key). The probe spawns only the documented `node scripts/e2e.mjs`
+# with an explicit environment — ALICE_SECRET, FACILITATOR_URL, MERCHANT_ADDRESS,
+# RESOURCE_PORT and nothing else — so this job never needs the facilitator's own
+# signing key: FACILITATOR_SECRET belongs to the service under probe. Set
+# MERCHANT_ADDRESS / RESOURCE_PORT here only to override the e2e defaults.
 
 on:
   schedule:
@@ -25,10 +29,11 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
 
@@ -37,8 +42,9 @@ jobs:
         env:
           FACILITATOR_URL: ${{ secrets.FACILITATOR_URL }}
           MONITORING_CONFIG: ${{ secrets.MONITORING_CONFIG }}
+          # The payer key for the synthetic payment probe, handed to that one
+          # documented command through the probe's explicit channel.
           ALICE_SECRET: ${{ secrets.ALICE_SECRET }}
-          FACILITATOR_SECRET: ${{ secrets.FACILITATOR_SECRET }}
           SYNTHETIC_PAYMENT: ${{ secrets.SYNTHETIC_PAYMENT }}
         run: |
           # Without FACILITATOR_URL the probe falls back to http://localhost:3402

@@ -51,6 +51,12 @@ pinned.
   concurrently with isolated failures, responses are matched by id, and batches
   over 25 requests are refused. This replaces the previous blanket `-32600`
   rejection of arrays (#428).
+- Seller documentation stating the amount rules the discovery SDK enforces
+  (`docs/SELLER.md`): `pricing.amount` is a decimal numeric string or a BigInt
+  stroop count, JavaScript numbers are rejected before precision is lost, and
+  fractions longer than the 7-decimal `STELLAR_DECIMALS` are truncated rather
+  than rounded (#704).
+
 - Optional mTLS client-certificate authentication for outbound webhooks. A
   delivery carrying `mtls.ref` is sent with a client certificate resolved from a
   ref, over a pooled per-credential agent, and still carries the existing HMAC
@@ -123,6 +129,17 @@ pinned.
 
 ### Changed
 
+- **Behaviour change:** numeric environment variables now follow one policy
+  (#674). A value that is not plain decimal digits — `60O`, `60s`, `1e2`,
+  `12.5`, `-1`, a whitespace-only value — stops the boot with an error naming
+  the variable, the raw value and the accepted range; an absent or blank
+  variable takes the documented default. Previously `DISCOVERY_CACHE_MAX_AGE_SECONDS`
+  and `DISCOVERY_CACHE_STALE_SECONDS` silently fell back to `60`/`300` on such
+  a value, so a typo produced a cache header indistinguishable from a
+  deliberate setting, while a typo in `PORT` or the fee ceilings already failed
+  the boot. Variables read by this policy: `PORT`, `MAX_TX_FEE_STROOPS`,
+  `MAX_TX_FEE_STROOPS_PUBNET`, `PACT_MAX_TX_FEE_STROOPS`,
+  `DISCOVERY_CACHE_MAX_AGE_SECONDS`, `DISCOVERY_CACHE_STALE_SECONDS`.
 - The container runs with production semantics (#495): the image sets
   `NODE_ENV=production` and the facilitator service in `docker-compose.yml`
   pins it, so the production-only HSTS header is sent and a stray `.env` in the
@@ -145,9 +162,43 @@ pinned.
   claim in `docs/PRIVACY.md` true for shared stores (Redis,
   `RATE_LIMIT_STORE=postgres`, the CRDT store) that previously persisted the raw
   address. `IP_HASH_SECRET` overrides the derived HMAC key (#204).
+- **Behaviour change:** `KEY_MANAGER_URL` and `KEY_MANAGER_URL_PUBNET` are
+  validated at boot (#675). The URL must be absolute http(s), must not embed
+  userinfo, and must be https unless `NODE_ENV` is `development` or `test`; the
+  optional `KEY_MANAGER_ALLOWED_HOSTS` allowlist restricts which hosts it may
+  name (dot-boundary matching, so `example.com` never accepts
+  `evil-example.com`). A deployment whose key-source URL fails these rules will
+  not start until it is corrected; unset behaviour is unchanged. Errors name the
+  variable and host, never the full URL.
+- **Behaviour change:** the payment body schema now bounds the fields the
+  transport owns (#676): `paymentRequirements.scheme` is at most 32 characters,
+  `network` at most 64, `paymentPayload` at most 16 properties and
+  `paymentRequirements` at most 32, and unknown top-level keys are rejected
+  with the existing 400 shape. Unknown keys inside `paymentRequirements` and
+  inside `paymentPayload.payload` are still accepted — those are the scheme's
+  contract. A client sending an unknown top-level field will now see a 400.
 
 ### Fixed
 
+- In `docs/AUDIT.md`, removed accidental duplicate `## Proposed Scope` heading, restoring valid markdown hierarchy and unambiguous anchor targets (#775).
+- In `eval/runner.js`, corrected nDCG@K calculation by truncating sorted ideal relevance scores to top-K (`actualScores.length`) so perfect top-K rankings against larger judgment sets yield nDCG = 1.0 without artificial IDCG denominator inflation (#774).
+- A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`
+  records `claimedAt` on the claim, and a claim older than `pendingTimeoutMs`
+  (default 60s, configurable per store) is treated as abandoned and taken over
+  by the retry. Previously a process that died between `begin()` and
+  `complete()`/`fail()` answered 409 to every retry of that key for the rest of
+  its lifetime. Claims inside the window still conflict, and records without a
+  timestamp are treated as abandoned rather than blocking the key forever.
+- One throwing credential subscriber no longer fails a successful Vault fetch
+  (#712): `emit` invokes each listener in its own `try`/`catch`, warns with the
+  listener's error message (never the credentials), and continues, so the
+  remaining subscribers are still notified and `fetchOnce()` resolves with the
+  credentials it just fetched.
+- `createMultiSignerEngine` refuses an invalid `requestTimeoutMs` at
+  construction (#713): a zero, negative, fractional or non-numeric value now
+  throws `multi-signer requestTimeoutMs must be a positive integer` instead of
+  aborting every co-signer request and reporting all co-signers as failed with
+  no diagnostic. `DEFAULT_COSIGNER_TIMEOUT_MS` is unchanged.
 - `npm run env:check` now fails on the other direction of drift: a variable
   documented in `.env.example` that no code in `src/` reads. Reads that are
   computed (`env[pluralKey]`, `env[key]`, `env[k]`, `process.env[name]`) and
@@ -241,6 +292,12 @@ pinned.
   The field is dropped and the rest of the listing still lands
   (`partially landed`). A bare `&` — "Weather & tides" — is not markup and is
   unaffected.
+- The dead-letter queue operator purge now rejects an unknown `status` before it
+  reaches the database, instead of issuing a `DELETE` whose `WHERE` clause could
+  never match and silently reporting zero purged rows (#706).
+- `GET /usage` now reports zero counters — and retains every counter field,
+  including `catalog_read_rpm` — when the shared rate-limit store throws, instead
+  of dropping the fields from the JSON payload (#705).
 - Truncated fields are reported in a new `truncated` list on the
   `EXTENSION-RESPONSES` envelope and the `POST /discovery/resources` response,
   separate from `softDrops` (#219). Previously a description shortened to 200
@@ -248,6 +305,19 @@ pinned.
   as "this field was dropped" — it was not, and no such field exists. A
   truncated description now reports `truncated: ["description"]` and leaves
   `reason`'s dropped-fields list alone.
+
+- A configured API key whose secret contains a dot is no longer misrouted into
+  JWT verification: a failed JWT check now falls back to the timing-safe API key
+  comparison before answering 401, so a dotted key authenticates while a genuine
+  JWT still verifies with its keyId and scopes (#658).
+- The CORS `Access-Control-Expose-Headers` list now includes `X-Request-Id`, so
+  a browser can read the request id the facilitator sets on every response,
+  after the existing rate-limit entries (#657).
+- `readPaymentBody` no longer defaults its route to `verify`: call sites pass the
+  route explicitly and values outside `verify`/`settle` are rejected with a
+  `TypeError`, so a failed settle returns the settle failure envelope instead of
+  the verify one (#656).
+
 
 ## [0.0.1] - 2026-08-11
 

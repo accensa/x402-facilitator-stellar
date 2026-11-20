@@ -127,6 +127,17 @@ export function parseResourceUri(uri) {
 }
 
 /**
+ * Bounds on `limit` for `x402://catalog/search`.
+ *
+ * The tool surface advertises `max 100` (`src/mcp/cli.js`, `search_resources`),
+ * so the resource has to enforce the same ceiling. Defined once so the pattern
+ * hint, the enforced range and the rejection message cannot drift apart.
+ */
+const SEARCH_LIMIT_MIN = 1;
+const SEARCH_LIMIT_MAX = 100;
+const SEARCH_LIMIT_HINT = `expected a number between ${SEARCH_LIMIT_MIN} and ${SEARCH_LIMIT_MAX}`;
+
+/**
  * Reads one semantic resource.
  *
  * @param {string} uri - an `x402://` URI, with template parameters substituted
@@ -166,15 +177,28 @@ export async function readResource(uri, { fetchDiscovery } = {}) {
       required: true,
       maxLength: 256,
     });
+    // The regex is deliberately left as-is: non-numeric and oversized input
+    // must fail as malformed before the range below is consulted. It admits
+    // 0 and 999, which is what the range check rejects — and the raw value is
+    // never echoed back, only the bound.
     const limit = assertSafeText(params.get('limit'), {
       field: 'limit',
       maxLength: 4,
       pattern: /^\d{1,3}$/,
-      patternHint: 'expected a number between 1 and 100',
+      patternHint: SEARCH_LIMIT_HINT,
     });
+    const limitValue = limit === '' ? null : Number(limit);
+    if (limitValue !== null && (limitValue < SEARCH_LIMIT_MIN || limitValue > SEARCH_LIMIT_MAX)) {
+      throw new McpInputError(
+        `'limit' must be between ${SEARCH_LIMIT_MIN} and ${SEARCH_LIMIT_MAX}`,
+        {
+          field: 'limit',
+        },
+      );
+    }
     const data = await fetchDiscovery('/discovery/search', {
       query,
-      ...(limit ? { limit: Number(limit) } : {}),
+      ...(limitValue === null ? {} : { limit: limitValue }),
     });
     return {
       contents: [{ uri, mimeType: JSON_MIME, text: stringify(data) }],
@@ -194,16 +218,21 @@ export async function readResource(uri, { fetchDiscovery } = {}) {
 
     // An empty result is a legitimate answer to "read this resource", and a
     // client that asked should be told so rather than handed a 404-shaped hole.
-    const empty = !data || !Array.isArray(data.resources) || data.resources.length === 0;
+    // A non-empty result is not the same thing as a match: `/discovery/resources`
+    // filters by url, and that filter also matches prefixes, trailing slashes and
+    // other normalised forms. Returning `resources[0]` unchecked answers a request
+    // for one uri with another seller's price and payee (#690), so the first row
+    // has to be the requested resource or it is not a result at all.
+    const items = data && Array.isArray(data.resources) ? data.resources : [];
+    const first = items[0];
+    const notFound = { error: 'not_found', message: 'No catalog resource matches that url.' };
     return {
       contents: [
         {
           uri,
           mimeType: JSON_MIME,
           text: stringify(
-            empty
-              ? { error: 'not_found', message: 'No catalog resource matches that url.' }
-              : data.resources[0],
+            first && matchesRequestedResource(target, toolName, first) ? first : notFound,
           ),
         },
       ],
@@ -239,6 +268,35 @@ export async function readResource(uri, { fetchDiscovery } = {}) {
     uri,
     knownResources: allResourceUris(),
   });
+}
+
+/**
+ * Whether a catalog row is the resource that was asked for.
+ *
+ * The url comparison is on `toString()` so both sides are normalised the same
+ * way, and it is exact: `https://example.com/a` is not `https://example.com/a/b`,
+ * `https://example.com/a/` or `https://example.com/a?ref=x`. A row whose url is
+ * missing or unparseable cannot be the requested resource, and the value is
+ * never echoed — it is seller-controlled text on its way into an agent's context.
+ *
+ * `toolName` only narrows a request that named a tool; a row that names a
+ * different one is a different resource at the same url.
+ *
+ * @param {URL} target - the validated requested url
+ * @param {string|undefined} toolName - the validated requested tool name, if any
+ * @param {object} item - a row from `/discovery/resources`
+ * @returns {boolean}
+ */
+function matchesRequestedResource(target, toolName, item) {
+  let found;
+  try {
+    found = new URL(String(item?.url)).toString();
+  } catch {
+    return false;
+  }
+  if (found !== target.toString()) return false;
+  if (toolName && typeof item?.toolName === 'string' && item.toolName !== toolName) return false;
+  return true;
 }
 
 /**

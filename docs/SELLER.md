@@ -41,6 +41,46 @@
    - *Error: Trustline missing.* See [Trustlines](#trustlines).
    - *Error: Invalid signature.* Ensure the agent signs with the correct private key.
 
+## Pricing amounts: types, precision, and stroops
+
+`pricing.amount` is the price a buyer must pay for a discovery resource, expressed
+in the smallest unit of the asset — a **stroop** (1/10,000,000 of a unit). The seller
+SDK helpers (`createStellarDiscoveryResource`, and the offline `validate-discovery`
+validator) are the single source of truth for the accepted shapes, and they are strict
+on purpose:
+
+- **Accepted shapes:** a **decimal numeric string** (`'2.5'`, `'+0.5'`, `'0'`) or a
+  **BigInt** stroop count (`25000000n` → `'25000000'`). Anything else is rejected.
+- **JavaScript numbers are rejected.** `pricing: { amount: 0.5 }` fails validation with
+  `pricing.amount must be a decimal numeric string; numbers lose precision before stroop
+  conversion` — a `number` has usually already rounded the value before the SDK ever sees
+  it, so only an exact string or BigInt reaches the stroop conversion.
+- **Precision:** Stellar amounts are 7-decimal fixed point (`STELLAR_DECIMALS = 7`). A
+  fractional part longer than 7 decimals is **truncated, not rounded** — rounding would
+  invent stroops that never existed. `toStroops('1.12345678')` → `'11234567'`, and a
+  sub-stroop fraction such as `'0.00000001'` truncates to `'0'`.
+- **Negatives:** rejected (`pricing.amount must not be negative`). **Zero** (`'0'`) is a
+  valid price — a free discovery listing is coherent.
+
+Valid examples:
+
+```json
+{ "pricing": { "amount": "1.5", "asset": "XLM" } }
+{ "pricing": { "amount": "0", "asset": "XLM" } }
+{ "pricing": { "amount": 15000000n, "asset": "XLM" } }
+```
+
+Invalid examples:
+
+```json
+{ "pricing": { "amount": 1.5, "asset": "XLM" } }
+{ "pricing": { "amount": "-1.5", "asset": "XLM" } }
+{ "pricing": { "amount": "1e7", "asset": "XLM" } }
+```
+
+Before going live, run `npx validate-discovery metadata.json` so a malformed declaration
+fails offline instead of at payment time.
+
 ## Escrow payments (`pact` scheme)
 
 To let buyers pay into escrow instead of paying you directly, offer the `pact` scheme next to

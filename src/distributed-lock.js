@@ -61,12 +61,24 @@ export class LockAcquireTimeoutError extends Error {
  * The tail map holds, per key, a promise that resolves to the NEXT holder's
  * release function once the current holder is done. Chaining happens
  * synchronously at acquire time so two concurrent callers cannot both win.
+ *
+ * The map entry is dropped once its promise resolves and no newer waiter has
+ * taken the key: settlement locks key on a per-payment idempotency key, so
+ * retaining a resolved promise per key would grow with settlement volume.
  */
 export function createMemoryLockManager() {
   const tails = new Map();
 
   return {
     kind: 'memory',
+
+    /**
+     * Number of keys with a live or queued holder. Exposed for diagnostics and
+     * so tests can assert the tail map drains; not part of the lock protocol.
+     */
+    get pendingKeys() {
+      return tails.size;
+    },
 
     /**
      * @returns {Promise<{release: Function}>} resolves once the key is held
@@ -76,6 +88,12 @@ export function createMemoryLockManager() {
       let release;
       const done = new Promise(resolve => {
         release = resolve;
+      });
+      // Clean up the entry when this holder releases. If another waiter chained
+      // on before release, tails now holds that newer promise and must stay:
+      // only delete our own entry.
+      done.then(() => {
+        if (tails.get(key) === done) tails.delete(key);
       });
       tails.set(key, done);
       return prev.then(() => ({ release }));

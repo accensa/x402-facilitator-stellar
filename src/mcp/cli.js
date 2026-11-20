@@ -139,6 +139,17 @@ async function fetchDiscovery(path, params) {
 
 export function assertCanSpend(amountStroops) {
   const amount = BigInt(amountStroops);
+
+  // #688: a negative BigInt passes both upper-bound comparisons, so a negative
+  // price used to be approved — and then subtracted from the session spend.
+  // Zero cannot settle either, so both are refused and the message names both
+  // the amount and the rule that rejected it.
+  if (amount <= 0n) {
+    throw new Error(
+      `Spending refused: Request amount (${amount} stroops) is not positive; a payment amount must be a positive integer in stroops.`,
+    );
+  }
+
   if (amount > MAX_FEE_PER_CALL_STROOPS) {
     throw new Error(
       `Spending refused: Request amount (${amount} stroops) exceeds per-call limit (${MAX_FEE_PER_CALL_STROOPS} stroops).`,
@@ -149,6 +160,52 @@ export function assertCanSpend(amountStroops) {
       `Spending refused: Request amount (${amount} stroops) exceeds remaining session budget (spent ${sessionSpendStroops}/${MAX_SESSION_SPEND_STROOPS} stroops).`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Session spend reservations (#688)
+//
+// The session cap is the agent wallet's money-safety control, so the check and
+// the increment must be one step. Both helpers below are synchronous on
+// purpose: no `await` can interleave between reading the counter and writing
+// it, so two tool calls in flight cannot both observe the same remaining
+// budget. The paid-call path reserves before dispatch and releases on failure,
+// leaving exactly the settled amount committed on success.
+
+/** @private Internal: exported for test/mcp-spend-cap-reservation.test.js. */
+export function getSessionSpendStroops() {
+  return sessionSpendStroops;
+}
+
+/**
+ * Validates and immediately commits a reservation against the session counter.
+ * Throws (leaving the counter untouched) when the amount is not positive, is
+ * over the per-call cap, or would exceed the session cap.
+ *
+ * @private Internal: exported for test/mcp-spend-cap-reservation.test.js.
+ * @param {bigint|string|number} amountStroops
+ * @returns {bigint} the reserved amount
+ */
+export function reserveSessionSpend(amountStroops) {
+  assertCanSpend(amountStroops);
+  const amount = BigInt(amountStroops);
+  sessionSpendStroops += amount;
+  return amount;
+}
+
+/**
+ * Returns a reservation to the session budget. Restores the counter exactly,
+ * so a payment that never settled consumes nothing. Clamped at zero so a
+ * double release can never turn the cap into free extra budget.
+ *
+ * @private Internal: exported for test/mcp-spend-cap-reservation.test.js.
+ * @param {bigint|string|number} amountStroops
+ */
+export function releaseSessionSpend(amountStroops) {
+  const amount = BigInt(amountStroops);
+  if (amount <= 0n) return;
+  sessionSpendStroops -= amount;
+  if (sessionSpendStroops < 0n) sessionSpendStroops = 0n;
 }
 
 // ---------------------------------------------------------------------------
@@ -307,39 +364,50 @@ server.tool(
       }
     }
 
-    // 4. Create Payment Payload & Sign
-    let paymentPayload;
+    // 4. Reserve the amount against the session budget before any await: the
+    // check and the increment are one synchronous step, so a second call in
+    // flight sees the reduced budget instead of the same one. Released below
+    // if the payment is never settled (#688).
+    reserveSessionSpend(amount);
+
     try {
-      paymentPayload = await x402HttpClient.createPaymentPayload(paymentRequired);
+      // 5. Create Payment Payload & Sign
+      let paymentPayload;
+      try {
+        paymentPayload = await x402HttpClient.createPaymentPayload(paymentRequired);
+      } catch (err) {
+        throw new Error(`Failed to create payment payload: ${err.message}`);
+      }
+
+      // 6. Send Paid Request
+      const paidHeaders = {
+        ...options.headers,
+        ...x402HttpClient.encodePaymentSignatureHeader(paymentPayload),
+      };
+
+      const paidRes = await fetchWithTimeout(url, { ...options, headers: paidHeaders });
+      const responseText = await paidRes.text();
+
+      const settle = x402HttpClient.getPaymentSettleResponse(name => paidRes.headers.get(name));
+
+      if (paidRes.status !== 200) {
+        throw new Error(
+          `Paid request failed (${paidRes.status}): ${settle?.errorReason || 'unknown'}. ${responseText.slice(0, 200)}`,
+        );
+      }
+
+      // 7. The reservation is now committed spend — no second increment.
+      return {
+        success: true,
+        settlement: settle,
+        response: responseText,
+      };
     } catch (err) {
-      throw new Error(`Failed to create payment payload: ${err.message}`);
+      // Nothing settled, so the reservation goes back. A failed paid request
+      // must not consume session budget.
+      releaseSessionSpend(amount);
+      throw err;
     }
-
-    // 5. Send Paid Request
-    const paidHeaders = {
-      ...options.headers,
-      ...x402HttpClient.encodePaymentSignatureHeader(paymentPayload),
-    };
-
-    const paidRes = await fetchWithTimeout(url, { ...options, headers: paidHeaders });
-    const responseText = await paidRes.text();
-
-    const settle = x402HttpClient.getPaymentSettleResponse(name => paidRes.headers.get(name));
-
-    if (paidRes.status !== 200) {
-      throw new Error(
-        `Paid request failed (${paidRes.status}): ${settle?.errorReason || 'unknown'}. ${responseText.slice(0, 200)}`,
-      );
-    }
-
-    // 6. Record Spend
-    sessionSpendStroops += amount;
-
-    return {
-      success: true,
-      settlement: settle,
-      response: responseText,
-    };
   },
 );
 

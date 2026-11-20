@@ -193,12 +193,13 @@ export class CrdtRateLimitStore {
         );
         if (rows.length > 0) {
           const remoteCount = Number(rows[0].count);
-          const remoteResetAt = rows[0].reset_at;
-          // Only merge with remote if it's in the same or newer window.
+          // pg returns BIGINT columns as strings to avoid precision loss, so
+          // this must be coerced before comparing with a numeric timestamp.
+          const remoteResetAt = Number(rows[0].reset_at);
+          // Only use remote if it's in the current or a newer window. A local
+          // counter cannot be live here: we only reach this branch when it is
+          // missing or already expired.
           if (remoteResetAt >= now) {
-            if (local && local.resetAt > now) {
-              return { count: Math.max(remoteCount, local.count), resetAt: remoteResetAt };
-            }
             return { count: remoteCount, resetAt: remoteResetAt };
           }
         }
@@ -218,7 +219,10 @@ export class CrdtRateLimitStore {
       );
       if (rows.length > 0) {
         const remoteCount = Number(rows[0].count);
-        const remoteResetAt = rows[0].reset_at;
+        // Same BIGINT-as-string coercion as the branch above: without it the
+        // strict equality against the numeric local window is always false
+        // and cross-region increments are never merged.
+        const remoteResetAt = Number(rows[0].reset_at);
         // Only merge with remote if it's in the same window (same reset_at).
         if (remoteResetAt === local.resetAt) {
           return { count: Math.max(local.count, remoteCount), resetAt: local.resetAt };

@@ -21,6 +21,7 @@ jobs:
   analysis:
     name: Scorecard analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # `publish_results: true` only works when run from the default branch. conditional can be removed if disabled.
     if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
     permissions:
@@ -73,6 +74,6 @@ jobs:
       # Upload the results to GitHub's code scanning dashboard (optional).
       # Commenting out will disable upload of results to your repo's Code Scanning dashboard
       - name: 'Upload to code-scanning'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@9418214df1f2c4b8128c770156c409013b07d6b9 # v3.39.3
         with:
           sarif_file: results.sarif

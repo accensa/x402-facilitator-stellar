@@ -25,7 +25,24 @@ async function loadRemoteKeys(url, timeoutMs = keySourceTimeoutMs()) {
     throw err;
   }
   if (!response.ok) throw new Error(`key source returned HTTP ${response.status}`);
-  const body = await response.json();
+  // A proxy or captive portal can answer 200 with an HTML error page. Calling
+  // `response.json()` blindly then threw bare `Unexpected token '<'`, naming
+  // neither the source nor the status — useless in an operator's log (#659).
+  // Check the media type first and wrap the parse, naming the URL and content
+  // type; the parse message is not reused because it can quote the body.
+  const contentType = response.headers?.get?.('content-type') ?? '';
+  const mediaType = contentType.split(';')[0].trim().toLowerCase();
+  if (mediaType !== 'application/json' && !mediaType.endsWith('+json')) {
+    throw new Error(
+      `key source ${url} returned non-JSON content type "${contentType || 'none'}" (expected application/json)`,
+    );
+  }
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error(`key source ${url} returned invalid JSON (content type "${contentType}")`);
+  }
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new Error('key source payload invalid: missing "keys" field');
   }

@@ -38,6 +38,7 @@ describe('src/cors.js', () => {
       header: (k, v) => {
         headers[k.toLowerCase()] = v;
       },
+      getHeader: k => headers[String(k).toLowerCase()],
     };
     await hook({ headers: { origin: 'https://example.com' } }, reply);
     assert.equal(headers['access-control-allow-origin'], '*');
@@ -52,6 +53,7 @@ describe('src/cors.js', () => {
       header: (k, v) => {
         headers[k.toLowerCase()] = v;
       },
+      getHeader: k => headers[String(k).toLowerCase()],
     };
     await hook({ headers: { origin: 'https://untrusted.com' } }, reply);
     assert.equal(headers['access-control-allow-origin'], undefined);
@@ -66,6 +68,7 @@ describe('src/cors.js', () => {
       header: (k, v) => {
         headers[k.toLowerCase()] = v;
       },
+      getHeader: k => headers[String(k).toLowerCase()],
       code: c => {
         statusCode = c;
         return reply;

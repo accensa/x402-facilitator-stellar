@@ -32,8 +32,18 @@ export function createDatabaseCredentialManager({
   /** @type {Set<(creds: object) => void>} */
   const listeners = new Set();
 
+  // A subscriber is a best-effort observer (pool rotation, logging, metrics):
+  // one that throws must not fail a fetch that already succeeded, nor stop the
+  // remaining subscribers from being notified (#712). The warning carries the
+  // listener's error message only — never the credentials.
   const emit = creds => {
-    for (const listener of listeners) listener(creds);
+    for (const listener of listeners) {
+      try {
+        listener(creds);
+      } catch (err) {
+        warn(`[Vault] credential subscriber failed (${err?.message ?? err}); continuing`);
+      }
+    }
   };
 
   /** How long before expiry a refresh is triggered (0 = never for static roles). */

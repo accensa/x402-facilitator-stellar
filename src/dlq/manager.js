@@ -12,6 +12,8 @@
  * works, which keeps unit tests free of Postgres.
  */
 
+const ALLOWED_STATUSES = new Set(['pending', 'exhausted', 'resolved', 'discarded']);
+
 export class DeadLetterManager {
   /**
    * @param {object} store - a DeadLetterStore (or test double)
@@ -84,6 +86,11 @@ export class DeadLetterManager {
     const conditions = [];
     const params = [];
     if (status) {
+      if (!ALLOWED_STATUSES.has(status)) {
+        throw new Error(
+          `Invalid DLQ purge status: "${status}". Allowed statuses are: pending, exhausted, resolved, discarded`,
+        );
+      }
       conditions.push(`status = $${params.length + 1}`);
       params.push(status);
     }
