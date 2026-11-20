@@ -192,7 +192,6 @@ paths:
         never means "payment invalid".
       security:
         - ApiKeyAuth: []
-        - {}
       requestBody:
         required: true
         content:
@@ -264,7 +263,6 @@ paths:
         never a settlement outcome.
       security:
         - ApiKeyAuth: []
-        - {}
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -339,7 +337,6 @@ paths:
         `/settle`. 404 when no pact contract is configured for the network.
       security:
         - ApiKeyAuth: []
-        - {}
       requestBody:
         required: true
         content:
@@ -375,7 +372,6 @@ paths:
         reads back as 404, indistinguishable from "never existed".
       security:
         - ApiKeyAuth: []
-        - {}
       parameters:
         - name: idempotencyKey
           in: path
@@ -421,7 +417,6 @@ paths:
         status read itself.
       security:
         - ApiKeyAuth: []
-        - {}
       parameters:
         - name: idempotencyKey
           in: path
@@ -1083,15 +1078,19 @@ components:
         Two forms are accepted: `Authorization: Bearer <secret>` or
         `Authorization: <secret>` (no scheme prefix). Verified with a
         constant-time comparison against the SHA-256 digests resolved at
-        boot from `FACILITATOR_API_KEYS`. If no keys are configured at all,
-        the facilitator runs in **open mode** and every route except
-        `/usage` is unauthenticated — correct for a free testnet instance,
-        strongly discouraged on pubnet. See `docs/AUTHENTICATION.md`.
+        boot from `FACILITATOR_API_KEYS`. Every operation declares its own
+        `security` requirement: `- ApiKeyAuth: []` means the caller must send
+        a key when keys are configured, and `security: []` means the route is
+        open in every mode.
 
-        `/usage` and the `/admin/dlq` routes require a key even in open mode
-        (`open_mode_usage_forbidden` otherwise — the strict check).
-        `/healthz`, `/readyz`, `/metrics`, `/supported`, and both
-        `GET /discovery/*` routes are always open regardless of mode.
+        If no keys are configured at all, the facilitator runs in **open
+        mode**: the check on `ApiKeyAuth` operations is a no-op and anonymous
+        calls are accepted. `/usage` and the `/admin/dlq` routes use the
+        strict check instead and still refuse in open mode
+        (`open_mode_usage_forbidden`). `/healthz`, `/readyz`, `/metrics`,
+        `/supported`, and the `GET /discovery/*` routes are always open
+        regardless of mode. Open mode is correct for a free testnet instance
+        and strongly discouraged on pubnet. See `docs/AUTHENTICATION.md`.
 
   headers:
     ExtensionResponses:
