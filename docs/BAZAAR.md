@@ -208,9 +208,11 @@ key — the **envelope**:
 `code`, `reason` and `detail_omitted` are present only when the outcome has
 something to say. Read the envelope in this order:
 
-1. **`status`** — always present, and always one of the four values in
-   [Outcomes](#outcomes). Branch on this first; it is the only field every
-   envelope is guaranteed to carry.
+1. **`status`** — always present. Tiers 1 and 2 carry the outcome's own
+   `status` unchanged; tier 3 carries one of the four values in
+   `KNOWN_STATUSES` (`not attempted`, `landed`, `partially landed`,
+   `rejected`) — see [Outcomes](#outcomes). Branch on this first; it is the
+   only field every envelope is guaranteed to carry.
 2. **`code`** — the stable, machine-readable outcome code (see
    [Every code a seller can receive](#every-code-a-seller-can-receive)). Read
    it when the client needs to react programmatically rather than show a
@@ -386,16 +388,21 @@ fits, so a client never receives a smaller envelope than the cap allows:
 | 2 | Tier 1 does not fit. | The same envelope with `reason` removed and `"detail_omitted": true` added. Every other field is unchanged. |
 | 3 | Tier 2 still does not fit (a non-`reason` field was enormous). | The minimal envelope: `{ "status": ..., "code": "extension_response_omitted", "detail_omitted": true }`. |
 
-The `status` is preserved in every tier. It is always one of `not attempted`,
-`landed`, `partially landed` or `rejected`: the encoder normalises a status it
-does not recognise to `not attempted` rather than emitting a value the contract
-does not define, so a client can switch on it without a fallback. When tier 2
-applies the `code` is the outcome's own code; when tier 3 applies it is
-`extension_response_omitted`. In both, `detail_omitted: true` is the field that
-tells the client to stop looking for detail that is not there. A client
-learning `rejected` without learning why is a far better outcome than a client
-learning nothing. Every degradation is logged server-side, so an operator can
-see that detail was shed.
+The `status` survives every tier, but it is **not** normalised on every path.
+When tier 1 or tier 2 applies, the envelope carries the outcome's own `status`
+unchanged — whatever the producer set, including a value outside the contract.
+Only tier 3 rewrites it: the encoder keeps the status when it is one of the
+four known values — `not attempted`, `landed`, `partially landed` or
+`rejected`, the entries of `KNOWN_STATUSES` — and replaces an unrecognised
+status with `not attempted`, rather than emitting a value the contract does not
+define. So those four are guaranteed only for a tier-3 envelope; a client that
+branches on `status` should handle them all and keep a fallback for anything
+else. When tier 2 applies the `code` is the outcome's own code; when tier 3
+applies it is `extension_response_omitted`. In both, `detail_omitted: true` is
+the field that tells the client to stop looking for detail that is not there. A
+client learning `rejected` without learning why is a far better outcome than a
+client learning nothing. Every degradation is logged server-side, so an
+operator can see that detail was shed.
 
 ## Search Quality & Evaluation History
 
