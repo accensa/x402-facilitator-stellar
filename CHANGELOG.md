@@ -129,6 +129,17 @@ pinned.
 
 ### Changed
 
+- **Behaviour change:** numeric environment variables now follow one policy
+  (#674). A value that is not plain decimal digits — `60O`, `60s`, `1e2`,
+  `12.5`, `-1`, a whitespace-only value — stops the boot with an error naming
+  the variable, the raw value and the accepted range; an absent or blank
+  variable takes the documented default. Previously `DISCOVERY_CACHE_MAX_AGE_SECONDS`
+  and `DISCOVERY_CACHE_STALE_SECONDS` silently fell back to `60`/`300` on such
+  a value, so a typo produced a cache header indistinguishable from a
+  deliberate setting, while a typo in `PORT` or the fee ceilings already failed
+  the boot. Variables read by this policy: `PORT`, `MAX_TX_FEE_STROOPS`,
+  `MAX_TX_FEE_STROOPS_PUBNET`, `PACT_MAX_TX_FEE_STROOPS`,
+  `DISCOVERY_CACHE_MAX_AGE_SECONDS`, `DISCOVERY_CACHE_STALE_SECONDS`.
 - The container runs with production semantics (#495): the image sets
   `NODE_ENV=production` and the facilitator service in `docker-compose.yml`
   pins it, so the production-only HSTS header is sent and a stray `.env` in the
