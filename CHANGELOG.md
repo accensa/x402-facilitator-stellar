@@ -154,6 +154,8 @@ pinned.
 
 ### Fixed
 
+- `REQUEST_TIMEOUT_MS` now bounds the catalog reads too (#671): `GET /discovery/resources` and `GET /discovery/search` race the store against the same per-request budget `/verify` and `/settle` already used, answering `{ error: 'internal_error', reason: 'internal_error' }` instead of holding the socket when the store hangs. `/verify` and `/settle` keep their existing `request_timeout` / `submitted_outcome_unknown` mappings.
+- `buildFacilitator()` returns `stop()` (#672), which stops every key manager it started, and graceful shutdown calls it. Previously the key-rotation intervals survived `SIGTERM` because nothing exposed or called `KeyManager.stop()`.
 - In `docs/AUDIT.md`, removed accidental duplicate `## Proposed Scope` heading, restoring valid markdown hierarchy and unambiguous anchor targets (#775).
 - In `eval/runner.js`, corrected nDCG@K calculation by truncating sorted ideal relevance scores to top-K (`actualScores.length`) so perfect top-K rankings against larger judgment sets yield nDCG = 1.0 without artificial IDCG denominator inflation (#774).
 - A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`

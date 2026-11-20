@@ -157,7 +157,35 @@ export function buildFacilitator(config) {
     if (schemes[network].pactScheme) facilitator.register(network, schemes[network].pactScheme);
   }
 
-  return { facilitator, signers, feeBumpSigners, keyManagers, feeEstimators, schemes, assetCaches };
+  return {
+    facilitator,
+    signers,
+    feeBumpSigners,
+    keyManagers,
+    feeEstimators,
+    schemes,
+    assetCaches,
+    /**
+     * Stops every KeyManager this build started (#672).
+     *
+     * Each manager with a key source and a poll interval installed a timer in
+     * `start()`; without this, shutdown closed the app and the tracer while the
+     * rotation intervals kept running. KeyManager.stop() is itself a no-op for a
+     * manager that never started and for a second call, so this is safe to call
+     * twice and covers every network, not just the first. A manager that fails
+     * to stop must not prevent the others from stopping: shutdown still has to
+     * finish.
+     */
+    stop() {
+      for (const keyManager of Object.values(keyManagers)) {
+        try {
+          keyManager?.stop?.();
+        } catch (err) {
+          console.warn(`[Facilitator] failed to stop key manager: ${err.message}`);
+        }
+      }
+    },
+  };
 }
 
 /**
