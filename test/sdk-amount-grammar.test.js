@@ -104,6 +104,9 @@ const INVALID_CASES = [
   ['-0', negative('-0')],
   ['-1.0000000', negative('-1.0000000')],
 
+  [-1n, negative('-1')],
+  [-123456789012345678901234567890n, negative('-123456789012345678901234567890')],
+
   // Not the accepted decimal grammar.
   ['1e7', notDecimal('1e7')],
   ['1E7', notDecimal('1E7')],

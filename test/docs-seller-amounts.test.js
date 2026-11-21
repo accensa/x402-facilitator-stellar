@@ -36,6 +36,9 @@ test('the documented valid and invalid amount examples match the validator', () 
   assert.deepEqual(validateAmount('1.5'), []);
   assert.deepEqual(validateAmount('0'), []);
   assert.deepEqual(validateAmount(25000000n), []);
+  assert.deepEqual(validateAmount(-25000000n), [
+    'pricing.amount must not be negative (got "-25000000")',
+  ]);
   assert.deepEqual(validateAmount(1.5), [
     'pricing.amount must be a decimal numeric string; numbers lose precision before stroop conversion',
   ]);

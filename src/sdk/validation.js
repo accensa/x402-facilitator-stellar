@@ -29,7 +29,12 @@ export function validateAmount(amount) {
   if (amount === undefined || amount === null || amount === '') {
     return ['pricing.amount is required'];
   }
-  if (typeof amount === 'bigint') return [];
+  if (typeof amount === 'bigint') {
+    if (amount < 0n) {
+      return [`pricing.amount must not be negative (got "${amount.toString()}")`];
+    }
+    return [];
+  }
   if (typeof amount !== 'string') {
     return [
       'pricing.amount must be a decimal numeric string; numbers lose precision before stroop conversion',
