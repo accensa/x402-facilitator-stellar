@@ -256,14 +256,18 @@ test('MCP Tool Audit Logging', async t => {
     const logger = createToolAuditLogger(auditFn);
 
     await logger('test_tool', { input: 'test' }, async params => {
-      await new Promise(r => setTimeout(r, 10));
+      // The logger measures with Date.now(), which truncates to whole
+      // milliseconds, so a handler that sleeps for N ms can report N - 1. The
+      // sleep therefore carries headroom and the assertion is made against the
+      // lower bound that headroom guarantees, instead of the exact sleep.
+      await new Promise(r => setTimeout(r, 50));
       return { output: params.input };
     });
 
     assert.equal(logs.length, 1);
     assert.equal(logs[0].event, 'mcp_tool_execution');
     assert.equal(logs[0].toolName, 'test_tool');
-    assert.ok(logs[0].durationMs >= 10);
+    assert.ok(logs[0].durationMs >= 40);
     assert.equal(logs[0].success, true);
     assert.equal(logs[0].parameters.input, 'test');
   });

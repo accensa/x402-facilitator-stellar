@@ -228,7 +228,9 @@ describe('multi-region: failover detection timing', () => {
       ],
     });
 
-    // Degrade the checker.
+    // Degrade the checker. Real deployments learn the remote is healthy from
+    // _check(); here we set it directly (strict #759 semantics).
+    checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     checker.reportLocalHealth(false);
     checker.reportLocalHealth(false);
     assert.equal(checker.localStatus, 'degraded');
@@ -302,13 +304,16 @@ describe('multi-region: no split-brain', () => {
     const s1 = checker.getState();
     assert.equal(s1.preferredRegion, 'us-east-1');
 
-    // us-east-1 degraded — eu-west-1 is preferred.
+    // us-east-1 degraded — eu-west-1 affirmatively healthy → preferred.
+    checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     checker.reportLocalHealth(false);
     const s2 = checker.getState();
     assert.equal(s2.preferredRegion, 'eu-west-1');
 
-    // eu-west-1 also unhealthy — ap-south-1 is preferred.
+    // eu-west-1 affirmatively unhealthy, ap-south-1 affirmatively healthy —
+    // only one region is preferred at a time: ap-south-1.
     checker.remoteStatus.set('eu-west-1', { healthy: false, lastCheck: Date.now() });
+    checker.remoteStatus.set('ap-south-1', { healthy: true, lastCheck: Date.now() });
     const s3 = checker.getState();
     assert.equal(s3.preferredRegion, 'ap-south-1');
   });
@@ -324,7 +329,8 @@ describe('multi-region: no split-brain', () => {
       ],
     });
 
-    // Degrade — failover to eu-west-1.
+    // Degrade — failover to eu-west-1 (affirmatively healthy).
+    checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     checker.reportLocalHealth(false);
     assert.equal(checker.getState().preferredRegion, 'eu-west-1');
 

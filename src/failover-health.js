@@ -223,7 +223,9 @@ export class FailoverHealthChecker {
       .filter(r => r.region !== this.region)
       .filter(r => {
         const status = this.remoteStatus.get(r.region);
-        return status?.healthy !== false; // unknown = potentially healthy
+        // Strict (#759): only an affirmatively healthy remote is a failover
+        // target — an unverified remote (status === undefined) is not.
+        return status?.healthy === true;
       })
       .sort((a, b) => a.priority - b.priority);
 
@@ -239,7 +241,7 @@ export class FailoverHealthChecker {
  */
 async function defaultCheckRemote(url) {
   try {
-    const res = await fetch(`${url}/healthz`, {
+    const res = await fetch(`${url.replace(/\/+$/, '')}/healthz`, {
       signal: AbortSignal.timeout(3_000),
     });
     return res.ok;

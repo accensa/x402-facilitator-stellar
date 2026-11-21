@@ -129,6 +129,17 @@ pinned.
 
 ### Changed
 
+- **Behaviour change:** numeric environment variables now follow one policy
+  (#674). A value that is not plain decimal digits — `60O`, `60s`, `1e2`,
+  `12.5`, `-1`, a whitespace-only value — stops the boot with an error naming
+  the variable, the raw value and the accepted range; an absent or blank
+  variable takes the documented default. Previously `DISCOVERY_CACHE_MAX_AGE_SECONDS`
+  and `DISCOVERY_CACHE_STALE_SECONDS` silently fell back to `60`/`300` on such
+  a value, so a typo produced a cache header indistinguishable from a
+  deliberate setting, while a typo in `PORT` or the fee ceilings already failed
+  the boot. Variables read by this policy: `PORT`, `MAX_TX_FEE_STROOPS`,
+  `MAX_TX_FEE_STROOPS_PUBNET`, `PACT_MAX_TX_FEE_STROOPS`,
+  `DISCOVERY_CACHE_MAX_AGE_SECONDS`, `DISCOVERY_CACHE_STALE_SECONDS`.
 - The container runs with production semantics (#495): the image sets
   `NODE_ENV=production` and the facilitator service in `docker-compose.yml`
   pins it, so the production-only HSTS header is sent and a stray `.env` in the
@@ -151,11 +162,27 @@ pinned.
   claim in `docs/PRIVACY.md` true for shared stores (Redis,
   `RATE_LIMIT_STORE=postgres`, the CRDT store) that previously persisted the raw
   address. `IP_HASH_SECRET` overrides the derived HMAC key (#204).
+- **Behaviour change:** `KEY_MANAGER_URL` and `KEY_MANAGER_URL_PUBNET` are
+  validated at boot (#675). The URL must be absolute http(s), must not embed
+  userinfo, and must be https unless `NODE_ENV` is `development` or `test`; the
+  optional `KEY_MANAGER_ALLOWED_HOSTS` allowlist restricts which hosts it may
+  name (dot-boundary matching, so `example.com` never accepts
+  `evil-example.com`). A deployment whose key-source URL fails these rules will
+  not start until it is corrected; unset behaviour is unchanged. Errors name the
+  variable and host, never the full URL.
+- **Behaviour change:** the payment body schema now bounds the fields the
+  transport owns (#676): `paymentRequirements.scheme` is at most 32 characters,
+  `network` at most 64, `paymentPayload` at most 16 properties and
+  `paymentRequirements` at most 32, and unknown top-level keys are rejected
+  with the existing 400 shape. Unknown keys inside `paymentRequirements` and
+  inside `paymentPayload.payload` are still accepted — those are the scheme's
+  contract. A client sending an unknown top-level field will now see a 400.
 
 ### Fixed
 
 - `REQUEST_TIMEOUT_MS` now bounds the catalog reads too (#671): `GET /discovery/resources` and `GET /discovery/search` race the store against the same per-request budget `/verify` and `/settle` already used, answering `{ error: 'internal_error', reason: 'internal_error' }` instead of holding the socket when the store hangs. `/verify` and `/settle` keep their existing `request_timeout` / `submitted_outcome_unknown` mappings.
 - `buildFacilitator()` returns `stop()` (#672), which stops every key manager it started, and graceful shutdown calls it. Previously the key-rotation intervals survived `SIGTERM` because nothing exposed or called `KeyManager.stop()`.
+- `validateAmount` rejects negative BigInt stroop counts (#756): `toStroops(-1n)` and a discovery declaration with a negative BigInt `pricing.amount` now raise the same `pricing.amount must not be negative` error as negative decimal strings, instead of passing a negative stroop count through to callers.
 - In `docs/AUDIT.md`, removed accidental duplicate `## Proposed Scope` heading, restoring valid markdown hierarchy and unambiguous anchor targets (#775).
 - In `eval/runner.js`, corrected nDCG@K calculation by truncating sorted ideal relevance scores to top-K (`actualScores.length`) so perfect top-K rankings against larger judgment sets yield nDCG = 1.0 without artificial IDCG denominator inflation (#774).
 - A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`

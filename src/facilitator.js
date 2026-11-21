@@ -13,6 +13,7 @@ import { KeyManager } from './key-manager.js';
 import { createFeeEstimator } from './horizon-client.js';
 import { createMultiSignerEngine } from './multi-signer.js';
 import { createAssetDecimalsCache } from './asset-cache.js';
+import { StrKey } from '@stellar/stellar-sdk';
 
 async function loadRemoteKeys(url, timeoutMs = keySourceTimeoutMs()) {
   let response;
@@ -51,6 +52,26 @@ async function loadRemoteKeys(url, timeoutMs = keySourceTimeoutMs()) {
   }
   if (body.keys.length === 0) {
     throw new Error('key source payload invalid: "keys" must be non-empty');
+  }
+  for (let index = 0; index < body.keys.length; index++) {
+    const entry = body.keys[index];
+    if (typeof entry === 'string') {
+      if (!StrKey.isValidEd25519SecretSeed(entry)) {
+        throw new Error(`key source payload invalid: keys[${index}] has an invalid secret seed`);
+      }
+      continue;
+    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(
+        `key source payload invalid: keys[${index}] must be a string or an object with "secret"`,
+      );
+    }
+    if (!Object.prototype.hasOwnProperty.call(entry, 'secret')) {
+      throw new Error(`key source payload invalid: keys[${index}].secret is required`);
+    }
+    if (typeof entry.secret !== 'string' || !StrKey.isValidEd25519SecretSeed(entry.secret)) {
+      throw new Error(`key source payload invalid: keys[${index}].secret is invalid`);
+    }
   }
   return body.keys;
 }

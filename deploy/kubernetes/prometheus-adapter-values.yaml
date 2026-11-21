@@ -11,10 +11,14 @@ prometheus:
 rules:
   default: false
   external:
-    - seriesQuery: 'active_verifications'
+    # Scope discovery to this deployment's own series. Without the service and
+    # namespace matchers, any workload anywhere in the cluster that exposes a
+    # series named active_verifications would be picked up and the HPA would
+    # scale on the cluster-wide sum.
+    - seriesQuery: 'active_verifications{namespace!="",service="x402-facilitator"}'
       resources:
         namespaced: false
       name:
         matches: '^active_verifications$'
         as: 'active_verifications'
-      metricsQuery: 'sum(active_verifications)'
+      metricsQuery: 'sum(<<.Series>>{namespace!="",service="x402-facilitator",<<.LabelMatchers>>}) by (namespace)'

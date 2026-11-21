@@ -25,12 +25,46 @@ import fs from 'node:fs';
 const SECRET_SHAPED =
   /secret|signature|token|password|authorization|payload|paymentrequirements|paymentpayload|xdr/i;
 
-function redact(fields) {
-  const out = {};
-  for (const [k, v] of Object.entries(fields)) {
-    out[k] = SECRET_SHAPED.test(k) ? '[redacted]' : v;
+/**
+ * Recursively redacts secret-shaped field names from a value tree.
+ *
+ * Walks nested objects and arrays: any key whose name matches SECRET_SHAPED —
+ * at the top level or at any depth — is replaced with '[redacted]'. Values are
+ * copied, never mutated in place; nulls and primitives pass through unchanged.
+ * Cycles (or any self-reference) become '[circular]' so the redacted copy
+ * stays stringifiable. Keys are defined with Object.defineProperty rather than
+ * assigned on a fresh object, so a '__proto__' key in the input cannot change
+ * the copy's prototype.
+ *
+ * @param {unknown} value
+ * @param {Set<object>} [inProgress] - objects on the current walk path
+ */
+function redactDeep(value, inProgress = new Set()) {
+  if (value === null || typeof value !== 'object') return value;
+  if (inProgress.has(value)) return '[circular]';
+  inProgress.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map(item => redactDeep(item, inProgress));
+    }
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      const redacted = SECRET_SHAPED.test(key) ? '[redacted]' : redactDeep(val, inProgress);
+      Object.defineProperty(out, key, {
+        value: redacted,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    return out;
+  } finally {
+    inProgress.delete(value);
   }
-  return out;
+}
+
+function redact(fields) {
+  return redactDeep(fields);
 }
 
 /**
