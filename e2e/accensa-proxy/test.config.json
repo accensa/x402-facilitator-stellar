@@ -1,7 +1,7 @@
 {
   "name": "accensa/stellar",
   "type": "facilitator",
-  "language": "typescript",
+  "language": "javascript",
   "protocolFamilies": ["stellar"],
   "x402Versions": [2],
   "schemes": ["exact"],
