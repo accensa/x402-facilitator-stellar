@@ -676,6 +676,8 @@ paths:
                     const: invalid_request
                   reason:
                     type: string
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/InternalError'
 
