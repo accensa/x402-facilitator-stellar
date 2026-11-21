@@ -205,8 +205,27 @@ key — the **envelope**:
 }
 ```
 
-`code` and `reason` are present only for the statuses that carry them. Decode
-it from a shell with a one-liner:
+`code`, `reason` and `detail_omitted` are present only when the outcome has
+something to say. Read the envelope in this order:
+
+1. **`status`** — always present. Tiers 1 and 2 carry the outcome's own
+   `status` unchanged; tier 3 carries one of the four values in
+   `KNOWN_STATUSES` (`not attempted`, `landed`, `partially landed`,
+   `rejected`) — see [Outcomes](#outcomes). Branch on this first; it is the
+   only field every envelope is guaranteed to carry.
+2. **`code`** — the stable, machine-readable outcome code (see
+   [Every code a seller can receive](#every-code-a-seller-can-receive)). Read
+   it when the client needs to react programmatically rather than show a
+   message.
+3. **`detail_omitted`** — `true` when the header had to shed detail to fit its
+   byte cap ([Header size](#header-size)). When it is absent or `false`, the
+   envelope carries everything the catalog had to say.
+
+Do not infer the outcome from the presence or wording of `reason`: it is
+human-readable prose, and it is the first field a size-constrained envelope
+drops.
+
+Decode it from a shell with a one-liner:
 
 ```bash
 curl -si <paid-request> | grep -i extension-responses | cut -d' ' -f2 | base64 -d | jq
@@ -350,18 +369,40 @@ header over the cap does not arrive truncated — the proxy answers **502** or
 drops the connection, on the payment path, for a payment that has already
 settled. The buyer's money moves and the response explaining it never arrives.
 
-So the header is capped at **4096 bytes** and degrades in tiers rather than
-failing:
+So the header is capped at **4096 bytes** — the value of
+`MAX_EXTENSION_RESPONSES_HEADER_BYTES` in `src/catalog/extension-responses.js`,
+which is the single source of truth for this number (and the value
+`test/docs-bazaar-extension-header.test.js` holds this section to). The cap
+counts the base64 text that actually goes on the wire, not the JSON it encodes,
+because the base64 expansion is what a proxy measures. It is deliberately
+conservative: it leaves room for the rest of the response's headers inside
+nginx's 8 KiB total budget, and it is small enough that the tier-3 envelope
+always fits regardless of how long the inputs were.
 
-| Tier | When | What the client receives |
+The encoder applies these tiers **in order** and stops at the first one that
+fits, so a client never receives a smaller envelope than the cap allows:
+
+| Tier | When it applies | What the client receives |
 |---|---|---|
-| 1 | The envelope fits. | The envelope exactly as described above — byte-for-byte what an unbounded encoder would have produced. |
-| 2 | It does not fit. | The same envelope with `reason` removed and `"detail_omitted": true` added. |
-| 3 | It still does not fit (a non-`reason` field was enormous). | `{ "status": ..., "code": "extension_response_omitted", "detail_omitted": true }`. |
+| 1 | The full envelope fits. | The envelope exactly as described above — byte-for-byte what an unbounded encoder would have produced. |
+| 2 | Tier 1 does not fit. | The same envelope with `reason` removed and `"detail_omitted": true` added. Every other field is unchanged. |
+| 3 | Tier 2 still does not fit (a non-`reason` field was enormous). | The minimal envelope: `{ "status": ..., "code": "extension_response_omitted", "detail_omitted": true }`. |
 
-The `status` is preserved in every tier: a client learning `rejected` without
-learning why is a far better outcome than a client learning nothing. Every
-degradation is logged server-side, so an operator can see that detail was shed.
+The `status` survives every tier, but it is **not** normalised on every path.
+When tier 1 or tier 2 applies, the envelope carries the outcome's own `status`
+unchanged — whatever the producer set, including a value outside the contract.
+Only tier 3 rewrites it: the encoder keeps the status when it is one of the
+four known values — `not attempted`, `landed`, `partially landed` or
+`rejected`, the entries of `KNOWN_STATUSES` — and replaces an unrecognised
+status with `not attempted`, rather than emitting a value the contract does not
+define. So those four are guaranteed only for a tier-3 envelope; a client that
+branches on `status` should handle them all and keep a fallback for anything
+else. When tier 2 applies the `code` is the outcome's own code; when tier 3
+applies it is `extension_response_omitted`. In both, `detail_omitted: true` is
+the field that tells the client to stop looking for detail that is not there. A
+client learning `rejected` without learning why is a far better outcome than a
+client learning nothing. Every degradation is logged server-side, so an
+operator can see that detail was shed.
 
 ## Search Quality & Evaluation History
 

@@ -109,6 +109,51 @@ function matchesIfModifiedSince(header, lastModifiedMs) {
 }
 
 /**
+ * Coerces a store's `getLastModified()` value into epoch milliseconds (#680).
+ *
+ * `getLastModified()` belongs to the store, and a store is free to return the
+ * timestamp in whatever shape its backing store persists. The shapes seen in
+ * practice are a `Date` (what the in-memory store returns), epoch
+ * milliseconds, epoch seconds (what many database drivers hand back), and an
+ * ISO-8601 string. Coercing here rather than trusting one shape keeps two
+ * wrong-but-plausible headers off the wire:
+ *
+ *   - a copy of the value through `new Date(...)` would turn a non-date into
+ *     the literal `Invalid Date`, which is not a valid HTTP-date;
+ *   - epoch seconds read as milliseconds date the catalog to 1970, so every
+ *     later `If-Modified-Since` looks newer and no client can ever revalidate.
+ *
+ * A finite number below `1e12` is treated as seconds: epoch seconds are ~1e9
+ * and epoch milliseconds ~1e12, so the boundary is unambiguous for any date
+ * this service can serve. Anything that is not a finite instant returns `null`,
+ * which the caller reads as "no Last-Modified validator" rather than inventing
+ * one.
+ *
+ * @param {unknown} value - whatever `getLastModified()` returned
+ * @returns {number|null} epoch milliseconds, or `null` when undatable
+ */
+function toLastModified(value) {
+  if (value === null || value === undefined) return null;
+
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    return value < 1e12 ? value * 1000 : value;
+  }
+
+  if (typeof value === 'string') {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  return null;
+}
+
+/**
  * Applies discovery caching headers (Cache-Control, ETag, Last-Modified)
  * and determines whether the request's preconditions are satisfied, following
  * the RFC 9110 §13.2.2 precedence rules (#687):
@@ -143,12 +188,10 @@ export function applyDiscoveryCache(req, reply, catalog, discoveryCacheConfig, p
 
   let lastModifiedMs = null;
   if (typeof catalog.getLastModified === 'function') {
-    const lm = catalog.getLastModified();
-    if (lm) {
-      lastModifiedMs = new Date(lm).getTime();
-      if (!Number.isFinite(lastModifiedMs)) lastModifiedMs = null;
-      else reply.header('last-modified', new Date(lastModifiedMs).toUTCString());
-    }
+    lastModifiedMs = toLastModified(catalog.getLastModified());
+  }
+  if (lastModifiedMs !== null) {
+    reply.header('last-modified', new Date(lastModifiedMs).toUTCString());
   }
 
   const headers = req.headers || {};
