@@ -66,20 +66,31 @@ export function encodeExtensionResponses(outcome) {
     return { header: encode({ status: 'not attempted' }), omitted: 'all' };
   }
 
+  // Normalise the status once, before any tier runs (#684), so the header
+  // contract does not depend on payload size: an unrecognised status reads
+  // 'not attempted' whether the envelope fits whole, loses `reason`, or
+  // collapses to the minimal form. A known status leaves the outcome untouched
+  // (same object, same key order), so valid envelopes stay byte-identical.
+  const normalised = KNOWN_STATUSES.includes(outcome.status)
+    ? outcome
+    : { ...outcome, status: 'not attempted' };
+
   // Tier 1: the envelope as-is. This is the path every ordinary response takes
   // and it is byte-identical to the unbounded encoding it replaces.
-  const full = encode(outcome);
+  const full = encode(normalised);
   if (fits(full)) return { header: full, omitted: null };
 
   // Tier 2: drop the free-text detail, keep everything structural. `reason` is
   // the only field whose length is not bounded by the outcome contract.
-  const { reason: _reason, ...rest } = outcome;
+  const { reason: _reason, ...rest } = normalised;
   const withoutReason = encode({ ...rest, detail_omitted: true });
   if (fits(withoutReason)) return { header: withoutReason, omitted: 'reason' };
 
   // Tier 3: even the structural fields did not fit (a caller-controlled field
   // other than `reason` was enormous). Keep the status, which is the part a
   // client acts on, and say plainly that the rest was omitted.
-  const status = KNOWN_STATUSES.includes(outcome.status) ? outcome.status : 'not attempted';
-  return { header: encode({ status, code: OMITTED_CODE, detail_omitted: true }), omitted: 'all' };
+  return {
+    header: encode({ status: normalised.status, code: OMITTED_CODE, detail_omitted: true }),
+    omitted: 'all',
+  };
 }

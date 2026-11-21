@@ -74,11 +74,11 @@ test('the unkeyed fallback is a SHA-256 prefix and differs from the keyed digest
   assert.notEqual(digest, KEYED_DIGEST, 'a key must change the bucket id');
 });
 
-test('invalid inputs are pinned: absent addresses and secrets pass through (#661)', () => {
+test('invalid inputs are pinned: absent addresses are not bucketed (#661)', () => {
   // An absent address must not be given a shared "undefined" bucket…
   assert.equal(pseudonymizeIp(undefined), undefined);
   assert.equal(pseudonymizeIp(null), null);
-  assert.equal(pseudonymizeIp(''), '');
+  assert.equal(pseudonymizeIp(''), undefined);
 
   // …and an unusable signer secret must not derive a key from garbage.
   assert.equal(deriveIpHashSecret(undefined), null);

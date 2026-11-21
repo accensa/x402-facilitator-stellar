@@ -95,7 +95,7 @@ export class EmbeddingClient {
    */
   composeDocument(resource) {
     const parts = [
-      resource.serviceName || '',
+      resource.serviceName || resource.toolName || resource.name || '',
       resource.description || '',
       (resource.tags || []).join(' '),
       resource.type || '',

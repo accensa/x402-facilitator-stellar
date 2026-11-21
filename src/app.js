@@ -9,7 +9,7 @@ import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
 import { createRequestLog } from './log.js';
 import { createMetrics, signerMetrics } from './metrics.js';
-import { createIpPseudonymizer } from './ip.js';
+import { createIpPseudonymizationHook, createIpPseudonymizer } from './ip.js';
 import { createTrustProxyHook } from './trust-proxy.js';
 import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
@@ -313,12 +313,7 @@ export async function createApp(
   // bucket key, audit actors — sees the resolved, spoof-resistant address.
   app.addHook('onRequest', createTrustProxyHook(config.trustProxy));
 
-  app.addHook('onRequest', async req => {
-    const pseudonym = ipPseudonymizer(req.ip);
-    if (pseudonym !== undefined && pseudonym !== req.ip) {
-      Object.defineProperty(req, 'ip', { value: pseudonym, configurable: true });
-    }
-  });
+  app.addHook('onRequest', createIpPseudonymizationHook(ipPseudonymizer, audit));
 
   const cors = createCorsHook(config.cors);
   const preflight = createPreflightHandler(config.cors);
@@ -713,6 +708,25 @@ export async function createApp(
             !existingRecord.key_id ||
             !req.keyId ||
             existingRecord.key_id.toUpperCase() === req.keyId.toUpperCase();
+          // An Idempotency-Key is caller-chosen, so it is only a valid retry of
+          // the SAME request if the payment terms actually match. A field that
+          // was never recorded on the existing record (null) is not compared,
+          // since there is nothing to contradict.
+          const incoming = body.paymentRequirements ?? {};
+          const termsMatch =
+            (existingRecord.pay_to == null || existingRecord.pay_to === incoming.payTo) &&
+            (existingRecord.asset == null || existingRecord.asset === incoming.asset) &&
+            (existingRecord.amount == null || existingRecord.amount === incoming.maxAmountRequired);
+          if (ownedByThisCaller && !termsMatch) {
+            const limited = handleRateLimit(reply, checkSettle);
+            if (limited) return limited;
+            return reply.code(409).send({
+              success: false,
+              errorReason: 'idempotency_key_reused_with_different_payment',
+              errorMessage:
+                'this Idempotency-Key was already used to settle a payment with a different payTo, asset, or amount',
+            });
+          }
           if (ownedByThisCaller) {
             if (existingRecord.state === 'settled') {
               const limited = handleRateLimit(reply, checkSettle);

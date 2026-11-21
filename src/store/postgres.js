@@ -4,6 +4,25 @@ import { MemorySettlementStore } from './memory.js';
 import { SETTLEMENT_EVENT_TYPES, eventTypeForState } from '../eventstore/events.js';
 import { projectSettlement } from '../eventstore/projection.js';
 
+/**
+ * A settlement read could not be answered because the durable store failed.
+ *
+ * This is deliberately distinct from a missing settlement: a database outage
+ * must surface as `503 Service Unavailable`, never as `404 Not Found` for a
+ * settlement that may well exist (#727). The transport's error handler maps
+ * `statusCode` to the HTTP status.
+ */
+export class StoreUnavailableError extends Error {
+  constructor(message, { cause } = {}) {
+    super(message, { cause });
+    this.name = 'StoreUnavailableError';
+    this.statusCode = 503;
+    this.status = 503;
+    this.code = 'settlement_store_unavailable';
+    this.cause = cause;
+  }
+}
+
 const PROJECTION_COLUMN_NAMES = [
   'idempotency_key',
   'network',
@@ -57,6 +76,36 @@ function mapEventRow(r) {
     payload: r.payload,
     recorded_at: new Date(r.recorded_at).toISOString(),
   };
+}
+
+/**
+ * Serializes every write for one idempotency key on the same transaction-scoped
+ * advisory lock. `updateState` also locks the projection row, so a write that
+ * starts before the projection exists and one that updates it afterwards still
+ * order against each other (#726).
+ */
+const SEQ_LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtext($1))';
+const PROJECTION_LOCK_SQL =
+  'SELECT 1 FROM settlement_projections WHERE idempotency_key = $1 FOR UPDATE';
+
+/**
+ * Postgres errors worth retrying after the transaction has rolled back:
+ * `23505` is the `(idempotency_key, seq)` unique violation a lost race produces,
+ * `40001`/`40P01` are serialization/deadlock aborts. Retrying these keeps a
+ * transient conflict from latching `_degrade` and losing durable writes.
+ */
+const RETRYABLE_WRITE_CODES = new Set(['23505', '40001', '40P01']);
+const WRITE_MAX_ATTEMPTS = 5;
+const WRITE_RETRY_BASE_MS = 5;
+const WRITE_RETRY_MAX_MS = 100;
+
+function isRetryableWriteError(err) {
+  return Boolean(err && typeof err.code === 'string' && RETRYABLE_WRITE_CODES.has(err.code));
+}
+
+function retryDelay(attempt) {
+  const ms = Math.min(WRITE_RETRY_BASE_MS * 2 ** (attempt - 1), WRITE_RETRY_MAX_MS);
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
@@ -310,6 +359,69 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     return this.usesReplica ? this.replicaPool : this.pool;
   }
 
+  /**
+   * True when the pool can open a real transaction (a pg Pool exposes
+   * `options` and `connect()`). Minimal test doubles that only implement
+   * `query()` keep the historical single-statement path, so no new SQL is sent
+   * to them.
+   */
+  get _supportsTransactions() {
+    return Boolean(this.pool?.options) && typeof this.pool.connect === 'function';
+  }
+
+  /**
+   * Runs one write inside a transaction and takes the per-key sequence lock
+   * before the caller computes `COALESCE(MAX(seq), 0) + 1` (#726).
+   *
+   * The lock is transaction-scoped (`pg_advisory_xact_lock`), so COMMIT or
+   * ROLLBACK releases it. A concurrent writer for the same idempotency key
+   * blocks at the lock until this write finishes, then reads the committed
+   * max(seq) and appends the next contiguous number instead of colliding on
+   * `UNIQUE (idempotency_key, seq)`.
+   *
+   * @param {string} idempotencyKey
+   * @param {boolean} lockProjectionRow - take `FOR UPDATE` on the projection
+   *   row too (the update path, where the row is expected to exist)
+   * @param {(queryable: object) => Promise<any>} run
+   */
+  async _runSerializedWrite(idempotencyKey, lockProjectionRow, run) {
+    if (!this._supportsTransactions) return run(this.pool);
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(SEQ_LOCK_SQL, [idempotencyKey]);
+      if (lockProjectionRow) {
+        await client.query(PROJECTION_LOCK_SQL, [idempotencyKey]);
+      }
+      const result = await run(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Retries a serialized write on a unique-violation or serialization abort.
+   * The failed attempt already rolled back, so the retry recomputes max(seq)
+   * against the committed stream. This is defense-in-depth behind the locks:
+   * a conflict never reaches the `_degrade` fallback (#726).
+   */
+  async _withWriteRetry(run) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await run();
+      } catch (err) {
+        if (!isRetryableWriteError(err) || attempt >= WRITE_MAX_ATTEMPTS) throw err;
+        await retryDelay(attempt);
+      }
+    }
+  }
+
   async get(idempotencyKey) {
     // Platform read: always hit the database (the read pool when a replica is
     // configured). Read-after-write for the status endpoint is served by
@@ -322,7 +434,12 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       return await this._queryGet(this._readPool(), idempotencyKey);
     } catch (err) {
       this._degrade(`get failed: ${err.message}`);
-      return super.get(idempotencyKey);
+      const cached = await super.get(idempotencyKey);
+      if (cached) return cached;
+      throw new StoreUnavailableError(
+        `Settlement store unavailable while reading "${idempotencyKey}": ${err.message}`,
+        { cause: err },
+      );
     }
   }
 
@@ -364,8 +481,20 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       await this._readyReplica;
       return await this._queryGetWithLag(idempotencyKey);
     } catch (err) {
+      if (err instanceof StoreUnavailableError) throw err;
+      const replicaAnswered = err?.replicaAnswered === true;
       this._degrade(`getConsistent failed: ${err.message}`);
-      return this.get(idempotencyKey);
+      const cached = await super.get(idempotencyKey);
+      if (cached) return cached;
+      // A replica-only outage is contained in `_queryGetWithLag`. If the
+      // replica itself answered and only the primary confirmation failed,
+      // retain the legacy degraded miss (#582); otherwise the durable store
+      // could not be read, which is a 503, not a 404 (#727).
+      if (replicaAnswered) return null;
+      throw new StoreUnavailableError(
+        `Settlement store unavailable while reading "${idempotencyKey}": ${err.message}`,
+        { cause: err },
+      );
     }
   }
 
@@ -380,9 +509,11 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     if (!this.usesReplica) return this._queryGet(this.pool, idempotencyKey);
 
     const started = Date.now();
+    let replicaAnswered = false;
     for (;;) {
       try {
         const row = await this._queryGet(this.replicaPool, idempotencyKey);
+        replicaAnswered = true;
         if (row) return row;
       } catch {
         // A replica outage is not a durable-store failure: the primary is
@@ -396,72 +527,88 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     }
     // Replica still can't see it. Assume recent write / replication drain and
     // confirm against the primary before returning a genuine miss.
-    return this._queryGet(this.pool, idempotencyKey);
+    try {
+      return await this._queryGet(this.pool, idempotencyKey);
+    } catch (err) {
+      // Tell getConsistent whether the replica itself was reachable, so a
+      // primary-only failure can be distinguished from a full outage.
+      err.replicaAnswered = replicaAnswered;
+      throw err;
+    }
   }
 
   async save(record) {
     if (this.degraded || !this.pool) return super.save(record);
     try {
       await this.ready;
-      const { rows } = await this.pool.query(
-        `WITH next_seq AS (
-          SELECT COALESCE(MAX(seq), 0) + 1 AS seq
-          FROM settlement_events WHERE idempotency_key = $1
-        ),
-        ins_event AS (
-          INSERT INTO settlement_events (idempotency_key, seq, event_type, event_version, payload, recorded_at)
-          SELECT $1, next_seq.seq, 'SettlementInitiated', 1, $2::jsonb, NOW()
-          FROM next_seq
-          RETURNING idempotency_key, seq, recorded_at
-        )
-        INSERT INTO settlement_projections (
-          idempotency_key, network, scheme, payer, pay_to, asset, amount, state,
-          tx_hash, error_reason, error_message, response, key_id, version, created_at, updated_at
-        )
-        SELECT
-          ins_event.idempotency_key, $3, $4, $5, $6, $7, $8, 'submitted',
-          $9, NULL, NULL, NULL, $10, ins_event.seq, ins_event.recorded_at, ins_event.recorded_at
-        FROM ins_event
-        ON CONFLICT (idempotency_key) DO UPDATE SET
-          network = EXCLUDED.network,
-          scheme = EXCLUDED.scheme,
-          payer = EXCLUDED.payer,
-          pay_to = EXCLUDED.pay_to,
-          asset = EXCLUDED.asset,
-          amount = EXCLUDED.amount,
-          state = 'submitted',
-          tx_hash = EXCLUDED.tx_hash,
-          error_reason = NULL,
-          error_message = NULL,
-          response = NULL,
-          key_id = EXCLUDED.key_id,
-          version = EXCLUDED.version,
-          updated_at = EXCLUDED.updated_at
-        RETURNING ${PROJECTION_COLUMNS}`,
-        [
-          record.idempotency_key,
-          JSON.stringify({
-            idempotency_key: record.idempotency_key,
-            network: record.network ?? '',
-            scheme: record.scheme ?? '',
-            payer: record.payer ?? null,
-            pay_to: record.pay_to ?? null,
-            asset: record.asset ?? null,
-            amount: record.amount ?? null,
-            tx_hash: record.tx_hash ?? null,
-            key_id: record.key_id ?? null,
-          }),
-          record.network ?? '',
-          record.scheme ?? '',
-          record.payer ?? null,
-          record.pay_to ?? null,
-          record.asset ?? null,
-          record.amount ?? null,
-          record.tx_hash ?? null,
-          record.key_id ?? null,
-        ],
-      );
-      const entry = mapProjectionRow(rows[0]);
+      const params = [
+        record.idempotency_key,
+        JSON.stringify({
+          idempotency_key: record.idempotency_key,
+          network: record.network ?? '',
+          scheme: record.scheme ?? '',
+          payer: record.payer ?? null,
+          pay_to: record.pay_to ?? null,
+          asset: record.asset ?? null,
+          amount: record.amount ?? null,
+          tx_hash: record.tx_hash ?? null,
+          key_id: record.key_id ?? null,
+        }),
+        record.network ?? '',
+        record.scheme ?? '',
+        record.payer ?? null,
+        record.pay_to ?? null,
+        record.asset ?? null,
+        record.amount ?? null,
+        record.tx_hash ?? null,
+        record.key_id ?? null,
+      ];
+      const entry = await this._withWriteRetry(async () => {
+        // The row may not exist yet, so there is no projection row to lock on
+        // the first write. The advisory lock is keyed on the idempotency key
+        // instead, serializing concurrent initial saves before they compute
+        // seq = 1 (#726).
+        const { rows } = await this._runSerializedWrite(record.idempotency_key, false, client =>
+          client.query(
+            `WITH next_seq AS (
+                SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+                FROM settlement_events WHERE idempotency_key = $1
+              ),
+              ins_event AS (
+                INSERT INTO settlement_events (idempotency_key, seq, event_type, event_version, payload, recorded_at)
+                SELECT $1, next_seq.seq, 'SettlementInitiated', 1, $2::jsonb, NOW()
+                FROM next_seq
+                RETURNING idempotency_key, seq, recorded_at
+              )
+              INSERT INTO settlement_projections (
+                idempotency_key, network, scheme, payer, pay_to, asset, amount, state,
+                tx_hash, error_reason, error_message, response, key_id, version, created_at, updated_at
+              )
+              SELECT
+                ins_event.idempotency_key, $3, $4, $5, $6, $7, $8, 'submitted',
+                $9, NULL, NULL, NULL, $10, ins_event.seq, ins_event.recorded_at, ins_event.recorded_at
+              FROM ins_event
+              ON CONFLICT (idempotency_key) DO UPDATE SET
+                network = EXCLUDED.network,
+                scheme = EXCLUDED.scheme,
+                payer = EXCLUDED.payer,
+                pay_to = EXCLUDED.pay_to,
+                asset = EXCLUDED.asset,
+                amount = EXCLUDED.amount,
+                state = 'submitted',
+                tx_hash = EXCLUDED.tx_hash,
+                error_reason = NULL,
+                error_message = NULL,
+                response = NULL,
+                key_id = EXCLUDED.key_id,
+                version = EXCLUDED.version,
+                updated_at = EXCLUDED.updated_at
+              RETURNING ${PROJECTION_COLUMNS}`,
+            params,
+          ),
+        );
+        return mapProjectionRow(rows[0]);
+      });
       await super.save(entry);
       return entry;
     } catch (err) {
@@ -475,48 +622,56 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     try {
       await this.ready;
       const eventType = eventTypeForState(state);
-      const { rows } = await this.pool.query(
-        `WITH next_seq AS (
-          SELECT COALESCE(MAX(seq), 0) + 1 AS seq
-          FROM settlement_events WHERE idempotency_key = $1
-        ),
-        ins_event AS (
-          INSERT INTO settlement_events (idempotency_key, seq, event_type, event_version, payload, recorded_at)
-          SELECT $1, next_seq.seq, $2, 1, $3::jsonb, NOW()
-          FROM next_seq
-          WHERE EXISTS (SELECT 1 FROM settlement_projections WHERE idempotency_key = $1)
-          RETURNING idempotency_key, seq, recorded_at
-        )
-        UPDATE settlement_projections SET
-          state = $4,
-          tx_hash = COALESCE($5, settlement_projections.tx_hash),
-          error_reason = COALESCE($6, settlement_projections.error_reason),
-          error_message = COALESCE($7, settlement_projections.error_message),
-          response = COALESCE($8, settlement_projections.response),
-          version = ins_event.seq,
-          updated_at = ins_event.recorded_at
-        FROM ins_event
-        WHERE settlement_projections.idempotency_key = ins_event.idempotency_key
-        RETURNING ${QUALIFIED_PROJECTION_COLUMNS}`,
-        [
-          idempotencyKey,
-          eventType,
-          JSON.stringify({
-            idempotency_key: idempotencyKey,
-            tx_hash: details.tx_hash ?? null,
-            error_reason: details.error_reason ?? null,
-            error_message: details.error_message ?? null,
-            response: details.response ?? null,
-          }),
-          state,
-          details.tx_hash ?? null,
-          details.error_reason ?? null,
-          details.error_message ?? null,
-          details.response ? JSON.stringify(details.response) : null,
-        ],
-      );
-      if (rows.length === 0) return null;
-      const entry = mapProjectionRow(rows[0]);
+      const params = [
+        idempotencyKey,
+        eventType,
+        JSON.stringify({
+          idempotency_key: idempotencyKey,
+          tx_hash: details.tx_hash ?? null,
+          error_reason: details.error_reason ?? null,
+          error_message: details.error_message ?? null,
+          response: details.response ?? null,
+        }),
+        state,
+        details.tx_hash ?? null,
+        details.error_reason ?? null,
+        details.error_message ?? null,
+        details.response ? JSON.stringify(details.response) : null,
+      ];
+      const entry = await this._withWriteRetry(async () => {
+        // Lock the projection row with the key, then read max(seq) inside the
+        // same transaction. Concurrent updates for this key queue on the row
+        // lock, so each one sees the previous commit's event (#726).
+        const { rows } = await this._runSerializedWrite(idempotencyKey, true, client =>
+          client.query(
+            `WITH next_seq AS (
+              SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+              FROM settlement_events WHERE idempotency_key = $1
+            ),
+            ins_event AS (
+              INSERT INTO settlement_events (idempotency_key, seq, event_type, event_version, payload, recorded_at)
+              SELECT $1, next_seq.seq, $2, 1, $3::jsonb, NOW()
+              FROM next_seq
+              WHERE EXISTS (SELECT 1 FROM settlement_projections WHERE idempotency_key = $1)
+              RETURNING idempotency_key, seq, recorded_at
+            )
+            UPDATE settlement_projections SET
+              state = $4,
+              tx_hash = COALESCE($5, settlement_projections.tx_hash),
+              error_reason = COALESCE($6, settlement_projections.error_reason),
+              error_message = COALESCE($7, settlement_projections.error_message),
+              response = COALESCE($8, settlement_projections.response),
+              version = ins_event.seq,
+              updated_at = ins_event.recorded_at
+            FROM ins_event
+            WHERE settlement_projections.idempotency_key = ins_event.idempotency_key
+            RETURNING ${QUALIFIED_PROJECTION_COLUMNS}`,
+            params,
+          ),
+        );
+        return rows.length === 0 ? null : mapProjectionRow(rows[0]);
+      });
+      if (entry === null) return null;
       await super.updateState(idempotencyKey, state, details);
       return entry;
     } catch (err) {
@@ -557,6 +712,13 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
+        // Serialize this settled transition with save/updateState for the same
+        // key so all three writers compute seq under the same per-key lock
+        // (#726). Minimal pool doubles that cannot transact skip it and keep
+        // their historical behaviour.
+        if (this._supportsTransactions) {
+          await client.query(SEQ_LOCK_SQL, [idempotencyKey]);
+        }
         // The same event-then-projection write as updateState(), folded into
         // the outbox transaction: append SettlementSettled to the event log
         // and update the read model in one statement, then insert the

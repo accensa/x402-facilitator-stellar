@@ -45,7 +45,7 @@ test('a keyed pseudonym differs from the unkeyed fallback, and the key is stable
 test('absent addresses stay absent (no shared bucket is invented)', () => {
   assert.equal(pseudonymizeIp(undefined), undefined);
   assert.equal(pseudonymizeIp(null), null);
-  assert.equal(pseudonymizeIp(''), '');
+  assert.equal(pseudonymizeIp(''), undefined);
 });
 
 test('rate-limit buckets and audit actors contain a pseudonym, not the client IP', async () => {
