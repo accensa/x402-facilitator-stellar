@@ -8,9 +8,71 @@
 import crypto from 'node:crypto';
 
 /**
+ * Nesting cap for {@link stableParamValue}. Query-string parsers that build
+ * nested params (`extensions[asset]=USDC`) cap depth well below this, so the
+ * limit only exists to guarantee termination on pathological input.
+ */
+export const MAX_DISCOVERY_PARAM_DEPTH = 32;
+
+/** Placeholder for a value nested past the cap or reached through a cycle. */
+const UNSERIALISABLE = '[unserialisable]';
+
+function isPlainObject(v) {
+  if (v === null || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Canonical, JSON-ready form of a nested param value (#683): plain objects get
+ * their keys sorted (undefined members dropped, as `JSON.stringify` would),
+ * arrays are sorted by each element's serialised form, and scalars pass
+ * through. Two values that differ only in key order or array order canonicalise
+ * to the same structure; any other difference survives into the output.
+ *
+ * @param {unknown} v
+ * @param {number} depth
+ * @param {WeakSet<object>} seen - ancestors on the current path (cycle guard)
+ * @returns {unknown}
+ */
+function stableParamValue(v, depth, seen) {
+  const nested = Array.isArray(v) || isPlainObject(v);
+  if (!nested) return v;
+  if (depth >= MAX_DISCOVERY_PARAM_DEPTH || seen.has(v)) return UNSERIALISABLE;
+
+  seen.add(v);
+  let out;
+  if (Array.isArray(v)) {
+    out = v
+      .map(item => stableParamValue(item, depth + 1, seen))
+      .map(item => ({ item, key: JSON.stringify(item) ?? 'undefined' }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+      .map(({ item }) => item);
+  } else {
+    out = {};
+    for (const key of Object.keys(v).sort()) {
+      if (v[key] === undefined) continue;
+      out[key] = stableParamValue(v[key], depth + 1, seen);
+    }
+  }
+  seen.delete(v);
+  return out;
+}
+
+function isScalar(v) {
+  return v === null || (typeof v !== 'object' && typeof v !== 'function');
+}
+
+/**
  * Stable, dependency-free serialization of the params that shape a discovery
  * response, so the ETag is stable across request encodings of the same filter.
  * Keys are sorted, arrays are sorted, and undefined/null are dropped.
+ *
+ * Scalars and arrays of scalars serialise exactly as they always have, so
+ * existing validators do not change. A plain-object value (a nested filter
+ * such as `extensions[asset]=USDC`) is serialised as sorted-key JSON instead
+ * of collapsing to `[object Object]`, and an array holding objects or arrays
+ * is sorted by each element's serialised form (#683).
  *
  * @param {Record<string, unknown>} params
  * @returns {string}
@@ -20,7 +82,15 @@ export function canonicalizeDiscoveryParams(params) {
   for (const key of Object.keys(params || {}).sort()) {
     const v = params[key];
     if (v === undefined || v === null) continue;
-    out[key] = Array.isArray(v) ? v.slice().sort() : String(v);
+    if (Array.isArray(v)) {
+      out[key] = v.every(isScalar)
+        ? v.slice().sort()
+        : stableParamValue(v, 0, new WeakSet()).map(item => JSON.stringify(item) ?? 'undefined');
+    } else if (isPlainObject(v)) {
+      out[key] = JSON.stringify(stableParamValue(v, 0, new WeakSet()));
+    } else {
+      out[key] = String(v);
+    }
   }
   return JSON.stringify(out);
 }
