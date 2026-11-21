@@ -50,5 +50,5 @@ test('the documented valid and invalid amount examples match the validator', () 
 
 test('sub-stroop fractions are truncated, never rounded', () => {
   assert.equal(toStroops('1.12345678'), '11234567');
-  assert.equal(toStroops('0.00000001'), '0');
+  assert.throws(() => toStroops('0.00000001'), /cannot be represented in stroops/);
 });

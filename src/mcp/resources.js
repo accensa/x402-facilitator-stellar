@@ -270,6 +270,13 @@ export async function readResource(uri, { fetchDiscovery } = {}) {
   });
 }
 
+/** Byte budget for MCP resource response payloads to avoid stdio transport buffer stalls (#695). */
+export const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KiB
+/** Maximum recursion depth for scrubbing extension objects and nested structures (#695). */
+export const MAX_DEPTH = 10;
+/** Explicit marker embedded in serialized payload when budget is exceeded (#695). */
+export const TRUNCATION_MARKER = '[truncated]';
+
 /**
  * Whether a catalog row is the resource that was asked for.
  *
@@ -303,31 +310,131 @@ function matchesRequestedResource(target, toolName, item) {
  * Serialises catalog data for a resource body.
  *
  * Seller-controlled strings are stripped of invisible characters on the way
- * out. This is not a security boundary on its own — the client asked for this
- * data — it is hygiene: a zero-width or ANSI sequence in a description is
- * either an attempt to hide something from whoever reads the transcript, or an
- * accident that makes the resource unreadable. Either way it has no business in
- * a resource body.
+ * out. Dropping pretty-printing overhead on the transport path and introducing
+ * explicit payload byte budget and recursion depth guards ensures agents do
+ * not hang when reading catalog payloads (#695).
  *
  * @param {unknown} data
+ * @param {number} [maxBytes=MAX_PAYLOAD_BYTES]
  * @returns {string}
  */
-function stringify(data) {
-  return JSON.stringify(scrub(data), null, 2);
+export function stringify(data, maxBytes = MAX_PAYLOAD_BYTES) {
+  const scrubbed = scrub(data);
+  const compact = JSON.stringify(scrubbed);
+
+  if (Buffer.byteLength(compact, 'utf8') <= maxBytes) {
+    return compact;
+  }
+
+  // Payload exceeded budget: embed explicit truncation indicator cleanly (#695)
+  if (scrubbed && typeof scrubbed === 'object') {
+    // 1. If it's an array
+    if (Array.isArray(scrubbed)) {
+      let low = 0;
+      let high = scrubbed.length;
+      let best = null;
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        const candidate = [
+          ...scrubbed.slice(0, mid),
+          { _truncated: true, _marker: TRUNCATION_MARKER },
+        ];
+        const str = JSON.stringify(candidate);
+        if (Buffer.byteLength(str, 'utf8') <= maxBytes) {
+          best = str;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      if (best) return best;
+    } else {
+      // 2. If it's an object with an array field (e.g. resources, results, items)
+      const arrayKey = Object.keys(scrubbed).find(k => Array.isArray(scrubbed[k]));
+      if (arrayKey) {
+        const origArr = scrubbed[arrayKey];
+        let low = 0;
+        let high = origArr.length;
+        let best = null;
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          const candidate = {
+            ...scrubbed,
+            [arrayKey]: origArr.slice(0, mid),
+            _truncated: true,
+            _marker: TRUNCATION_MARKER,
+          };
+          const str = JSON.stringify(candidate);
+          if (Buffer.byteLength(str, 'utf8') <= maxBytes) {
+            best = str;
+            low = mid + 1;
+          } else {
+            high = mid - 1;
+          }
+        }
+        if (best) return best;
+      }
+
+      // 3. Truncate long string properties in the object
+      const truncatedObj = { ...scrubbed, _truncated: true, _marker: TRUNCATION_MARKER };
+      for (const [k, v] of Object.entries(truncatedObj)) {
+        if (typeof v === 'string' && v.length > 50) {
+          truncatedObj[k] = v.slice(0, 50) + '... ' + TRUNCATION_MARKER;
+        }
+      }
+      const str = JSON.stringify(truncatedObj);
+      if (Buffer.byteLength(str, 'utf8') <= maxBytes) {
+        return str;
+      }
+
+      // 4. Return minimal structured truncation indicator
+      const minimal = {
+        _truncated: true,
+        _marker: TRUNCATION_MARKER,
+        error: 'payload_too_large',
+        message: `Payload exceeded byte budget of ${maxBytes} bytes`,
+      };
+      const minStr = JSON.stringify(minimal);
+      if (Buffer.byteLength(minStr, 'utf8') <= maxBytes) {
+        return minStr;
+      }
+    }
+  }
+
+  // Fallback string truncation with marker
+  const marker = `... ${TRUNCATION_MARKER}`;
+  const markerLen = Buffer.byteLength(marker, 'utf8');
+  if (maxBytes >= markerLen) {
+    const sliceBytes = maxBytes - markerLen;
+    const buf = Buffer.from(compact, 'utf8');
+    return buf.subarray(0, sliceBytes).toString('utf8') + marker;
+  }
+  return TRUNCATION_MARKER.slice(0, maxBytes);
 }
 
 /**
- * Recursively strips unsafe characters from strings in a JSON-ish structure.
+ * Recursively strips unsafe characters from strings in a JSON-ish structure,
+ * guarded by MAX_DEPTH to prevent call-stack exhaustion (#695).
+ *
  * @param {unknown} value
+ * @param {number} [depth=0]
  * @returns {unknown}
  */
-function scrub(value) {
+export function scrub(value, depth = 0) {
   if (typeof value === 'string') return stripUnsafeCharacters(value);
-  if (Array.isArray(value)) return value.map(scrub);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[stripUnsafeCharacters(k)] = scrub(v);
-    return out;
+  if (value === null || typeof value !== 'object') return value;
+
+  if (depth >= MAX_DEPTH) {
+    return '[Truncated: depth limit exceeded]';
   }
-  return value;
+
+  if (Array.isArray(value)) {
+    return value.map(item => scrub(item, depth + 1));
+  }
+
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[stripUnsafeCharacters(k)] = scrub(v, depth + 1);
+  }
+  return out;
 }

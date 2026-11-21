@@ -24,9 +24,21 @@ export function toStroops(amount) {
   }
   if (typeof amount === 'bigint') return amount.toString();
   const [intPart, fracPart = ''] = amount.split('.');
+
+  const cleanInt = intPart.replace(/^\+/, '');
+  const isZeroInt = cleanInt === '' || /^0+$/.test(cleanInt);
   const truncatedFrac = fracPart.slice(0, STELLAR_DECIMALS);
+  const isZeroTruncatedFrac = truncatedFrac === '' || /^0+$/.test(truncatedFrac);
+  const hasNonZeroFrac = /[1-9]/.test(fracPart);
+
+  if (isZeroInt && isZeroTruncatedFrac && hasNonZeroFrac) {
+    throw new Error(
+      `Amount "${amount}" cannot be represented in stroops: amounts below 1 stroop (10^-7) truncate to zero.`,
+    );
+  }
+
   const paddedFrac = truncatedFrac.padEnd(STELLAR_DECIMALS, '0');
-  return BigInt(intPart.replace(/^\+/, '') + paddedFrac).toString();
+  return BigInt(cleanInt + paddedFrac).toString();
 }
 
 /**
