@@ -173,6 +173,12 @@ paths:
           description: |
             Missing/invalid key, or open mode (no keys configured at all —
             `open_mode_usage_forbidden`).
+          headers:
+            WWW-Authenticate:
+              description: RFC 9110 authentication challenge. Always Bearer.
+              schema:
+                type: string
+                example: Bearer
           content:
             application/json:
               schema:
@@ -893,6 +899,12 @@ paths:
           description: |
             Missing/invalid key — the strict check, so this is also the
             answer in open mode.
+          headers:
+            WWW-Authenticate:
+              description: RFC 9110 authentication challenge. Always Bearer.
+              schema:
+                type: string
+                example: Bearer
           content:
             application/json:
               schema:
@@ -932,6 +944,12 @@ paths:
                 $ref: '#/components/schemas/RequestError'
         '401':
           description: Missing/invalid key — the strict check, even in open mode.
+          headers:
+            WWW-Authenticate:
+              description: RFC 9110 authentication challenge. Always Bearer.
+              schema:
+                type: string
+                example: Bearer
           content:
             application/json:
               schema:
@@ -978,6 +996,12 @@ paths:
                 $ref: '#/components/schemas/RequestError'
         '401':
           description: Missing/invalid key — the strict check, even in open mode.
+          headers:
+            WWW-Authenticate:
+              description: RFC 9110 authentication challenge. Always Bearer.
+              schema:
+                type: string
+                example: Bearer
           content:
             application/json:
               schema:
@@ -1029,6 +1053,12 @@ paths:
                 $ref: '#/components/schemas/RequestError'
         '401':
           description: Missing/invalid key — the strict check, even in open mode.
+          headers:
+            WWW-Authenticate:
+              description: RFC 9110 authentication challenge. Always Bearer.
+              schema:
+                type: string
+                example: Bearer
           content:
             application/json:
               schema:
@@ -1214,6 +1244,12 @@ components:
         Missing, malformed, or unrecognized API key. Reason is one of
         `missing_auth_header`, `malformed_auth_header`, or `invalid_api_key`.
         Not returned at all when the instance is running in open mode.
+      headers:
+        WWW-Authenticate:
+          description: RFC 9110 authentication challenge. Always Bearer.
+          schema:
+            type: string
+            example: Bearer
       content:
         application/json:
           schema:

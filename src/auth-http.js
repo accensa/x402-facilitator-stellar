@@ -134,6 +134,7 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
       audit('auth_failure', { actor: `ip:${req.ip}`, reason: 'missing_auth_header' });
+      reply.header?.('WWW-Authenticate', 'Bearer');
       return reply.code(401).send({
         isValid: false,
         invalidReason: 'missing_auth_header',
@@ -156,11 +157,21 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
           req.jwtPayload = payload;
           return;
         } catch (err) {
+          console.error(
+            `[Auth] JWT verification failed: ${err.code ?? err.name ?? 'Error'}: ${err.message}`,
+          );
+          let reason = 'invalid_token';
+          if (err.code === 'ERR_JWT_EXPIRED') {
+            reason = 'token_expired';
+          } else if (err.message && err.message.startsWith('missing_required_scope')) {
+            reason = 'insufficient_scope';
+          }
+
           const failure = {
             isValid: false,
-            invalidReason: err.message,
+            invalidReason: reason,
             invalidMessage: 'unauthorized',
-            reason: err.message,
+            reason,
           };
           if (apiKeys.length > 0) {
             const keyResult = verifyApiKey(authHeader, apiKeys);
@@ -174,6 +185,7 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
             failure.reason = keyResult.reason;
           }
           audit('auth_failure', { actor: `ip:${req.ip}`, reason: failure.reason });
+          reply.header?.('WWW-Authenticate', 'Bearer');
           return reply.code(401).send(failure);
         }
       }
@@ -181,6 +193,7 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
       const result = verifyApiKey(authHeader, apiKeys);
       if (!result.valid) {
         audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
+        reply.header?.('WWW-Authenticate', 'Bearer');
         return reply.code(401).send({
           isValid: false,
           invalidReason: result.reason,
@@ -197,6 +210,7 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
     const result = verifyApiKey(authHeader, apiKeys);
     if (!result.valid) {
       audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
+      reply.header?.('WWW-Authenticate', 'Bearer');
       return reply.code(401).send({
         isValid: false,
         invalidReason: result.reason,
@@ -211,6 +225,7 @@ export function createAuthMiddlewareWithJwt({ config, audit }) {
 
   async function requireApiKeyStrict(req, reply) {
     if (apiKeys.length === 0 && !jwtVerifier) {
+      reply.header?.('WWW-Authenticate', 'Bearer');
       return reply.code(401).send({
         isValid: false,
         invalidReason: 'open_mode_usage_forbidden',
