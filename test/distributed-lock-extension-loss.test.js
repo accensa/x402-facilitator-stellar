@@ -84,6 +84,7 @@ describe('withRedlock hard cancellation on lock extension loss', () => {
     const { lock, warns } = build({ failExtend: true });
     const gate = deferred();
     let fnStarted = false;
+    const keepAlive = setInterval(() => {}, 500);
 
     const operation = lock.withLock('settle:lost', async () => {
       fnStarted = true;
@@ -92,14 +93,18 @@ describe('withRedlock hard cancellation on lock extension loss', () => {
       return 'unprotected-result';
     });
 
-    await assert.rejects(operation, err => {
-      assert.ok(err instanceof LockLostError);
-      assert.equal(err.name, 'LockLostError');
-      assert.equal(err.key, 'settle:lost');
-      assert.match(err.message, /settle:lost/);
-      assert.match(err.message, /mutual exclusion was lost/);
-      return true;
-    });
+    try {
+      await assert.rejects(operation, err => {
+        assert.ok(err instanceof LockLostError);
+        assert.equal(err.name, 'LockLostError');
+        assert.equal(err.key, 'settle:lost');
+        assert.match(err.message, /settle:lost/);
+        assert.match(err.message, /mutual exclusion was lost/);
+        return true;
+      });
+    } finally {
+      clearInterval(keepAlive);
+    }
 
     assert.equal(fnStarted, true);
     assert.ok(
@@ -133,6 +138,7 @@ describe('withRedlock hard cancellation on lock extension loss', () => {
     const unhandled = [];
     const onUnhandled = reason => unhandled.push(reason);
     process.on('unhandledRejection', onUnhandled);
+    const keepAlive = setInterval(() => {}, 500);
 
     try {
       const operation = lock.withLock('settle:late-reject', async () => {
@@ -149,6 +155,7 @@ describe('withRedlock hard cancellation on lock extension loss', () => {
 
       assert.deepEqual(unhandled, []);
     } finally {
+      clearInterval(keepAlive);
       process.removeListener('unhandledRejection', onUnhandled);
       await lock.quit();
     }
