@@ -294,6 +294,41 @@ export function createDistributedLock({
 }
 
 /**
+ * Recursively normalizes a value so JSON.stringify emits object keys in a
+ * deterministic order. Arrays keep their element order; objects inside them
+ * are still canonicalized. `undefined` object properties are omitted exactly
+ * as JSON.stringify would omit them.
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return value;
+
+  if (Array.isArray(value)) return value.map(canonicalize);
+
+  const normalized = {};
+  for (const key of Object.keys(value).sort()) {
+    const entry = value[key];
+    if (entry === undefined) continue;
+    normalized[key] = canonicalize(entry);
+  }
+  return normalized;
+}
+
+/**
+ * JSON.stringify with deterministic object key ordering. Property insertion
+ * order is not part of a JSON object's meaning, so replicas must not let it
+ * change a derived lock key.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function canonicalStringify(value) {
+  return JSON.stringify(canonicalize(value));
+}
+
+/**
  * Derives a stable lock key from an arbitrary payment-shaped object. Two
  * replicas must agree on this key byte-for-byte for serialization to engage,
  * so it hashes canonical JSON rather than trusting any client-supplied string.
@@ -305,7 +340,7 @@ export function createDistributedLock({
 export function lockKeyFor(value, prefix = 'settle') {
   const digest = crypto
     .createHash('sha256')
-    .update(JSON.stringify(value ?? null))
+    .update(canonicalStringify(value ?? null))
     .digest('hex');
   return `${prefix}:${digest}`;
 }
