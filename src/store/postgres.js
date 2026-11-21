@@ -4,6 +4,25 @@ import { MemorySettlementStore } from './memory.js';
 import { SETTLEMENT_EVENT_TYPES, eventTypeForState } from '../eventstore/events.js';
 import { projectSettlement } from '../eventstore/projection.js';
 
+/**
+ * A settlement read could not be answered because the durable store failed.
+ *
+ * This is deliberately distinct from a missing settlement: a database outage
+ * must surface as `503 Service Unavailable`, never as `404 Not Found` for a
+ * settlement that may well exist (#727). The transport's error handler maps
+ * `statusCode` to the HTTP status.
+ */
+export class StoreUnavailableError extends Error {
+  constructor(message, { cause } = {}) {
+    super(message, { cause });
+    this.name = 'StoreUnavailableError';
+    this.statusCode = 503;
+    this.status = 503;
+    this.code = 'settlement_store_unavailable';
+    this.cause = cause;
+  }
+}
+
 const PROJECTION_COLUMN_NAMES = [
   'idempotency_key',
   'network',
@@ -322,7 +341,12 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       return await this._queryGet(this._readPool(), idempotencyKey);
     } catch (err) {
       this._degrade(`get failed: ${err.message}`);
-      return super.get(idempotencyKey);
+      const cached = await super.get(idempotencyKey);
+      if (cached) return cached;
+      throw new StoreUnavailableError(
+        `Settlement store unavailable while reading "${idempotencyKey}": ${err.message}`,
+        { cause: err },
+      );
     }
   }
 
@@ -364,8 +388,20 @@ export class PostgresSettlementStore extends MemorySettlementStore {
       await this._readyReplica;
       return await this._queryGetWithLag(idempotencyKey);
     } catch (err) {
+      if (err instanceof StoreUnavailableError) throw err;
+      const replicaAnswered = err?.replicaAnswered === true;
       this._degrade(`getConsistent failed: ${err.message}`);
-      return this.get(idempotencyKey);
+      const cached = await super.get(idempotencyKey);
+      if (cached) return cached;
+      // A replica-only outage is contained in `_queryGetWithLag`. If the
+      // replica itself answered and only the primary confirmation failed,
+      // retain the legacy degraded miss (#582); otherwise the durable store
+      // could not be read, which is a 503, not a 404 (#727).
+      if (replicaAnswered) return null;
+      throw new StoreUnavailableError(
+        `Settlement store unavailable while reading "${idempotencyKey}": ${err.message}`,
+        { cause: err },
+      );
     }
   }
 
@@ -380,9 +416,11 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     if (!this.usesReplica) return this._queryGet(this.pool, idempotencyKey);
 
     const started = Date.now();
+    let replicaAnswered = false;
     for (;;) {
       try {
         const row = await this._queryGet(this.replicaPool, idempotencyKey);
+        replicaAnswered = true;
         if (row) return row;
       } catch {
         // A replica outage is not a durable-store failure: the primary is
@@ -396,7 +434,14 @@ export class PostgresSettlementStore extends MemorySettlementStore {
     }
     // Replica still can't see it. Assume recent write / replication drain and
     // confirm against the primary before returning a genuine miss.
-    return this._queryGet(this.pool, idempotencyKey);
+    try {
+      return await this._queryGet(this.pool, idempotencyKey);
+    } catch (err) {
+      // Tell getConsistent whether the replica itself was reachable, so a
+      // primary-only failure can be distinguished from a full outage.
+      err.replicaAnswered = replicaAnswered;
+      throw err;
+    }
   }
 
   async save(record) {
