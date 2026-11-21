@@ -65,8 +65,14 @@ export class LockAcquireTimeoutError extends Error {
  * The map entry is dropped once its promise resolves and no newer waiter has
  * taken the key: settlement locks key on a per-payment idempotency key, so
  * retaining a resolved promise per key would grow with settlement volume.
+ *
+ * @param {object} [options]
+ * @param {number} [options.acquireTimeoutMs] - how long acquire(key) waits
+ *   for the key to be handed over before rejecting with LockAcquireTimeoutError;
+ *   the memory fallback has no lock expiry of its own, so without a deadline a
+ *   holder that never releases wedges every later waiter on that key
  */
-export function createMemoryLockManager() {
+export function createMemoryLockManager({ acquireTimeoutMs = 15_000 } = {}) {
   const tails = new Map();
 
   return {
@@ -81,7 +87,9 @@ export function createMemoryLockManager() {
     },
 
     /**
-     * @returns {Promise<{release: Function}>} resolves once the key is held
+     * @returns {Promise<{release: Function}>} resolves once the key is held,
+     *   or rejects with LockAcquireTimeoutError when the wait exceeds
+     *   acquireTimeoutMs
      */
     acquire(key) {
       const prev = tails.get(key) ?? Promise.resolve(null);
@@ -96,7 +104,36 @@ export function createMemoryLockManager() {
         if (tails.get(key) === done) tails.delete(key);
       });
       tails.set(key, done);
-      return prev.then(() => ({ release }));
+
+      return new Promise((resolve, reject) => {
+        let delivered = false;
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          if (delivered) return;
+          timedOut = true;
+          // The caller is rejected now. The chain still has to move: waiters
+          // queued behind this one chain on `done`, and it would stay pending
+          // forever if the release resolver were dropped with the timed-out
+          // waiter — so advance it once the previous holder releases.
+          prev
+            .then(() => {
+              if (delivered) return;
+              delivered = true;
+              release();
+            })
+            .catch(() => {});
+          reject(new LockAcquireTimeoutError(key, acquireTimeoutMs));
+        }, acquireTimeoutMs);
+
+        prev
+          .then(() => {
+            if (delivered || timedOut) return;
+            delivered = true;
+            clearTimeout(timer);
+            resolve({ release });
+          })
+          .catch(() => {});
+      });
     },
 
     async withLock(key, fn) {
@@ -161,7 +198,7 @@ export function createDistributedLock({
 
   if (urls.length === 0) {
     log('distributed-lock: no Redis nodes configured — using in-process locking only');
-    return createMemoryLockManager();
+    return createMemoryLockManager({ acquireTimeoutMs });
   }
 
   if (urls.length < 3) {
@@ -184,7 +221,7 @@ export function createDistributedLock({
 
   redlock.on('clientError', err => warn(`distributed-lock: redis client error: ${err.message}`));
 
-  const memoryFallback = createMemoryLockManager();
+  const memoryFallback = createMemoryLockManager({ acquireTimeoutMs });
   let degraded = false;
 
   /**
