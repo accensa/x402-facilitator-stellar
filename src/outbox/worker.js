@@ -53,9 +53,11 @@ export async function pollOutboxOnce({
   for (const row of rows) {
     // The published record matches what the request-path enqueue used to emit
     // (`{ id, ...event, url, publishedAt }`) so receivers see no shape change.
+    // Envelope fields come last so a payload key can never shadow them: the id
+    // must be the outbox event id and publishedAt must be this publish's time.
     const record = {
-      id: row.event_id,
       ...row.payload,
+      id: row.event_id,
       publishedAt: now().toISOString(),
     };
     try {

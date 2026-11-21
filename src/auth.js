@@ -85,6 +85,7 @@ export function createAuthMiddleware({ config, audit }) {
     const result = verifyApiKey(req.headers.authorization, apiKeys);
     if (!result.valid) {
       audit('auth_failure', { actor: `ip:${req.ip}`, reason: result.reason });
+      reply.header?.('WWW-Authenticate', 'Bearer');
       return reply.code(401).send({
         isValid: false,
         invalidReason: result.reason,
@@ -99,6 +100,7 @@ export function createAuthMiddleware({ config, audit }) {
 
   async function requireApiKeyStrict(req, reply) {
     if (apiKeys.length === 0) {
+      reply.header?.('WWW-Authenticate', 'Bearer');
       return reply.code(401).send({
         isValid: false,
         invalidReason: 'open_mode_usage_forbidden',

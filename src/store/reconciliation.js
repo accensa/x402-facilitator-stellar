@@ -106,14 +106,45 @@ export async function reconcileUnknownSettlements(store, config = {}, { rpcCall 
  * Starts periodic background reconciliation loop.
  */
 export function startReconciliationLoop(store, config, { intervalMs = 30_000, rpcCall } = {}) {
+  // Single-flight: a sweep that takes longer than `intervalMs` (easy with a
+  // backlog of unknown settlements, each costing one 5s RPC call) must not
+  // overlap the next tick — overlapping sweeps double Soroban RPC traffic and
+  // race store.updateState. Ticks that arrive while one is running are
+  // skipped; the next interval retries.
+  let inFlight = false;
+  let currentSweep = null;
+  let stopped = false;
+
+  const runSweep = async () => {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    const sweep = reconcileUnknownSettlements(store, config, { rpcCall })
+      .catch(err => {
+        console.warn(`[Reconciliation] Loop error: ${err.message}`);
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+    currentSweep = sweep;
+    try {
+      await sweep;
+    } finally {
+      if (currentSweep === sweep) currentSweep = null;
+    }
+  };
+
   const timer = globalThis.setInterval(() => {
-    reconcileUnknownSettlements(store, config, { rpcCall }).catch(err => {
-      console.warn(`[Reconciliation] Loop error: ${err.message}`);
-    });
+    runSweep();
   }, intervalMs);
+  timer.unref?.();
 
   return {
-    stop: () => globalThis.clearInterval(timer),
+    stop: async () => {
+      stopped = true;
+      globalThis.clearInterval(timer);
+      const pending = currentSweep;
+      if (pending) await pending;
+    },
   };
 }
 

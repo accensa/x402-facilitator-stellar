@@ -15,23 +15,40 @@
 
 /**
  * Attempts one redelivery of a dead-lettered record. Shared by the background
- * poll loop and the operator API's manual "replay now" action so both paths
- * mark state identically.
+ * poll loop and the operator API's manual "replay now" action.
+ *
+ * The two callers are deliberately not identical on failure: an automated
+ * retry consumes the message's retry budget (`markRetryFailed` increments
+ * `dlq_attempts` and schedules the next backoff), while an operator-initiated
+ * replay is an out-of-band probe that must not advance that budget. A manual
+ * failure therefore leaves `dlq_attempts`, `next_retry_at` and `status`
+ * untouched, so repeated replays cannot drive a near-limit message into
+ * `exhausted` and the scheduled worker still owns the automated backoff.
  *
  * @param {object} options
  * @param {import('./store.js').DeadLetterStore} options.dlq
  * @param {object} row - a row from claimDue()/get(), carrying id and payload
  * @param {(record: object) => Promise<unknown>} options.publish
  * @param {object} [options.retryOptions] - maxDlqAttempts/baseBackoffMs, see markRetryFailed
+ * @param {boolean} [options.isManual=false] - operator replay: do not touch the retry budget
  * @returns {Promise<{delivered: boolean, error?: string}>}
  */
-export async function attemptRedelivery({ dlq, row, publish, retryOptions }) {
+export async function attemptRedelivery({
+  dlq,
+  row,
+  publish,
+  retryOptions,
+  isManual = false,
+} = {}) {
   try {
     await publish(row.payload);
     await dlq.markResolved(row.id);
     return { delivered: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (isManual) {
+      return { delivered: false, error: message };
+    }
     await dlq.markRetryFailed(row.id, message, retryOptions);
     return { delivered: false, error: message };
   }

@@ -269,11 +269,13 @@ export function frameUntrusted(
  * Creates a tool execution audit logger.
  *
  * @param {Function} auditFn - audit function to call with the log entry
+ * @param {object} [options]
+ * @param {() => number} [options.now=Date.now] - injectable clock for tests
  * @returns {Function} a wrapper that logs tool execution with parameters and timing
  */
-export function createToolAuditLogger(auditFn) {
+export function createToolAuditLogger(auditFn, { now = Date.now } = {}) {
   return async (toolName, params, handler) => {
-    const startTime = Date.now();
+    const startTime = now();
     const sanitizedParams = sanitizeParamsForAudit(params);
     let success = true;
     let error = null;
@@ -285,7 +287,7 @@ export function createToolAuditLogger(auditFn) {
       error = err instanceof Error ? err.message : String(err);
       throw err;
     } finally {
-      const endTime = Date.now();
+      const endTime = now();
       const entry = {
         toolName,
         parameters: sanitizedParams,

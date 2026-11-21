@@ -66,6 +66,7 @@ test('toStroops rejects number inputs (precision already lost)', () => {
 
 test('toStroops rejects negatives and missing amounts', () => {
   assert.throws(() => toStroops('-1.5'), /must not be negative/);
+  assert.throws(() => toStroops(-1n), /must not be negative/);
   assert.throws(() => toStroops(''), /required/);
   assert.throws(() => toStroops(null), /required/);
   assert.throws(() => toStroops(undefined), /required/);
@@ -118,6 +119,12 @@ test('validateDiscoveryDeclaration rejects non-numeric and over-precise amounts'
     pricing: { amount: '-1', asset: 'USDC' },
   });
   assert.ok(negative.some(e => e.includes('must not be negative')));
+
+  const negativeBigInt = validateDiscoveryDeclaration({
+    ...validDeclaration,
+    pricing: { amount: -1n, asset: 'USDC' },
+  });
+  assert.ok(negativeBigInt.some(e => e.includes('must not be negative')));
 });
 
 test('validateDiscoveryDeclaration still reports structural errors', () => {

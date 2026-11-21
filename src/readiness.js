@@ -128,6 +128,9 @@ export function createReadinessChecker(
   }
 
   async function checkSigners(target) {
+    if (target.addresses.length === 0) {
+      return { ok: false, error: 'no signer accounts configured', signers: [] };
+    }
     const results = [];
     for (const addr of target.addresses) {
       results.push(await checkSignerAddress(target.rpcUrl, addr));

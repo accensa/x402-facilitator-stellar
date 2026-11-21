@@ -218,16 +218,21 @@ export async function readResource(uri, { fetchDiscovery } = {}) {
 
     // An empty result is a legitimate answer to "read this resource", and a
     // client that asked should be told so rather than handed a 404-shaped hole.
-    const empty = !data || !Array.isArray(data.resources) || data.resources.length === 0;
+    // A non-empty result is not the same thing as a match: `/discovery/resources`
+    // filters by url, and that filter also matches prefixes, trailing slashes and
+    // other normalised forms. Returning `resources[0]` unchecked answers a request
+    // for one uri with another seller's price and payee (#690), so the first row
+    // has to be the requested resource or it is not a result at all.
+    const items = data && Array.isArray(data.resources) ? data.resources : [];
+    const first = items[0];
+    const notFound = { error: 'not_found', message: 'No catalog resource matches that url.' };
     return {
       contents: [
         {
           uri,
           mimeType: JSON_MIME,
           text: stringify(
-            empty
-              ? { error: 'not_found', message: 'No catalog resource matches that url.' }
-              : data.resources[0],
+            first && matchesRequestedResource(target, toolName, first) ? first : notFound,
           ),
         },
       ],
@@ -271,6 +276,35 @@ export const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KiB
 export const MAX_DEPTH = 10;
 /** Explicit marker embedded in serialized payload when budget is exceeded (#695). */
 export const TRUNCATION_MARKER = '[truncated]';
+
+/**
+ * Whether a catalog row is the resource that was asked for.
+ *
+ * The url comparison is on `toString()` so both sides are normalised the same
+ * way, and it is exact: `https://example.com/a` is not `https://example.com/a/b`,
+ * `https://example.com/a/` or `https://example.com/a?ref=x`. A row whose url is
+ * missing or unparseable cannot be the requested resource, and the value is
+ * never echoed — it is seller-controlled text on its way into an agent's context.
+ *
+ * `toolName` only narrows a request that named a tool; a row that names a
+ * different one is a different resource at the same url.
+ *
+ * @param {URL} target - the validated requested url
+ * @param {string|undefined} toolName - the validated requested tool name, if any
+ * @param {object} item - a row from `/discovery/resources`
+ * @returns {boolean}
+ */
+function matchesRequestedResource(target, toolName, item) {
+  let found;
+  try {
+    found = new URL(String(item?.url)).toString();
+  } catch {
+    return false;
+  }
+  if (found !== target.toString()) return false;
+  if (toolName && typeof item?.toolName === 'string' && item.toolName !== toolName) return false;
+  return true;
+}
 
 /**
  * Serialises catalog data for a resource body.
