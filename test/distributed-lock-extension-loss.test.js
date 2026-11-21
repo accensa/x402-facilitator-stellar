@@ -10,6 +10,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { setInterval, clearInterval } from 'node:timers';
 import { createDistributedLock, LockLostError } from '../src/distributed-lock.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
