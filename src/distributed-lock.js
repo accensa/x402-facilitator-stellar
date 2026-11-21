@@ -55,6 +55,21 @@ export class LockAcquireTimeoutError extends Error {
 }
 
 /**
+ * Raised when a held lock could not be extended, so mutual exclusion was lost
+ * while the wrapped operation was still running. The operation is abandoned
+ * (even if it ignores the abort signal) rather than reported as successful
+ * without the lock it was promised.
+ */
+export class LockLostError extends Error {
+  constructor(key, cause) {
+    super(`lost distributed lock "${key}": mutual exclusion was lost while the operation ran`);
+    this.name = 'LockLostError';
+    this.key = key;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+/**
  * In-process mutex. The fallback path and the single-instance path are the
  * same code: each waiter chains behind the previous holder's release.
  *
@@ -191,8 +206,10 @@ export function createDistributedLock({
    * Runs fn() while holding the named lock.
    *
    * Re-extends the lock in the background at ttl/3 so operations longer than
-   * the TTL stay exclusive; if an extension fails the operation is aborted
-   * (via the cancel signal) rather than left to run unprotected.
+   * the TTL stay exclusive. If an extension fails, mutual exclusion is gone:
+   * the operation is aborted via the cancel signal and, even if fn ignores
+   * that signal, withRedlock rejects with LockLostError instead of letting an
+   * unprotected result pass as successful.
    *
    * @param {string} key
    * @param {(signal: AbortSignal) => Promise<T>} fn
@@ -215,11 +232,24 @@ export function createDistributedLock({
     }
 
     const controller = new AbortController();
+
+    // Rejects as soon as the extension path aborts the controller, so it can
+    // win the race below even when fn never observes the signal.
+    let rejectAbort;
+    const abortPromise = new Promise((_, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = () => {
+      const reason = controller.signal.reason;
+      rejectAbort(reason instanceof LockLostError ? reason : new LockLostError(key, reason));
+    };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+
     const timer = setInterval(
       () => {
-        lock.extend(ttlMs).catch(() => {
+        lock.extend(ttlMs).catch(cause => {
           warn(`distributed-lock: lost lock "${key}" during extension`);
-          controller.abort(new Error(`lock "${key}" expired while held`));
+          controller.abort(new LockLostError(key, cause));
         });
       },
       Math.max(1000, Math.floor(ttlMs / 3)),
@@ -227,10 +257,16 @@ export function createDistributedLock({
     // Never hold the process open for the sake of an extension tick.
     timer.unref?.();
 
+    const fnPromise = Promise.resolve().then(() => fn(controller.signal));
+    // If the abort path wins, fn may still reject later. Mark that rejection as
+    // handled so Node does not emit an UnhandledPromiseRejection.
+    fnPromise.catch(() => {});
+
     try {
-      return await fn(controller.signal);
+      return await Promise.race([fnPromise, abortPromise]);
     } finally {
       clearInterval(timer);
+      controller.signal.removeEventListener('abort', onAbort);
       try {
         await lock.release();
       } catch (err) {
