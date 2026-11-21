@@ -148,7 +148,11 @@ export function createRateLimiterHealthCheck(databaseUrl) {
 export const OPERATIONAL_ROUTES = new Set(['/metrics', '/healthz', '/readyz']);
 
 /**
- * Builds the Fastify app.
+ * Adds attributes to the span that is currently active and does nothing when
+ * there is none. The surrounding request span is opened by withRequestSpan (and
+ * the scheme call's own span by tracedSchemeCall), so this is the cheap way for
+ * a route to tag itself — route name, tenant id — without threading the span
+ * through every handler signature.
  *
  * Takes its collaborators rather than reaching for module state, which is what
  * makes the surface testable: a test can supply a facilitator that throws, a
@@ -216,6 +220,17 @@ export async function createApp(
 
   await app.register(compress);
 
+  /**
+   * Request logging (#78/#86 lineage): one redacted line per request. The
+   * middleware from logger.js speaks the Node req/res pair; Fastify exposes
+   * exactly that as request.raw / reply.raw, so the same redaction choke point
+   * serves both frameworks unchanged.
+   */
+  // In-flight request gauge, decorated onto the instance rather than exported:
+  // server.js reads it from the forced-exit path to report how much work a
+  // shutdown deadline is about to cut off. Incremented in onRequest and
+  // decremented in onResponse, clamped at zero so a stray decrement cannot
+  // drive it negative.
   let activeRequestCount = 0;
   app.decorate('getInFlightCount', () => activeRequestCount);
 
@@ -296,6 +311,9 @@ export async function createApp(
         })
       : null);
 
+  // Decorated rather than kept local: server.js reads app.readiness during
+  // graceful shutdown to flip the probe into its shutting-down state, so the
+  // load balancer stops sending new work before the drain starts.
   app.decorate('readiness', readiness);
 
   app.addHook('onRequest', async (req, reply) => {
@@ -471,6 +489,15 @@ export async function createApp(
   // Core and Operational Routes
   // ---------------------------------------------------------------------------
 
+  /**
+   * GET /healthz — liveness, and the one probe that never fails.
+   *
+   * It answers as long as the event loop is serving requests, which is exactly
+   * what an orchestrator needs to decide "restart this container" (see the
+   * Dockerfile HEALTHCHECK): a dependency outage must not be reported here, or a
+   * restart loop would make someone else's RPC outage worse. Dependency state
+   * belongs on /readyz below.
+   */
   app.get('/healthz', async () => ({ ok: true }));
 
   app.get('/readyz', async (_req, reply) => {
@@ -560,10 +587,27 @@ export async function createApp(
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // Payment Routes (/verify, /settle)
-  // ---------------------------------------------------------------------------
-
+  /**
+   * POST /verify — check a payment payload against its requirements without
+   * moving funds.
+   *
+   * The ordering is load-bearing, not incidental:
+   *   1. the rate-limit check runs before the body is even shaped, so the
+   *      cheapest rejection wins and a flooding caller cannot make us parse;
+   *   2. the body goes through both validation layers (see readPaymentBody);
+   *   3. the scheme call races a request timeout, so a stalled Horizon cannot
+   *      hold a worker open indefinitely;
+   *   4. the outcome is answered 200 with `isValid: false` rather than an HTTP
+   *      error — to an agent a 5xx is indistinguishable from the facilitator
+   *      being down, whereas a reason code is something it can branch on;
+   *   5. only a valid result is catalogued, and that cataloguing happens off the
+   *      hot path (a verify proves nothing was paid, so the entry stays
+   *      provisional — see processCataloging).
+   *
+   * An exception escaping the scheme call is mapped onto a reason code and still
+   * answered 200 with `isValid: false`, so an upstream failure never becomes
+   * indistinguishable from a failure of this transport.
+   */
   app.post(
     '/verify',
     {
@@ -674,6 +718,33 @@ export async function createApp(
     },
   );
 
+  /**
+   * POST /settle — settle a verified payment. This is the money-moving route,
+   * and the sequence below is part of its contract rather than an
+   * implementation detail:
+   *
+   *   1. the body is validated first (readPaymentBody), then the rate-limit check
+   *      runs against the settle bucket — note this is the reverse of /verify,
+   *      where the limiter gate is checked before the body is even shaped;
+   *   2. the settlement record is consulted next: a repeat of a *settled* key
+   *      replays the recorded response, and a *failed* key is only re-attempted
+   *      when its error_reason is retryable — a non-retryable failure stays
+   *      failed instead of letting a caller burn fees retrying it;
+   *   3. the request is recorded as 'submitted' BEFORE the scheme is called, so
+   *      a crash mid-flight leaves a traceable record instead of silence;
+   *   4. an idempotency-store replay short-circuits the scheme call entirely —
+   *      the key is the caller's when supplied and derived from the body
+   *      otherwise;
+   *   5. a distributed lock serialises concurrent settlement of the same payment
+   *      across pods (#116): the lock key is the payment, so unrelated payments
+   *      never contend;
+   *   6. the scheme call, the terminal state transition and the webhook enqueue
+   *      share one transaction where the store supports it (settleAndEnqueue);
+   *      where it does not, the event is handed to the dispatcher afterwards;
+   *   7. a timeout is reported as `submitted_outcome_unknown` when the request
+   *      had already reached the network, and `request_timeout` when it had not,
+   *      because only the caller can decide whether to reconcile or retry.
+   */
   app.post(
     '/settle',
     {
