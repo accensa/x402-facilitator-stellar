@@ -154,6 +154,7 @@ pinned.
 
 ### Fixed
 
+- `validateAmount` rejects negative BigInt stroop counts (#756): `toStroops(-1n)` and a discovery declaration with a negative BigInt `pricing.amount` now raise the same `pricing.amount must not be negative` error as negative decimal strings, instead of passing a negative stroop count through to callers.
 - In `docs/AUDIT.md`, removed accidental duplicate `## Proposed Scope` heading, restoring valid markdown hierarchy and unambiguous anchor targets (#775).
 - In `eval/runner.js`, corrected nDCG@K calculation by truncating sorted ideal relevance scores to top-K (`actualScores.length`) so perfect top-K rankings against larger judgment sets yield nDCG = 1.0 without artificial IDCG denominator inflation (#774).
 - A pending idempotency claim now expires (#711): `MemoryIdempotencyStore.begin()`
