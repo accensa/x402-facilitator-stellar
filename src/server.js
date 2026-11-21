@@ -112,7 +112,7 @@ const vaultDatabase =
 // silently falling back to per-process memory would double every limit at two
 // replicas and reset the fee ceiling at every deploy — the bug this fixes.
 
-const { facilitator, signers, schemes } = buildFacilitator(config);
+const { facilitator, signers, schemes, stop: stopFacilitator } = buildFacilitator(config);
 
 // Store selection, in order of preference:
 //   1. RATE_LIMIT_STORE=crdt (#126): CRDT G-Counter store for multi-region
@@ -414,6 +414,9 @@ async function shutdown(signal) {
       reconciliation?.stop();
 
       failoverHealth?.stop();
+      // Stop the key-rotation intervals this process started (#672) before the
+      // app drains, so shutdown leaves no timers alive behind it.
+      stopFacilitator();
       await app.close();
       await webhooks.stop().catch(() => {});
       await distributedLock?.quit().catch(() => {});
