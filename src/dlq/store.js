@@ -38,6 +38,47 @@ export const DEAD_LETTERS_TABLE_SQL = `
   CREATE INDEX IF NOT EXISTS idx_dead_letters_message_id ON dead_letters(message_id);
 `;
 
+/**
+ * A repeated failure of the same message from the same delivery path must
+ * update the existing row, not append another. The unique index is created
+ * separately from the table DDL so an existing table that predates it (and may
+ * already contain duplicate rows) can be merged first instead of failing boot.
+ */
+export const DEAD_LETTERS_UNIQUE_INDEX_SQL = `
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_dead_letters_message_source
+      ON dead_letters(message_id, source);
+`;
+
+/**
+ * Collapses rows that predate the unique index. The newest row per
+ * (message_id, source) survives because it carries the latest error and
+ * timestamps; its delivery_attempts becomes the sum across the duplicates so
+ * the failure history is not lost.
+ */
+export const DEAD_LETTERS_MERGE_DUPLICATES_SQL = `
+  WITH ranked AS (
+    SELECT id,
+           CAST(SUM(delivery_attempts) OVER (PARTITION BY message_id, source) AS int)
+             AS total_attempts,
+           ROW_NUMBER() OVER (PARTITION BY message_id, source ORDER BY id DESC) AS rn
+    FROM dead_letters
+  ),
+  merged AS (
+    UPDATE dead_letters d
+    SET delivery_attempts = r.total_attempts,
+        updated_at = now()
+    FROM ranked r
+    WHERE d.id = r.id
+      AND r.rn = 1
+      AND r.total_attempts <> d.delivery_attempts
+    RETURNING d.id
+  )
+  DELETE FROM dead_letters d
+  USING ranked r
+  WHERE d.id = r.id
+    AND r.rn > 1;
+`;
+
 export class DeadLetterStore {
   /**
    * @param {object} pool - pg Pool (or a test double with the same surface)
@@ -52,10 +93,25 @@ export class DeadLetterStore {
 
   async _ensureTable() {
     await this.pool.query(DEAD_LETTERS_TABLE_SQL);
+    try {
+      await this.pool.query(DEAD_LETTERS_UNIQUE_INDEX_SQL);
+    } catch (err) {
+      if (err?.code !== '23505') throw err;
+      this.warn(
+        '[DLQ] duplicate (message_id, source) rows found; merging them before creating the unique index',
+      );
+      await this.pool.query(DEAD_LETTERS_MERGE_DUPLICATES_SQL);
+      await this.pool.query(DEAD_LETTERS_UNIQUE_INDEX_SQL);
+    }
   }
 
   /**
    * Records a message whose delivery path exhausted its own retry budget.
+   *
+   * Repeated failures of the same (message_id, source) update the existing
+   * row: the delivery attempt counter increments, the latest error/payload is
+   * kept, and both failure timestamps are refreshed. `first_failed_at` and
+   * `created_at` stay at the original failure.
    *
    * @param {object} event
    * @param {string} event.messageId
@@ -64,13 +120,20 @@ export class DeadLetterStore {
    * @param {object} event.payload
    * @param {string} [event.error]
    * @param {number} [event.deliveryAttempts]
-   * @returns {Promise<number>} the new row's id
+   * @returns {Promise<number>} the row's id (existing row on a duplicate failure)
    */
   async insert({ messageId, source, type = null, payload, error = null, deliveryAttempts = 0 }) {
     await this.ready;
     const { rows } = await this.pool.query(
       `INSERT INTO dead_letters (message_id, source, type, payload, error, delivery_attempts)
        VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (message_id, source) DO UPDATE SET
+         delivery_attempts = dead_letters.delivery_attempts + 1,
+         type = COALESCE(EXCLUDED.type, dead_letters.type),
+         payload = EXCLUDED.payload,
+         error = EXCLUDED.error,
+         last_failed_at = NOW(),
+         updated_at = NOW()
        RETURNING id`,
       [messageId, source, type, JSON.stringify(payload), error, deliveryAttempts],
     );
