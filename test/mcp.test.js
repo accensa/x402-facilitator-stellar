@@ -253,21 +253,23 @@ test('MCP Tool Audit Logging', async t => {
   await t.test('createToolAuditLogger logs execution with timing', async () => {
     const logs = [];
     const auditFn = (event, entry) => logs.push({ event, ...entry });
-    const logger = createToolAuditLogger(auditFn);
+    // Injected clock, because durationMs is a start/end pair: a real 10ms timer
+    // reports 9 when Date.now() truncates the span, which made `>= 10` fail
+    // intermittently on a loaded runner. The handler's span is now exact.
+    let clock = 1_000;
+    const logger = createToolAuditLogger(auditFn, { now: () => clock });
 
     await logger('test_tool', { input: 'test' }, async params => {
-      // The logger measures with Date.now(), which truncates to whole
-      // milliseconds, so a handler that sleeps for N ms can report N - 1. The
-      // sleep therefore carries headroom and the assertion is made against the
-      // lower bound that headroom guarantees, instead of the exact sleep.
-      await new Promise(r => setTimeout(r, 50));
+      clock += 12;
       return { output: params.input };
     });
 
     assert.equal(logs.length, 1);
     assert.equal(logs[0].event, 'mcp_tool_execution');
     assert.equal(logs[0].toolName, 'test_tool');
-    assert.ok(logs[0].durationMs >= 40);
+    assert.equal(logs[0].startTime, 1_000);
+    assert.equal(logs[0].endTime, 1_012);
+    assert.equal(logs[0].durationMs, 12);
     assert.equal(logs[0].success, true);
     assert.equal(logs[0].parameters.input, 'test');
   });
