@@ -9,7 +9,7 @@ import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
 import { createRequestLog } from './log.js';
 import { createMetrics, signerMetrics } from './metrics.js';
-import { createIpPseudonymizer } from './ip.js';
+import { createIpPseudonymizationHook, createIpPseudonymizer } from './ip.js';
 import { createTrustProxyHook } from './trust-proxy.js';
 import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
@@ -313,12 +313,7 @@ export async function createApp(
   // bucket key, audit actors — sees the resolved, spoof-resistant address.
   app.addHook('onRequest', createTrustProxyHook(config.trustProxy));
 
-  app.addHook('onRequest', async req => {
-    const pseudonym = ipPseudonymizer(req.ip);
-    if (pseudonym !== undefined && pseudonym !== req.ip) {
-      Object.defineProperty(req, 'ip', { value: pseudonym, configurable: true });
-    }
-  });
+  app.addHook('onRequest', createIpPseudonymizationHook(ipPseudonymizer, audit));
 
   const cors = createCorsHook(config.cors);
   const preflight = createPreflightHandler(config.cors);
