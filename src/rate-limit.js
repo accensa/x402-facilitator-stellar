@@ -159,8 +159,6 @@ export class RateLimiter {
     let bucket;
     try {
       bucket = await this.store.get(bucketId, now);
-      // Sweep on read as well as write to handle rejection-only traffic
-      await this._sweep(now);
     } catch {
       return {
         allowed: false,
@@ -182,10 +180,10 @@ export class RateLimiter {
     try {
       await this.store.sweep(now);
     } catch {
-      // Sweep is pure housekeeping; the next request retries it. An empty
-      // catch is normally banned here — this one is the deliberate exception:
-      // sweeping must never be able to take down a request that already
-      // passed its limit check.
+      // Sweep is pure housekeeping; the next scheduled sweep retries it. An
+      // empty catch is normally banned here — this one is the deliberate
+      // exception: sweeping must never be able to take down a request that
+      // already passed its limit check.
     }
   }
 

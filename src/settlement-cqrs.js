@@ -14,7 +14,7 @@
 import { projectSettlement } from './eventstore/projection.js';
 
 /**
- * Checkpoint manager for tracking the last processed event offset.
+ * Checkpoint manager for tracking the last processed global event id.
  * Persists checkpoint to the database for recovery after process restart.
  */
 export class CheckpointManager {
@@ -25,7 +25,7 @@ export class CheckpointManager {
   }
 
   /**
-   * Initialize checkpoint table and load the last persisted offset.
+   * Initialize checkpoint table and load the last persisted global event id.
    */
   async initialize() {
     await this.pool.query(`
@@ -60,8 +60,8 @@ export class CheckpointManager {
   }
 
   /**
-   * Update checkpoint to a new offset.
-   * @param {number} offset - The new offset to checkpoint
+   * Update checkpoint to a new global event id.
+   * @param {number} offset - The new global event id to checkpoint
    */
   async updateCheckpoint(offset) {
     await this.pool.query(
@@ -76,7 +76,7 @@ export class CheckpointManager {
 
 /**
  * Event stream reader that fetches events from the event store
- * starting from a given offset.
+ * in global event id order starting from a given offset.
  */
 export class EventStreamReader {
   constructor(pool, log = console) {
@@ -86,13 +86,14 @@ export class EventStreamReader {
 
   /**
    * Read a batch of events from the event store starting at the given offset.
-   * @param {number} fromOffset - Starting sequence number (exclusive)
+   * @param {number} fromOffset - Starting global event id (exclusive)
    * @param {number} limit - Maximum number of events to fetch
    * @returns {Promise<Array>} Array of event records
    */
   async readBatch(fromOffset, limit = 100) {
     const result = await this.pool.query(
       `SELECT 
+         e.id,
          e.seq,
          e.idempotency_key,
          e.event_type,
@@ -100,8 +101,8 @@ export class EventStreamReader {
          e.payload,
          e.recorded_at
        FROM settlement_events e
-       WHERE e.seq > $1
-       ORDER BY e.seq ASC
+       WHERE e.seq > 0 AND e.id > $1
+       ORDER BY e.id ASC
        LIMIT $2`,
       [fromOffset, limit],
     );
@@ -109,12 +110,15 @@ export class EventStreamReader {
   }
 
   /**
-   * Get the maximum sequence number in the event store.
+   * Get the maximum global event id in the event store.
    * Used for calculating projection lag.
    */
   async getMaxSequence() {
     const result = await this.pool.query(
-      'SELECT COALESCE(MAX(seq), 0) as max_seq FROM settlement_events',
+      `SELECT 
+         COALESCE(MAX(id), 0) as max_seq,
+         COALESCE(MAX(seq), 0) as legacy_max_seq
+       FROM settlement_events`,
     );
     return result.rows[0]?.max_seq || 0;
   }
@@ -179,9 +183,9 @@ export class ProjectionWriter {
   /**
    * Write or update a projected settlement in the read model.
    * @param {object} projection - The projected settlement state
-   * @param {number} lastSeq - The sequence number of the last processed event
+   * @param {number} lastEventId - The global event id of the last processed event
    */
-  async writeProjection(projection, lastSeq) {
+  async writeProjection(projection, lastEventId) {
     if (!projection) return;
 
     await this.pool.query(
@@ -213,7 +217,7 @@ export class ProjectionWriter {
         projection.error_message,
         projection.created_at,
         projection.updated_at,
-        lastSeq,
+        lastEventId,
       ],
     );
   }
@@ -368,7 +372,7 @@ export class ProjectionWorker {
 
     // Process each group (settlement aggregate)
     let processedCount = 0;
-    let lastSeq = currentOffset;
+    let lastOffset = currentOffset;
 
     for (const [key, groupEvents] of eventGroups.entries()) {
       try {
@@ -378,23 +382,23 @@ export class ProjectionWorker {
         // Project settlement state from all events
         const projection = projectSettlement(allEvents);
 
-        // Find the highest sequence number in this group
-        const maxSeq = Math.max(...groupEvents.map(e => e.seq));
+        // Find the highest global event id in this group
+        const maxOffset = Math.max(...groupEvents.map(e => e.id ?? e.seq));
 
         // Write projection to read model
-        await this.writer.writeProjection(projection, maxSeq);
+        await this.writer.writeProjection(projection, maxOffset);
 
         processedCount++;
-        lastSeq = Math.max(lastSeq, maxSeq);
+        lastOffset = Math.max(lastOffset, maxOffset);
       } catch (error) {
         this.log.error(`Error projecting settlement ${key}:`, error);
         // Continue with other events
       }
     }
 
-    // Update checkpoint to the last processed sequence
-    if (lastSeq > currentOffset) {
-      await this.checkpoint.updateCheckpoint(lastSeq);
+    // Update checkpoint to the last processed global event id
+    if (lastOffset > currentOffset) {
+      await this.checkpoint.updateCheckpoint(lastOffset);
     }
 
     // Record metrics. The duration is already computed above from the
@@ -417,7 +421,7 @@ export class ProjectionWorker {
     }
 
     this.log.debug(
-      `Processed ${processedCount} events in ${duration.toFixed(3)}s, checkpoint: ${lastSeq}`,
+      `Processed ${processedCount} events in ${duration.toFixed(3)}s, checkpoint: ${lastOffset}`,
     );
   }
 
@@ -442,8 +446,8 @@ export class ProjectionWorker {
   async updateMetrics() {
     try {
       const currentOffset = this.checkpoint.getOffset();
-      const maxSeq = await this.reader.getMaxSequence();
-      const lag = maxSeq - currentOffset;
+      const maxId = await this.reader.getMaxSequence();
+      const lag = maxId - currentOffset;
 
       this.metrics.setProjectionLag(lag);
     } catch (error) {

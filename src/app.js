@@ -9,7 +9,7 @@ import { createAuditLogger } from './audit.js';
 import { createReadinessChecker } from './readiness.js';
 import { createRequestLog } from './log.js';
 import { createMetrics, signerMetrics } from './metrics.js';
-import { createIpPseudonymizer } from './ip.js';
+import { createIpPseudonymizationHook, createIpPseudonymizer } from './ip.js';
 import { createTrustProxyHook } from './trust-proxy.js';
 import { lockKeyFor } from './distributed-lock.js';
 import { requestState } from './request-state.js';
@@ -50,6 +50,48 @@ function describeThrown(err) {
     }
   }
   return String(err);
+}
+
+/**
+ * The one timeout error /verify has always mapped to `request_timeout`.
+ *
+ * Kept as a factory next to {@link withRequestTimeout} so every site that
+ * passes it produces the same code and message, independent of the route.
+ *
+ * @returns {Error} an error carrying `code: 'REQUEST_TIMEOUT'`
+ */
+function requestTimeoutError() {
+  const err = new Error('request timeout');
+  err.code = 'REQUEST_TIMEOUT';
+  return err;
+}
+
+/**
+ * Runs one unit of work inside the per-request budget (`REQUEST_TIMEOUT_MS`).
+ *
+ * This is the transport's single timeout implementation (#671): /verify,
+ * /settle and the catalog reads all race their collaborator against the same
+ * timer. The timer is always cleared — operation settles, rejects, throws
+ * synchronously or the budget expires — so slow calls cannot accumulate
+ * pending timers. `onTimeout` builds the error the caller's existing handler
+ * already branches on, which keeps every route's reason codes exactly as they
+ * were.
+ *
+ * @param {Function} operation - starts the work; called immediately
+ * @param {{timeoutMs: number, onTimeout: Function}} options
+ * @returns {Promise<unknown>} the operation's result
+ */
+function withRequestTimeout(operation, { timeoutMs, onTimeout }) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), timeoutMs);
+  });
+  try {
+    return Promise.race([operation(), timeoutPromise]).finally(() => clearTimeout(timer));
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
 }
 
 /**
@@ -313,12 +355,7 @@ export async function createApp(
   // bucket key, audit actors — sees the resolved, spoof-resistant address.
   app.addHook('onRequest', createTrustProxyHook(config.trustProxy));
 
-  app.addHook('onRequest', async req => {
-    const pseudonym = ipPseudonymizer(req.ip);
-    if (pseudonym !== undefined && pseudonym !== req.ip) {
-      Object.defineProperty(req, 'ip', { value: pseudonym, configurable: true });
-    }
-  });
+  app.addHook('onRequest', createIpPseudonymizationHook(ipPseudonymizer, audit));
 
   const cors = createCorsHook(config.cors);
   const preflight = createPreflightHandler(config.cors);
@@ -590,28 +627,19 @@ export async function createApp(
           const limited = handleRateLimit(reply, recorded, check);
           if (limited) return limited;
 
-          const timeoutMs = config.requestTimeoutMs ?? 30_000;
-          let timeoutTimer;
-          const timeoutPromise = new Promise((_, reject) => {
-            timeoutTimer = setTimeout(() => {
-              const err = new Error('request timeout');
-              err.code = 'REQUEST_TIMEOUT';
-              reject(err);
-            }, timeoutMs);
-          });
-
           metrics.incActiveVerifications();
           let result;
           try {
-            const verifyPromise = tracedSchemeCall(
-              'verify',
-              body.paymentRequirements.network,
-              () => facilitator.verify(body.paymentPayload, body.paymentRequirements),
-              { 'tenant.id': req.keyId ?? 'open' },
+            result = await withRequestTimeout(
+              () =>
+                tracedSchemeCall(
+                  'verify',
+                  body.paymentRequirements.network,
+                  () => facilitator.verify(body.paymentPayload, body.paymentRequirements),
+                  { 'tenant.id': req.keyId ?? 'open' },
+                ),
+              { timeoutMs: config.requestTimeoutMs ?? 30_000, onTimeout: requestTimeoutError },
             );
-            result = await Promise.race([verifyPromise, timeoutPromise]).finally(() => {
-              clearTimeout(timeoutTimer);
-            });
           } finally {
             metrics.decActiveVerifications();
           }
@@ -713,6 +741,25 @@ export async function createApp(
             !existingRecord.key_id ||
             !req.keyId ||
             existingRecord.key_id.toUpperCase() === req.keyId.toUpperCase();
+          // An Idempotency-Key is caller-chosen, so it is only a valid retry of
+          // the SAME request if the payment terms actually match. A field that
+          // was never recorded on the existing record (null) is not compared,
+          // since there is nothing to contradict.
+          const incoming = body.paymentRequirements ?? {};
+          const termsMatch =
+            (existingRecord.pay_to == null || existingRecord.pay_to === incoming.payTo) &&
+            (existingRecord.asset == null || existingRecord.asset === incoming.asset) &&
+            (existingRecord.amount == null || existingRecord.amount === incoming.maxAmountRequired);
+          if (ownedByThisCaller && !termsMatch) {
+            const limited = handleRateLimit(reply, checkSettle);
+            if (limited) return limited;
+            return reply.code(409).send({
+              success: false,
+              errorReason: 'idempotency_key_reused_with_different_payment',
+              errorMessage:
+                'this Idempotency-Key was already used to settle a payment with a different payTo, asset, or amount',
+            });
+          }
           if (ownedByThisCaller) {
             if (existingRecord.state === 'settled') {
               const limited = handleRateLimit(reply, checkSettle);
@@ -933,28 +980,22 @@ export async function createApp(
               if (signer) metrics.setSignerInflight({ network, signer, value: 0 });
             }
           };
-          const timeoutMs = config.requestTimeoutMs ?? 30_000;
-          let timeoutTimer;
-          const timeoutPromise = new Promise((_, reject) => {
-            timeoutTimer = setTimeout(() => {
-              const isSubmitted = requestState.getStore()?.submitted === true;
-              const err = new Error(
-                isSubmitted
-                  ? 'settlement submitted to network but timed out waiting for confirmation'
-                  : 'request timeout',
-              );
-              err.code = isSubmitted ? 'SUBMITTED_OUTCOME_UNKNOWN' : 'REQUEST_TIMEOUT';
-              reject(err);
-            }, timeoutMs);
-          });
-
-          const resultPromise = distributedLock
-            ? distributedLock.withLock(lockKey, settleOnce)
-            : settleOnce();
-
-          const result = await Promise.race([resultPromise, timeoutPromise]).finally(() => {
-            clearTimeout(timeoutTimer);
-          });
+          const result = await withRequestTimeout(
+            () => (distributedLock ? distributedLock.withLock(lockKey, settleOnce) : settleOnce()),
+            {
+              timeoutMs: config.requestTimeoutMs ?? 30_000,
+              onTimeout: () => {
+                const isSubmitted = requestState.getStore()?.submitted === true;
+                const err = new Error(
+                  isSubmitted
+                    ? 'settlement submitted to network but timed out waiting for confirmation'
+                    : 'request timeout',
+                );
+                err.code = isSubmitted ? 'SUBMITTED_OUTCOME_UNKNOWN' : 'REQUEST_TIMEOUT';
+                return err;
+              },
+            },
+          );
           return reply.send(result);
         } catch (err) {
           const network = body?.paymentRequirements?.network ?? 'unknown';
@@ -1251,6 +1292,25 @@ export async function createApp(
     },
   );
 
+  /**
+   * Bounds a catalog read by the same per-request budget /verify and /settle
+   * use (#671). A store that hangs used to hold the socket past
+   * REQUEST_TIMEOUT_MS; the read now rejects and the handler answers
+   * internal_error. The code is deliberately not SUBMITTED_OUTCOME_UNKNOWN:
+   * a read submits nothing whose outcome could be unknown.
+   */
+  const readWithDeadline = operation => {
+    const timeoutMs = config.requestTimeoutMs ?? 30_000;
+    return withRequestTimeout(operation, {
+      timeoutMs,
+      onTimeout: () => {
+        const err = new Error(`catalog read timed out after ${timeoutMs}ms`);
+        err.code = 'CATALOG_TIMEOUT';
+        return err;
+      },
+    });
+  };
+
   app.get('/discovery/resources', { onRequest: cors('public') }, async (req, reply) => {
     annotateSpan({ 'tenant.id': req.keyId ?? 'open', 'http.route': '/discovery/resources' });
     const checkCatalogRead = await rateLimiter.checkCatalogRead(req);
@@ -1286,7 +1346,7 @@ export async function createApp(
     if (cache.notModified) return reply.code(304).send();
 
     try {
-      const result = await catalog.listResources(params);
+      const result = await readWithDeadline(() => catalog.listResources(params));
       const recorded = await rateLimiter.recordCatalogRead(req);
       const limited = handleRateLimit(reply, recorded, checkCatalogRead);
       if (limited) return limited;
@@ -1301,7 +1361,11 @@ export async function createApp(
         },
       });
     } catch (err) {
-      console.error(`[Discovery] listResources error: ${err.message}`);
+      // One line per failed read, naming the route (#671). A budget timeout is
+      // called out as such, but the caller sees the same internal_error shape
+      // the store-failure path has always returned.
+      const outcome = err?.code === 'CATALOG_TIMEOUT' ? 'timeout' : 'error';
+      console.error(`[Discovery] /discovery/resources read ${outcome}: ${describeThrown(err)}`);
       return reply.code(500).send({ error: 'internal_error', reason: 'internal_error' });
     }
   });
@@ -1342,7 +1406,7 @@ export async function createApp(
     if (cache.notModified) return reply.code(304).send();
 
     try {
-      const result = await catalog.search(params);
+      const result = await readWithDeadline(() => catalog.search(params));
       const recorded = await rateLimiter.recordCatalogRead(req);
       const limited = handleRateLimit(reply, recorded, checkCatalogRead);
       if (limited) return limited;
@@ -1354,7 +1418,8 @@ export async function createApp(
         pagination: result.pagination,
       });
     } catch (err) {
-      console.error(`[Discovery] search error: ${err.message}`);
+      const outcome = err?.code === 'CATALOG_TIMEOUT' ? 'timeout' : 'error';
+      console.error(`[Discovery] /discovery/search read ${outcome}: ${describeThrown(err)}`);
       return reply.code(500).send({ error: 'internal_error', reason: 'internal_error' });
     }
   });
@@ -1416,6 +1481,10 @@ export async function createApp(
     { onRequest: cors('authenticated') },
     preflight('authenticated', 'GET, OPTIONS'),
   );
+
+  app.options('/*', { onRequest: cors('public') }, (_req, reply) => {
+    reply.code(404).send({ error: 'not_found', reason: 'route_not_found' });
+  });
 
   // ---------------------------------------------------------------------------
   // 404 and Error Handlers

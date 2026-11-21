@@ -138,7 +138,7 @@ describe('FailoverHealthChecker', () => {
     assert.equal(checker.getState().preferredRegion, 'us-east-1');
   });
 
-  test('preferred region returns best healthy remote when degraded', () => {
+  test('preferred region returns best affirmatively healthy remote when degraded', () => {
     const checker = new FailoverHealthChecker({
       region: 'us-east-1',
       failureThreshold: 1,
@@ -151,11 +151,18 @@ describe('FailoverHealthChecker', () => {
 
     checker.reportLocalHealth(false); // degrade
 
-    // No remote checks done yet — all are "unknown" (potentially healthy).
+    // No remote checks done yet — strict (#759): an unverified remote is NOT
+    // preferred over a degraded local region.
+    assert.equal(checker.getState().preferredRegion, 'us-east-1');
+
+    // Mark eu-west-1 affirmatively healthy — it becomes the failover target.
+    checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     assert.equal(checker.getState().preferredRegion, 'eu-west-1');
 
-    // Mark eu-west-1 as unhealthy.
+    // Mark eu-west-1 affirmatively unhealthy and ap-south-1 affirmatively
+    // healthy — only one region may be preferred, and it is the latter.
     checker.remoteStatus.set('eu-west-1', { healthy: false, lastCheck: Date.now() });
+    checker.remoteStatus.set('ap-south-1', { healthy: true, lastCheck: Date.now() });
     assert.equal(checker.getState().preferredRegion, 'ap-south-1');
   });
 
@@ -272,11 +279,11 @@ describe('split-brain prevention', () => {
     assert.equal(checker.getState().preferredRegion, 'us-east-1');
     assert.equal(checker.getState().failoverActive, false);
 
-    // Healthy with remote healthy — still self.
+    // Healthy with remote affirmatively healthy — still self.
     checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     assert.equal(checker.getState().preferredRegion, 'us-east-1');
 
-    // Degraded — switches to remote.
+    // Degraded — switches to the affirmatively healthy remote.
     checker.reportLocalHealth(false);
     assert.equal(checker.getState().preferredRegion, 'eu-west-1');
     assert.equal(checker.getState().failoverActive, true);
@@ -293,7 +300,8 @@ describe('split-brain prevention', () => {
       ],
     });
 
-    // Degrade.
+    // Degrade (eu-west-1 affirmatively healthy, so it is the failover target).
+    checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     checker.reportLocalHealth(false);
     assert.equal(checker.getState().preferredRegion, 'eu-west-1');
 
@@ -329,14 +337,20 @@ describe('split-brain prevention', () => {
     // Only one region has priority 1.
     assert.equal(preferredCount, 0); // remote regions don't have priority 1
 
-    // Degrade — eu-west-1 (priority 2) is preferred.
+    // Degrade — eu-west-1 (priority 2) is preferred once affirmatively healthy.
+    checker.remoteStatus.set('eu-west-1', { healthy: true, lastCheck: Date.now() });
     checker.reportLocalHealth(false);
     const state2 = checker.getState();
     assert.equal(state2.preferredRegion, 'eu-west-1');
 
-    // Mark eu-west-1 unhealthy — ap-south-1 (priority 3) is preferred.
+    // Mark eu-west-1 affirmatively unhealthy — ap-south-1 needs its own
+    // affirmative health; until then the local region is the safe preferred.
     checker.remoteStatus.set('eu-west-1', { healthy: false, lastCheck: Date.now() });
     const state3 = checker.getState();
-    assert.equal(state3.preferredRegion, 'ap-south-1');
+    assert.equal(state3.preferredRegion, 'us-east-1');
+
+    // ap-south-1 affirmatively healthy — the unique preferred region.
+    checker.remoteStatus.set('ap-south-1', { healthy: true, lastCheck: Date.now() });
+    assert.equal(checker.getState().preferredRegion, 'ap-south-1');
   });
 });

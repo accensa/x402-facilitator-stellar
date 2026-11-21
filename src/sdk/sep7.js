@@ -252,12 +252,26 @@ export function buildPayUri(params) {
  * @param {object} [extra] - assetCode, assetIssuer, memo, memoType, msg, callback, ...
  */
 export function payUriFromRequirements(requirements, extra = {}) {
+  const errors =
+    requirements.amount === undefined
+      ? []
+      : validateAmount(requirements.amount).map(e => e.replace('pricing.amount', 'amount'));
   const params = { destination: requirements.payTo, ...extra };
-  if (requirements.amount !== undefined) {
-    const stroops = BigInt(requirements.amount);
-    const scale = 10n ** BigInt(STELLAR_DECIMALS);
-    const frac = (stroops % scale).toString().padStart(STELLAR_DECIMALS, '0').replace(/0+$/, '');
-    params.amount = `${stroops / scale}${frac ? `.${frac}` : ''}`;
+  if (requirements.amount !== undefined && errors.length === 0) {
+    let stroops;
+    try {
+      stroops = BigInt(requirements.amount);
+    } catch {
+      throw new Sep7Error([`amount "${requirements.amount}" is not a valid stroop count`]);
+    }
+    if (stroops < 0n) {
+      errors.push(`amount must not be negative (got "${stroops}")`);
+    } else {
+      const scale = 10n ** BigInt(STELLAR_DECIMALS);
+      const frac = (stroops % scale).toString().padStart(STELLAR_DECIMALS, '0').replace(/0+$/, '');
+      params.amount = `${stroops / scale}${frac ? `.${frac}` : ''}`;
+    }
   }
+  if (errors.length > 0) throw new Sep7Error(errors);
   return buildPayUri(params);
 }

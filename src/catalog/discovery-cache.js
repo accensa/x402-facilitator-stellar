@@ -8,9 +8,71 @@
 import crypto from 'node:crypto';
 
 /**
+ * Nesting cap for {@link stableParamValue}. Query-string parsers that build
+ * nested params (`extensions[asset]=USDC`) cap depth well below this, so the
+ * limit only exists to guarantee termination on pathological input.
+ */
+export const MAX_DISCOVERY_PARAM_DEPTH = 32;
+
+/** Placeholder for a value nested past the cap or reached through a cycle. */
+const UNSERIALISABLE = '[unserialisable]';
+
+function isPlainObject(v) {
+  if (v === null || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Canonical, JSON-ready form of a nested param value (#683): plain objects get
+ * their keys sorted (undefined members dropped, as `JSON.stringify` would),
+ * arrays are sorted by each element's serialised form, and scalars pass
+ * through. Two values that differ only in key order or array order canonicalise
+ * to the same structure; any other difference survives into the output.
+ *
+ * @param {unknown} v
+ * @param {number} depth
+ * @param {WeakSet<object>} seen - ancestors on the current path (cycle guard)
+ * @returns {unknown}
+ */
+function stableParamValue(v, depth, seen) {
+  const nested = Array.isArray(v) || isPlainObject(v);
+  if (!nested) return v;
+  if (depth >= MAX_DISCOVERY_PARAM_DEPTH || seen.has(v)) return UNSERIALISABLE;
+
+  seen.add(v);
+  let out;
+  if (Array.isArray(v)) {
+    out = v
+      .map(item => stableParamValue(item, depth + 1, seen))
+      .map(item => ({ item, key: JSON.stringify(item) ?? 'undefined' }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+      .map(({ item }) => item);
+  } else {
+    out = {};
+    for (const key of Object.keys(v).sort()) {
+      if (v[key] === undefined) continue;
+      out[key] = stableParamValue(v[key], depth + 1, seen);
+    }
+  }
+  seen.delete(v);
+  return out;
+}
+
+function isScalar(v) {
+  return v === null || (typeof v !== 'object' && typeof v !== 'function');
+}
+
+/**
  * Stable, dependency-free serialization of the params that shape a discovery
  * response, so the ETag is stable across request encodings of the same filter.
  * Keys are sorted, arrays are sorted, and undefined/null are dropped.
+ *
+ * Scalars and arrays of scalars serialise exactly as they always have, so
+ * existing validators do not change. A plain-object value (a nested filter
+ * such as `extensions[asset]=USDC`) is serialised as sorted-key JSON instead
+ * of collapsing to `[object Object]`, and an array holding objects or arrays
+ * is sorted by each element's serialised form (#683).
  *
  * @param {Record<string, unknown>} params
  * @returns {string}
@@ -20,7 +82,15 @@ export function canonicalizeDiscoveryParams(params) {
   for (const key of Object.keys(params || {}).sort()) {
     const v = params[key];
     if (v === undefined || v === null) continue;
-    out[key] = Array.isArray(v) ? v.slice().sort() : String(v);
+    if (Array.isArray(v)) {
+      out[key] = v.every(isScalar)
+        ? v.slice().sort()
+        : stableParamValue(v, 0, new WeakSet()).map(item => JSON.stringify(item) ?? 'undefined');
+    } else if (isPlainObject(v)) {
+      out[key] = JSON.stringify(stableParamValue(v, 0, new WeakSet()));
+    } else {
+      out[key] = String(v);
+    }
   }
   return JSON.stringify(out);
 }
@@ -109,6 +179,51 @@ function matchesIfModifiedSince(header, lastModifiedMs) {
 }
 
 /**
+ * Coerces a store's `getLastModified()` value into epoch milliseconds (#680).
+ *
+ * `getLastModified()` belongs to the store, and a store is free to return the
+ * timestamp in whatever shape its backing store persists. The shapes seen in
+ * practice are a `Date` (what the in-memory store returns), epoch
+ * milliseconds, epoch seconds (what many database drivers hand back), and an
+ * ISO-8601 string. Coercing here rather than trusting one shape keeps two
+ * wrong-but-plausible headers off the wire:
+ *
+ *   - a copy of the value through `new Date(...)` would turn a non-date into
+ *     the literal `Invalid Date`, which is not a valid HTTP-date;
+ *   - epoch seconds read as milliseconds date the catalog to 1970, so every
+ *     later `If-Modified-Since` looks newer and no client can ever revalidate.
+ *
+ * A finite number below `1e12` is treated as seconds: epoch seconds are ~1e9
+ * and epoch milliseconds ~1e12, so the boundary is unambiguous for any date
+ * this service can serve. Anything that is not a finite instant returns `null`,
+ * which the caller reads as "no Last-Modified validator" rather than inventing
+ * one.
+ *
+ * @param {unknown} value - whatever `getLastModified()` returned
+ * @returns {number|null} epoch milliseconds, or `null` when undatable
+ */
+function toLastModified(value) {
+  if (value === null || value === undefined) return null;
+
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    return value < 1e12 ? value * 1000 : value;
+  }
+
+  if (typeof value === 'string') {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  return null;
+}
+
+/**
  * Applies discovery caching headers (Cache-Control, ETag, Last-Modified)
  * and determines whether the request's preconditions are satisfied, following
  * the RFC 9110 §13.2.2 precedence rules (#687):
@@ -143,12 +258,10 @@ export function applyDiscoveryCache(req, reply, catalog, discoveryCacheConfig, p
 
   let lastModifiedMs = null;
   if (typeof catalog.getLastModified === 'function') {
-    const lm = catalog.getLastModified();
-    if (lm) {
-      lastModifiedMs = new Date(lm).getTime();
-      if (!Number.isFinite(lastModifiedMs)) lastModifiedMs = null;
-      else reply.header('last-modified', new Date(lastModifiedMs).toUTCString());
-    }
+    lastModifiedMs = toLastModified(catalog.getLastModified());
+  }
+  if (lastModifiedMs !== null) {
+    reply.header('last-modified', new Date(lastModifiedMs).toUTCString());
   }
 
   const headers = req.headers || {};
