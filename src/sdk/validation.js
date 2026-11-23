@@ -15,6 +15,24 @@ export const STELLAR_DECIMALS = 7;
 const DECIMAL_AMOUNT_RE = /^[+-]?\d+(?:\.\d+)?$/;
 
 /**
+ * Longest serviceName the catalog keeps. `@x402/extensions` soft-drops a name
+ * beyond this bound, which leaves the seller believing they registered a name
+ * that was actually discarded. The SDK rejects it at authoring time instead.
+ */
+const MAX_SERVICE_NAME_LENGTH = 32;
+
+/** Whether a value is a parseable absolute HTTP(S) URL. */
+function isHttpUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The one place the amount policy is decided. Returns a list of error strings
  * (empty when the amount is acceptable).
  *
@@ -87,6 +105,33 @@ export function validateDiscoveryDeclaration(decl) {
   } else {
     errors.push(...validateAmount(decl.pricing.amount));
     if (!decl.pricing.asset) errors.push('pricing.asset is required');
+  }
+
+  // Optional discovery metadata. The catalog expects `tags` to be an array of
+  // strings and silently filters bad entries; validating the shape here turns
+  // that silent loss into an actionable error before publication.
+  if (decl.tags !== undefined) {
+    if (!Array.isArray(decl.tags)) {
+      errors.push('tags must be an array of strings');
+    } else {
+      decl.tags.forEach((tag, index) => {
+        if (typeof tag !== 'string' || tag.trim() === '') {
+          errors.push(`tags[${index}] must be a non-empty string`);
+        }
+      });
+    }
+  }
+
+  if (decl.serviceName !== undefined) {
+    if (typeof decl.serviceName !== 'string' || decl.serviceName.trim() === '') {
+      errors.push('serviceName must be a non-empty string');
+    } else if (decl.serviceName.length > MAX_SERVICE_NAME_LENGTH) {
+      errors.push(`serviceName must be at most ${MAX_SERVICE_NAME_LENGTH} characters`);
+    }
+  }
+
+  if (decl.url !== undefined && !isHttpUrl(decl.url)) {
+    errors.push('url must be a valid HTTP or HTTPS URL');
   }
 
   return errors;
