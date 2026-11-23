@@ -8,6 +8,14 @@
 export const STELLAR_DECIMALS = 7;
 
 /**
+ * Longest description the catalog indexes, in UTF-16 code units. The catalog
+ * truncates at this bound; the SDK rejects longer values so a seller is not
+ * surprised by a description that was silently shortened after publication.
+ * Kept in sync with MAX_DESCRIPTION_LENGTH in src/catalog/validation.js.
+ */
+export const MAX_DESCRIPTION_LENGTH = 200;
+
+/**
  * A decimal numeric string, optionally signed. Exponent notation, NaN and
  * Infinity are rejected — BigInt can parse '1e7' as neither and a number typed
  * by a human as '1e7' almost certainly does not mean 10,000,000.
@@ -87,6 +95,15 @@ export function validateDiscoveryDeclaration(decl) {
   } else {
     errors.push(...validateAmount(decl.pricing.amount));
     if (!decl.pricing.asset) errors.push('pricing.asset is required');
+  }
+
+  // The catalog truncates an oversized description rather than rejecting it,
+  // which silently loses the seller's text. Fail at authoring time instead so
+  // they can shorten it deliberately.
+  if (typeof decl.description === 'string' && decl.description.length > MAX_DESCRIPTION_LENGTH) {
+    errors.push(
+      `description must be at most ${MAX_DESCRIPTION_LENGTH} characters (got ${decl.description.length})`,
+    );
   }
 
   return errors;
