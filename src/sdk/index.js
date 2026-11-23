@@ -47,13 +47,28 @@ export function toStroops(amount) {
  */
 export function createStellarDiscoveryResource(params) {
   const errors = validateDiscoveryDeclaration(params);
+
+  // Default only when the network was genuinely omitted. An empty string is
+  // usually an unset environment variable, and silently publishing to testnet
+  // is worse than failing: `||` would treat '' as absent.
+  let network = 'stellar:testnet';
+  if (params && typeof params === 'object') {
+    if (params.network !== undefined && params.network !== null) {
+      if (typeof params.network !== 'string' || params.network === '') {
+        errors.push('network must be a non-empty string when provided');
+      } else {
+        network = params.network;
+      }
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error('Invalid discovery declaration:\n - ' + errors.join('\n - '));
   }
 
   return {
     ...params,
-    network: params.network || 'stellar:testnet',
+    network,
     scheme: params.scheme || 'exact',
     pricing: {
       ...params.pricing,
