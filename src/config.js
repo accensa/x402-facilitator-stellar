@@ -265,7 +265,10 @@ export function resolveConfig(env = process.env) {
         nodeEnv,
         allowedHosts: keyManagerAllowedHosts,
       }),
-      keyManagerPollIntervalMs: Number(env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0),
+      keyManagerPollIntervalMs: nonNegativeInt(env.KEY_MANAGER_POLL_INTERVAL_MS, {
+        name: 'KEY_MANAGER_POLL_INTERVAL_MS',
+        defaultValue: 0,
+      }),
       pactContractId: parsePactContract(env.PACT_CONTRACT_ID, 'PACT_CONTRACT_ID'),
       pactMaxTransactionFeeStroops: parsePactFeeCeiling(
         env.PACT_MAX_TX_FEE_STROOPS,
@@ -455,8 +458,9 @@ export function resolveConfig(env = process.env) {
         env.PACT_MAX_TX_FEE_STROOPS_PUBNET,
         'PACT_MAX_TX_FEE_STROOPS_PUBNET',
       ),
-      keyManagerPollIntervalMs: Number(
-        env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS ?? 0,
+      keyManagerPollIntervalMs: nonNegativeInt(
+        env.KEY_MANAGER_POLL_INTERVAL_MS_PUBNET ?? env.KEY_MANAGER_POLL_INTERVAL_MS,
+        { name: 'KEY_MANAGER_POLL_INTERVAL_MS_PUBNET', defaultValue: 0 },
       ),
     };
   }
