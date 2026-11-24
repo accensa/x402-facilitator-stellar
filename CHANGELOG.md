@@ -13,6 +13,13 @@ pinned.
 
 ## [Unreleased]
 
+### Fixed
+
+- CRDT rate-limit stores retry database synchronization while degraded and recover
+  automatically when connectivity returns. Vault credential refreshes are shared
+  across concurrent callers, and failed refreshes no longer return expired leases
+  (#720, #721, #722).
+
 ### Added
 
 - The `pact` scheme for Pactwright escrow payments (`src/pact-scheme.js`,

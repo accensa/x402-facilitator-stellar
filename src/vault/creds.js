@@ -29,6 +29,7 @@ export function createDatabaseCredentialManager({
   let cached = null;
   let timer = null;
   let stopped = false;
+  let refreshPromise = null;
   /** @type {Set<(creds: object) => void>} */
   const listeners = new Set();
 
@@ -65,6 +66,15 @@ export function createDatabaseCredentialManager({
     return cached;
   }
 
+  function refresh() {
+    if (!refreshPromise) {
+      refreshPromise = fetchOnce().finally(() => {
+        refreshPromise = null;
+      });
+    }
+    return refreshPromise;
+  }
+
   /**
    * Returns the current credentials, refreshing first when they are within the
    * renewal window. Never throws while a cached lease exists.
@@ -76,15 +86,18 @@ export function createDatabaseCredentialManager({
       if (remainingMs > refreshWindowMs(cached)) return cached;
     }
     try {
-      return await fetchOnce();
+      return await refresh();
     } catch (err) {
+      const cachedIsValid = cached && (cached.expiresAtMs === null || cached.expiresAtMs > now());
       const remainingSec = cached
         ? cached.expiresAtMs === null
           ? 'non-expiring'
           : `${Math.max(0, Math.round((cached.expiresAtMs - now()) / 1000))}s`
         : 'none';
-      warn(`[Vault] credential fetch failed (${err.message}); cached lease: ${remainingSec}`);
-      if (cached) return cached;
+      warn(
+        `[Vault] credential fetch failed (${err.message}); cached lease: ${remainingSec}; ${cachedIsValid ? 'using valid cached credentials' : 'no unexpired cached credentials'}`,
+      );
+      if (cachedIsValid) return cached;
       throw err;
     }
   }
