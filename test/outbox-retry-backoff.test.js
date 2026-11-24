@@ -27,11 +27,15 @@ function createMockPool() {
     },
     async query(sql, params = []) {
       queries.push({ sql, params });
-      if (sql.includes('CREATE TABLE') || sql.includes('ALTER TABLE') || sql.includes('CREATE INDEX')) {
+      if (
+        sql.includes('CREATE TABLE') ||
+        sql.includes('ALTER TABLE') ||
+        sql.includes('CREATE INDEX')
+      ) {
         return { rows: [] };
       }
 
-      if (sql.includes('UPDATE outbox_events SET') && sql.includes("next_attempt_at = CASE")) {
+      if (sql.includes('UPDATE outbox_events SET') && sql.includes('next_attempt_at = CASE')) {
         const [id, lastError, maxAttempts, nowIso, baseBackoffMs, maxBackoffMs] = params;
         const row = rows.get(id);
         if (row) {
@@ -44,7 +48,10 @@ function createMockPool() {
             row.next_attempt_at = null;
           } else {
             row.status = 'pending';
-            const delay = Math.min(Number(maxBackoffMs), Number(baseBackoffMs) * Math.pow(2, row.attempts - 1));
+            const delay = Math.min(
+              Number(maxBackoffMs),
+              Number(baseBackoffMs) * Math.pow(2, row.attempts - 1),
+            );
             row.next_attempt_at = new Date(new Date(nowIso).getTime() + delay).toISOString();
           }
         }
@@ -54,16 +61,18 @@ function createMockPool() {
       if (sql.includes('UPDATE outbox_events SET') && sql.includes("status = 'claimed'")) {
         const [limit, leaseMs] = params;
         const now = Date.now();
-        const available = [...rows.values()].filter(r => {
-          if (r.status === 'pending') {
-            if (!r.next_attempt_at) return true;
-            return new Date(r.next_attempt_at).getTime() <= now;
-          }
-          if (r.status === 'claimed' && r.claimed_at) {
-            return now - new Date(r.claimed_at).getTime() > leaseMs;
-          }
-          return false;
-        }).slice(0, limit);
+        const available = [...rows.values()]
+          .filter(r => {
+            if (r.status === 'pending') {
+              if (!r.next_attempt_at) return true;
+              return new Date(r.next_attempt_at).getTime() <= now;
+            }
+            if (r.status === 'claimed' && r.claimed_at) {
+              return now - new Date(r.claimed_at).getTime() > leaseMs;
+            }
+            return false;
+          })
+          .slice(0, limit);
 
         for (const r of available) {
           r.status = 'claimed';
@@ -106,10 +115,7 @@ describe('OutboxStore retry backoff', () => {
     let row = pool.rows.get(id);
     assert.equal(row.attempts, 1);
     assert.equal(row.status, 'pending');
-    assert.equal(
-      row.next_attempt_at,
-      new Date(fixedNow.getTime() + 1000).toISOString(),
-    );
+    assert.equal(row.next_attempt_at, new Date(fixedNow.getTime() + 1000).toISOString());
 
     // Second failure (attempts -> 2): backoff 1000ms * 2^1 = 2000ms
     await store.markFailed(id, 'timeout 2', 10, {
@@ -118,10 +124,7 @@ describe('OutboxStore retry backoff', () => {
     });
     row = pool.rows.get(id);
     assert.equal(row.attempts, 2);
-    assert.equal(
-      row.next_attempt_at,
-      new Date(fixedNow.getTime() + 2000).toISOString(),
-    );
+    assert.equal(row.next_attempt_at, new Date(fixedNow.getTime() + 2000).toISOString());
 
     // Third failure (attempts -> 3): backoff 1000ms * 2^2 = 4000ms
     await store.markFailed(id, 'timeout 3', 10, {
@@ -130,10 +133,7 @@ describe('OutboxStore retry backoff', () => {
     });
     row = pool.rows.get(id);
     assert.equal(row.attempts, 3);
-    assert.equal(
-      row.next_attempt_at,
-      new Date(fixedNow.getTime() + 4000).toISOString(),
-    );
+    assert.equal(row.next_attempt_at, new Date(fixedNow.getTime() + 4000).toISOString());
   });
 
   test('claimBatch defers rows with next_attempt_at in the future', async () => {

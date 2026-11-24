@@ -136,7 +136,12 @@ export class OutboxStore {
    * @param {number} [options.maxBackoffMs=300000] - 5 minute cap
    * @param {() => Date} [options.now]
    */
-  async markFailed(id, error, maxAttempts = 10, { baseBackoffMs = 1000, maxBackoffMs = 300_000, now = () => new Date() } = {}) {
+  async markFailed(
+    id,
+    error,
+    maxAttempts = 10,
+    { baseBackoffMs = 1000, maxBackoffMs = 300_000, now = () => new Date() } = {},
+  ) {
     // attempts is incremented on failure; backoff = base * 2^(newAttempts - 1)
     await this.pool.query(
       `UPDATE outbox_events SET
@@ -150,7 +155,14 @@ export class OutboxStore {
          END,
          updated_at = NOW()
        WHERE id = $1`,
-      [id, String(error ?? '').slice(0, 2000), maxAttempts, now().toISOString(), baseBackoffMs, maxBackoffMs],
+      [
+        id,
+        String(error ?? '').slice(0, 2000),
+        maxAttempts,
+        now().toISOString(),
+        baseBackoffMs,
+        maxBackoffMs,
+      ],
     );
   }
 
