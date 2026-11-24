@@ -143,7 +143,7 @@ describe('OutboxStore retry backoff', () => {
 
     // One ready row, one deferred row in the future
     const readyId = pool.seed({ event_id: 'ready-1', attempts: 0 });
-    const deferredId = pool.seed({
+    const _deferredId = pool.seed({
       event_id: 'deferred-1',
       attempts: 1,
       next_attempt_at: new Date(Date.now() + 60_000).toISOString(),
