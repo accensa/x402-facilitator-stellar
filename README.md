@@ -162,6 +162,7 @@ mechanism, no Friendbot) are in the [Seller Guide](docs/SELLER.md#trustlines) an
 [`examples/mcp-agent`](examples/mcp-agent/README.md)) state their prerequisite
 up front.
 
+
 ### Tests
 
 ```bash
