@@ -105,6 +105,8 @@ export function startOutboxWorker({ intervalMs = 5_000, ...pollOptions }) {
   let timer = null;
   let running = false;
   let stopped = false;
+  let inFlight = false;
+  let currentPromise = null;
 
   /**
    * Runs one cycle. Resolves with the cycle's `{ claimed, published, failed }`
@@ -115,13 +117,20 @@ export function startOutboxWorker({ intervalMs = 5_000, ...pollOptions }) {
    * @returns {Promise<{claimed: number, published: number, failed: number}>}
    */
   const tick = async () => {
-    if (stopped) return { claimed: 0, published: 0, failed: 0 };
-    try {
-      return await pollOutboxOnce(pollOptions);
-    } catch (err) {
-      pollOptions.log?.(`[Outbox] loop error: ${err.message}`);
-      return { claimed: 0, published: 0, failed: 0 };
-    }
+    if (stopped || inFlight) return { claimed: 0, published: 0, failed: 0 };
+    inFlight = true;
+    currentPromise = (async () => {
+      try {
+        return await pollOutboxOnce(pollOptions);
+      } catch (err) {
+        pollOptions.log?.(`[Outbox] loop error: ${err.message}`);
+        return { claimed: 0, published: 0, failed: 0 };
+      } finally {
+        inFlight = false;
+        currentPromise = null;
+      }
+    })();
+    return currentPromise;
   };
 
   return {
@@ -138,6 +147,9 @@ export function startOutboxWorker({ intervalMs = 5_000, ...pollOptions }) {
       running = false;
       if (timer) globalThis.clearInterval(timer);
       timer = null;
+      if (currentPromise) {
+        await currentPromise;
+      }
     },
     /**
      * Runs one cycle immediately — also what tests drive. Resolves with the

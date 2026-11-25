@@ -115,7 +115,16 @@ export class KeyManager {
         const current = this.getCurrent();
         if (
           next.length === current.entries.size &&
-          next.every(({ kid }) => current.entries.has(kid))
+          next.every(({ kid, secret }) => {
+            const entry = current.entries.get(kid);
+            return (
+              entry &&
+              crypto.timingSafeEqual(
+                crypto.createHash('sha256').update(entry.secret).digest(),
+                crypto.createHash('sha256').update(secret).digest(),
+              )
+            );
+          })
         ) {
           return false;
         }

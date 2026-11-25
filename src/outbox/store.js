@@ -31,9 +31,11 @@ export const OUTBOX_TABLE_SQL = `
       last_error TEXT,
       claimed_at TIMESTAMPTZ,
       published_at TIMESTAMPTZ,
+      next_attempt_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
+  ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
   CREATE INDEX IF NOT EXISTS idx_outbox_events_pending
       ON outbox_events(status, created_at)
       WHERE status IN ('pending', 'claimed');
@@ -92,7 +94,7 @@ export class OutboxStore {
          updated_at = NOW()
        WHERE id IN (
          SELECT id FROM outbox_events
-         WHERE status = 'pending'
+         WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
             OR (status = 'claimed' AND claimed_at < NOW() - ($2::int * INTERVAL '1 millisecond'))
          ORDER BY created_at
          LIMIT $1
@@ -124,18 +126,43 @@ export class OutboxStore {
 
   /**
    * Records a failed publish: attempts++, and either back to `pending` (the
-   * worker will retry next cycle) or to `failed` once maxAttempts is hit.
+   * worker will retry next cycle) with exponential backoff or to `failed` once maxAttempts is hit.
+   *
+   * @param {number|string} id
+   * @param {unknown} error
+   * @param {number} [maxAttempts=10]
+   * @param {object} [options]
+   * @param {number} [options.baseBackoffMs=1000] - initial backoff delay
+   * @param {number} [options.maxBackoffMs=300000] - 5 minute cap
+   * @param {() => Date} [options.now]
    */
-  async markFailed(id, error, maxAttempts = 10) {
+  async markFailed(
+    id,
+    error,
+    maxAttempts = 10,
+    { baseBackoffMs = 1000, maxBackoffMs = 300_000, now = () => new Date() } = {},
+  ) {
+    // attempts is incremented on failure; backoff = base * 2^(newAttempts - 1)
     await this.pool.query(
       `UPDATE outbox_events SET
          attempts = attempts + 1,
          last_error = $2,
          status = CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE 'pending' END,
          claimed_at = NULL,
+         next_attempt_at = CASE
+           WHEN attempts + 1 >= $3 THEN NULL
+           ELSE $4::timestamptz + (LEAST($6::bigint, $5::bigint * (1::bigint << LEAST(attempts, 30)::int)) * INTERVAL '1 millisecond')
+         END,
          updated_at = NOW()
        WHERE id = $1`,
-      [id, String(error ?? '').slice(0, 2000), maxAttempts],
+      [
+        id,
+        String(error ?? '').slice(0, 2000),
+        maxAttempts,
+        now().toISOString(),
+        baseBackoffMs,
+        maxBackoffMs,
+      ],
     );
   }
 
@@ -143,7 +170,9 @@ export class OutboxStore {
   async countPending() {
     await this.ready;
     const { rows } = await this.pool.query(
-      `SELECT count(*)::int AS count FROM outbox_events WHERE status IN ('pending', 'claimed')`,
+      `SELECT count(*)::int AS count FROM outbox_events
+       WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+          OR (status = 'claimed')`,
     );
     return rows[0]?.count ?? 0;
   }
