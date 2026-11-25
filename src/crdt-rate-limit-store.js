@@ -139,9 +139,10 @@ export class CrdtRateLimitStore {
    * regardless of write ordering across regions.
    */
   async _sync() {
-    if (this.degraded || !this.pool) return;
+    if (!this.pool) return;
 
     try {
+      let synced = false;
       for (const [bucketId, local] of this.local) {
         // Skip expired buckets — they will be swept.
         if (local.resetAt <= Math.floor(Date.now() / 1000)) continue;
@@ -161,11 +162,15 @@ export class CrdtRateLimitStore {
            RETURNING count`,
           [bucketId, local.count, local.resetAt, this.region],
         );
+        synced = true;
 
         if (rows.length > 0) {
           const mergedCount = Number(rows[0].count);
           this.local.set(bucketId, { count: mergedCount, resetAt: local.resetAt });
         }
+      }
+      if (this.degraded && !synced) {
+        await this.pool.query('SELECT 1 FROM crdt_rate_limit_buckets LIMIT 0');
       }
       this._recover();
     } catch (err) {
